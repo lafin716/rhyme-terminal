@@ -92,3 +92,16 @@ export const bellIcon: IconifyIcon = {
   height: 24,
   body: '<path fill="currentColor" d="M21 19v1H3v-1l2-2v-6c0-3.1 2.03-5.83 5-6.71V4a2 2 0 0 1 2-2a2 2 0 0 1 2 2v.29c2.97.88 5 3.61 5 6.71v6zm-7 2a2 2 0 0 1-2 2a2 2 0 0 1-2-2z"/>',
 };
+
+// Fireworks glyph for the top-bar celebration button: a burst of sparks
+// radiating from a bright center.
+export const fireworksIcon: IconifyIcon = {
+  width: 24,
+  height: 24,
+  body:
+    '<g fill="currentColor"><circle cx="12" cy="12" r="1.9"/>' +
+    '<circle cx="19.5" cy="12" r="1.1"/><circle cx="12" cy="4.5" r="1.1"/>' +
+    '<circle cx="4.5" cy="12" r="1.1"/><circle cx="12" cy="19.5" r="1.1"/>' +
+    '<circle cx="15.7" cy="8.3" r="0.85"/><circle cx="8.3" cy="8.3" r="0.85"/>' +
+    '<circle cx="8.3" cy="15.7" r="0.85"/><circle cx="15.7" cy="15.7" r="0.85"/></g>',
+};

@@ -49,3 +49,9 @@ _Avoid_: Command palette, search, finder, fuzzy find.
 **Prefix key**:
 The tmux-style leader (Ctrl+B) that arms winmux to interpret the next keystroke as an action key.
 _Avoid_: Leader, hotkey, chord.
+
+### Effects
+
+**Fireworks**:
+A momentary, purely decorative celebration animation triggered from a top-bar button: shells rise, burst radially, and rain sparks that fall and fade over the whole window. It is non-interactive (input passes through it) and holds no state — a fun element layered over the Shell, never a status indicator.
+_Avoid_: Confetti (falling paper is a different visual), animation, particles.

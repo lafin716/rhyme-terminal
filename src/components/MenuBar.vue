@@ -6,8 +6,9 @@ import { useKeybindings } from "../composables/useKeybindings";
 import { useShellPanels } from "../composables/useShellPanels";
 import { dispatchAction } from "../composables/useGlobalShortcuts";
 import { useSettings } from "../composables/useSettings";
+import { useFireworks } from "../composables/useFireworks";
 import { formatKeybinding, type ActionId } from "../lib/keybindings";
-import { panelLeftIcon, panelRightIcon } from "../lib/offline-icons";
+import { panelLeftIcon, panelRightIcon, fireworksIcon } from "../lib/offline-icons";
 
 type MenuItem =
   | { kind: "action"; label: string; actionId: ActionId; disabled?: boolean }
@@ -23,6 +24,7 @@ interface MenuDef {
 const { bindingFor, prefixFor } = useKeybindings();
 const { openSettings } = useSettings();
 const { panels, toggleLeft, toggleRight } = useShellPanels();
+const { launch: launchFireworks } = useFireworks();
 
 const openMenu = ref<string | null>(null);
 const rootRef = ref<HTMLDivElement | null>(null);
@@ -187,6 +189,14 @@ onUnmounted(() => {
     </div>
     <div class="spacer" />
     <button
+      class="corner-toggle fireworks-btn"
+      title="Fireworks!"
+      type="button"
+      @click="launchFireworks"
+    >
+      <Icon class="ico" :icon="fireworksIcon" />
+    </button>
+    <button
       class="corner-toggle"
       :class="{ active: panels.right.open }"
       :title="rightToggleTitle"
@@ -240,6 +250,8 @@ onUnmounted(() => {
   color: #d4d4d4;
 }
 .corner-toggle.active { color: #4ec9b0; }
+/* Momentary press feedback for the (stateless) fireworks trigger. */
+.fireworks-btn:active { color: #4ec9b0; }
 .corner-toggle .ico { font-size: 15px; }
 .dropdown {
   position: absolute;

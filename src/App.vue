@@ -10,6 +10,7 @@ import SettingsModal from "./components/SettingsModal.vue";
 import ConfirmModal from "./components/ConfirmModal.vue";
 import PalettePopover from "./components/PalettePopover.vue";
 import QuickOpen from "./components/QuickOpen.vue";
+import FireworksOverlay from "./components/FireworksOverlay.vue";
 import { useSessions, nextDaemonName, displayName } from "./composables/useSessions";
 import { useWorkspaces, loadFromStorage, workspaceDefaultCwd } from "./composables/useWorkspaces";
 import { useFocus } from "./composables/useFocus";
@@ -414,6 +415,7 @@ onMounted(bootstrap);
     <SettingsModal v-if="settingsOpen" />
     <ConfirmModal />
     <PalettePopover />
+    <FireworksOverlay />
   </div>
 </template>
 
