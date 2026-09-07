@@ -7,6 +7,8 @@ import ExplorerPanel from "./components/ExplorerPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
 import SplitContainer from "./components/SplitContainer.vue";
 import MenuBar from "./components/MenuBar.vue";
+import WindowControls from "./components/WindowControls.vue";
+import { TITLEBAR_HEIGHT } from "./lib/titlebar-layout";
 import SettingsModal from "./components/SettingsModal.vue";
 import ConfirmModal from "./components/ConfirmModal.vue";
 import PalettePopover from "./components/PalettePopover.vue";
@@ -456,8 +458,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app">
-    <MenuBar />
+  <div class="app" :style="{ '--titlebar-height': `${TITLEBAR_HEIGHT}px` }">
+    <MenuBar class="shell-menu" :style="{ width: panels.left.open ? `${panels.left.width}px` : '102px' }" />
+    <WindowControls />
     <div class="main">
       <div v-if="panels.left.open" class="region region-left" :style="leftRegionStyle">
         <SideBar />
@@ -532,7 +535,9 @@ html, body, #app {
   flex-shrink: 0;
   min-height: 0;
   overflow: hidden;
+  padding-top: var(--titlebar-height);
 }
+.shell-menu { position: fixed; top: 0; left: 0; }
 .region-splitter {
   flex: 0 0 4px;
   background: #111;

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useTitlebarInsets } from "../composables/useTitlebarInsets";
 import {
   ref,
   computed,
@@ -40,6 +41,8 @@ import {
 } from "../composables/useLayout";
 
 const props = defineProps<{ leaf: LeafNode }>();
+const titlebarRow = ref<HTMLElement | null>(null);
+const titlebarStyle = useTitlebarInsets(titlebarRow);
 const FileViewer = defineAsyncComponent(() => import("./FileViewer.vue"));
 
 const {
@@ -475,7 +478,8 @@ onUnmounted(() => {
 
 <template>
   <div class="pane" :class="{ focused: isFocused }" @mousedown="onPaneClick">
-    <div class="tab-bar" @dragover="onTabBarDragOver">
+    <div ref="titlebarRow" class="tab-row" data-tauri-drag-region>
+    <div class="tab-bar" :style="titlebarStyle" @dragover="onTabBarDragOver">
       <template v-for="(id, i) in leaf.tabs" :key="id">
         <div
           class="drop-gap"
@@ -544,7 +548,8 @@ onUnmounted(() => {
           ▾
         </button>
       </div>
-      <div class="tab-bar-spacer" />
+      <div class="tab-bar-spacer" data-tauri-drag-region />
+    </div>
     </div>
 
     <Teleport to="body">
@@ -687,16 +692,20 @@ onUnmounted(() => {
 .pane.focused .tab-bar {
   border-bottom-color: #4ec9b0;
 }
+.tab-row { height: var(--titlebar-height); padding-top: 6px; flex-shrink: 0; min-width: 0; overflow: hidden; background: #252525; }
 .tab-bar {
   display: flex;
   align-items: stretch;
-  height: 28px;
+  height: 100%;
   background: #252525;
   border-bottom: 1px solid #111;
   user-select: none;
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
   flex-shrink: 0;
 }
+.tab-bar::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .tab {
   display: flex;
   align-items: center;
@@ -797,7 +806,7 @@ onUnmounted(() => {
   outline: 1px solid #4ec9b0;
   outline-offset: -1px;
 }
-.tab-bar-spacer { flex: 1; }
+.tab-bar-spacer { flex: 1; min-width: 24px; }
 input {
   background: #1e1e1e;
   color: #e6e6e6;

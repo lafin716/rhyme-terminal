@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import appIcon from "../../src-tauri/icons/32x32.png";
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Icon } from "@iconify/vue";
@@ -13,7 +14,6 @@ import {
   chevronRightIcon,
   moreHorizontalIcon,
   panelLeftIcon,
-  panelRightIcon,
 } from "../lib/offline-icons";
 
 type MenuItem =
@@ -29,7 +29,7 @@ interface MenuDef {
 
 const { bindingFor, prefixFor } = useKeybindings();
 const { openSettings } = useSettings();
-const { panels, toggleLeft, toggleRight } = useShellPanels();
+const { panels, toggleLeft } = useShellPanels();
 
 const isOverflowMenuOpen = ref(false);
 const activeGroupId = ref<string | null>(null);
@@ -37,9 +37,6 @@ const rootRef = ref<HTMLDivElement | null>(null);
 
 const leftToggleTitle = computed(
   () => `Toggle Left Panel  (${formatKeybinding(bindingFor("view.toggleLeftPanel"))})`,
-);
-const rightToggleTitle = computed(
-  () => `Toggle Right Panel  (${formatKeybinding(bindingFor("view.toggleRightPanel"))})`,
 );
 
 async function quitApp() {
@@ -165,7 +162,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="rootRef" class="menubar">
+  <div ref="rootRef" class="menubar" data-tauri-drag-region>
+    <div class="app-icon" data-tauri-drag-region><img :src="appIcon" alt="winmux" data-tauri-drag-region draggable="false" /></div>
     <div class="overflow-menu">
       <button
         class="corner-toggle"
@@ -219,24 +217,17 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+    <div class="spacer" data-tauri-drag-region />
     <button
       class="corner-toggle"
       :class="{ active: panels.left.open }"
       :title="leftToggleTitle"
+      :aria-label="leftToggleTitle"
+      :aria-expanded="panels.left.open"
       type="button"
       @click="toggleLeft"
     >
       <Icon class="ico" :icon="panelLeftIcon" />
-    </button>
-    <div class="spacer" />
-    <button
-      class="corner-toggle"
-      :class="{ active: panels.right.open }"
-      :title="rightToggleTitle"
-      type="button"
-      @click="toggleRight"
-    >
-      <Icon class="ico" :icon="panelRightIcon" />
     </button>
   </div>
 </template>
@@ -245,15 +236,17 @@ onUnmounted(() => {
 .menubar {
   display: flex;
   align-items: stretch;
-  height: 28px;
+  height: var(--titlebar-height);
   background: #252525;
   border-bottom: 1px solid #111;
   user-select: none;
   font-size: 12px;
   flex-shrink: 0;
-  position: relative;
   z-index: 50;
 }
+.app-icon { width: 34px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.app-icon img { width: 24px; height: 24px; }
+.corner-toggle:focus-visible { outline: 1px solid #4ec9b0; outline-offset: -2px; }
 .overflow-menu {
   position: relative;
   display: flex;
