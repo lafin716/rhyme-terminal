@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { computed, onBeforeUnmount, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import FlowPanel from "./components/FlowPanel.vue";
 import SideBar from "./components/SideBar.vue";
 import ExplorerPanel from "./components/ExplorerPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
@@ -78,6 +79,7 @@ const { open: openQuickOpen } = useQuickOpen();
 const { panels, toggleLeft, toggleRight, resize, commit } = useShellPanels();
 const { prefs } = usePrefs();
 const { profiles } = useAccountProfiles();
+const flowOpen = ref(false);
 useGlobalShortcuts();
 
 let unlistenSessionAgent: UnlistenFn | null = null;
@@ -472,7 +474,14 @@ onBeforeUnmount(() => {
         @mousedown="startRegionResize('left', $event)"
       />
       <div class="content">
-        <SplitContainer v-if="activeWorkspace" :key="activeWorkspace.id" :node="activeWorkspace.layout" />
+        <nav class="work-mode" aria-label="작업 모드">
+          <button :aria-pressed="!flowOpen" @click="flowOpen = false">Terminal</button>
+          <button :aria-pressed="flowOpen" @click="flowOpen = true">Rhyme Flow</button>
+        </nav>
+        <div v-show="!flowOpen" class="terminal-surface">
+          <SplitContainer v-if="activeWorkspace" :key="activeWorkspace.id" :node="activeWorkspace.layout" />
+        </div>
+        <FlowPanel v-if="activeWorkspace" v-show="flowOpen" :active="flowOpen" :project="workspaceDefaultCwd(activeWorkspace) || ''" :project-id="activeWorkspace.id" />
       </div>
       <div
         v-if="panels.right.open"
@@ -520,6 +529,11 @@ html, body, #app {
 </style>
 
 <style scoped>
+.work-mode { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid #333; flex-shrink: 0; }
+.work-mode button { background: transparent; color: #aaa; border: 0; padding: 6px 12px; cursor: pointer; }
+.work-mode button[aria-pressed="true"] { background: #333; color: #fff; border-radius: 4px; }
+.terminal-surface { flex: 1; min-height: 0; display: flex; }
+.content :deep(.flow-panel) { flex: 1; height: auto; }
 .app {
   display: flex;
   flex-direction: column;
@@ -548,6 +562,9 @@ html, body, #app {
   background: #4ec9b0;
 }
 .content {
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--titlebar-height);
   flex: 1;
   min-width: 0;
   min-height: 0;

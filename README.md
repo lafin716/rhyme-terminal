@@ -1,5 +1,7 @@
 # winmux
 
+Rhyme Flow: [로컬 자동화 사용법과 검증 안내](docs/rhyme-flow.md)
+
 Windows에서 여러 터미널 세션을 한 창 안에 나눠 쓰기 위한 터미널 멀티플렉서입니다.  
 Tauri v2 + Vue 3 + xterm.js로 만들어졌고, 백그라운드 daemon(`winmuxd`)이 PTY 세션을 관리합니다.
 
