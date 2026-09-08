@@ -1,4 +1,5 @@
 import { reactive } from "vue";
+import { DEFAULT_LOCALE, normalizeLocale } from "../lib/i18n";
 import {
   loadPrefs,
   savePrefs,
@@ -16,6 +17,8 @@ import {
 } from "../lib/terminal-config";
 
 const prefs = reactive<Prefs>({
+  language: DEFAULT_LOCALE,
+  showAccountProfile: true,
   skipKillSessionConfirm: false,
   defaultTerminal: defaultTerminalConfig(),
   paletteUiMode: "context",
@@ -35,6 +38,8 @@ export function loadPrefsFromStorage(): void {
   const panels = panelsFromStored(stored);
   Object.assign(prefs, {
     ...stored,
+    language: normalizeLocale(stored.language),
+    showAccountProfile: typeof stored.showAccountProfile === "boolean" ? stored.showAccountProfile : true,
     defaultTerminal: normalizeTerminalConfig(stored.defaultTerminal),
     paletteUiMode,
     panels,

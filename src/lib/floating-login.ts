@@ -33,7 +33,7 @@ export async function openOAuthLoginWindow(profile: AccountProfile): Promise<voi
 
   const win = new WebviewWindow(OAUTH_LOGIN_WINDOW_LABEL, {
     url: `/?${params.toString()}`,
-    title: `${profile.label} — winmux login`,
+    title: `${profile.label} — rhyme-terminal login`,
     width: 760,
     height: 480,
     resizable: true,

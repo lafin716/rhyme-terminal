@@ -2,6 +2,7 @@ import type { LayoutNode, TerminalTabSnapshot, WorkspaceStore } from "./layout-t
 import type { Keybinding } from "./keybindings";
 import type { TerminalConfig } from "./terminal-config";
 import type { ShellPanelsState } from "./shell-panels";
+import type { Locale } from "./i18n";
 
 const STORAGE_KEY = "winmux:workspaces:v1";
 const KEYBINDINGS_KEY = "winmux:keybindings:v1";
@@ -22,6 +23,8 @@ interface PersistedKeybindings {
 export type PaletteUiMode = "context" | "radial";
 
 export interface Prefs {
+  language: Locale;
+  showAccountProfile: boolean;
   skipKillSessionConfirm: boolean;
   defaultTerminal: TerminalConfig;
   paletteUiMode: PaletteUiMode;
@@ -34,6 +37,8 @@ export interface Prefs {
    * `default-profile.ts`.
    */
   defaultProfileId: Record<CliAgentKind, string | null>;
+  toolbarProfileId?: Partial<Record<CliAgentKind, string | null>>;
+  systemAccountEnv?: Partial<Record<CliAgentKind, Record<string, string>>>;
 }
 
 /**
@@ -101,6 +106,7 @@ function terminalSnapshotsForLayout(
   for (const [id, snapshot] of Object.entries(snapshots)) {
     if (!ids.has(id)) continue;
     out[id] = {
+      accountProfile: snapshot.accountProfile,
       name: snapshot.name,
       cwd: snapshot.cwd ?? null,
       terminal: {
@@ -226,7 +232,7 @@ export type CliAgentKind = "claude" | "codex";
  * `useAccountProfiles.ts`. Optional so profiles saved before this field
  * existed are treated as `"oauth"`.
  */
-export type AccountAuthMethod = "oauth" | "setup-token";
+export type AccountAuthMethod = "oauth" | "setup-token" | "environment";
 
 /**
  * One saved login for a CLI agent: `configDir` is an isolated directory
@@ -241,6 +247,7 @@ export interface AccountProfile {
   configDir: string;
   createdAt: number;
   authMethod?: AccountAuthMethod;
+  env?: Record<string, string>;
 }
 
 interface PersistedAccounts {

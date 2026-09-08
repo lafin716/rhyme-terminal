@@ -1,11 +1,11 @@
 <script setup lang="ts">
+import { t } from "./composables/useI18n";
 import { onMounted, ref } from "vue";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Terminal from "./components/Terminal.vue";
 import { useSessions } from "./composables/useSessions";
-import { loadPrefsFromStorage } from "./composables/usePrefs";
 import { envForProfile, launchCommandForProfile } from "./composables/useAccountProfiles";
-import type { AccountProfile, CliAgentKind } from "./lib/persistence";
+import { loadAccountProfiles, type AccountProfile, type CliAgentKind } from "./lib/persistence";
 import { api } from "./lib/tauri";
 
 // This window is only ever opened by `openOAuthLoginWindow` (see
@@ -27,15 +27,15 @@ const sessionId = ref<string | null>(null);
 const error = ref<string | null>(null);
 
 onMounted(async () => {
-  loadPrefsFromStorage();
+
 
   const info = await create({
-    env: envForProfile(profile),
+    env: envForProfile(loadAccountProfiles()?.find(p => p.id === profile.id && p.agent === profile.agent) ?? profile),
     launchCommand: launchCommandForProfile(profile),
     showError: false,
   });
   if (!info) {
-    error.value = "Could not start a terminal for this profile.";
+    error.value = t("Could not start a terminal for this profile.");
     return;
   }
   sessionId.value = info.id;
@@ -53,9 +53,7 @@ onMounted(async () => {
 
 <template>
   <div class="login-window">
-    <div class="hint">
-      Log in with <b>{{ profile.label }}</b>. Close this window once the login completes.
-    </div>
+    <div class="hint">{{ t("Log in with") }} <b>{{ profile.label }}</b>{{ t(". Close this window once the login completes.") }}</div>
     <div class="term-host">
       <Terminal v-if="sessionId" :session-id="sessionId" :active="true" />
     </div>

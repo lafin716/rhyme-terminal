@@ -1,17 +1,20 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { ref, computed } from "vue";
 import { Icon } from "@iconify/vue";
+import SessionProfileTag from "./SessionProfileTag.vue";
 import { useWorkspaces, workspaceDefaultCwd } from "../composables/useWorkspaces";
 import { useSessions } from "../composables/useSessions";
 import { useResources } from "../composables/useResources";
 import { useFocus } from "../composables/useFocus";
+import { useSettings } from "../composables/useSettings";
 import {
   collectAllSessionIds,
   addTabToLeaf,
   findFirstLeaf,
   activateSessionTab,
 } from "../composables/useLayout";
-import { buildNavigatorTree } from "../lib/navigator";
+import { buildNavigatorTree, reorderSessionIds } from "../lib/navigator";
 import {
   bellIcon,
   folderIcon,
@@ -36,6 +39,7 @@ const {
   kill,
 } = useSessions();
 const { setFocusedLeaf } = useFocus();
+const { openSettings } = useSettings();
 const resources = useResources();
 
 // Grouped Workspace -> Session tree the Navigator renders. Derivation and its
@@ -57,6 +61,42 @@ const editValue = ref("");
 const menuFor = ref<string | null>(null);
 const menuPos = ref({ x: 0, y: 0 });
 
+const draggedSession = ref<{ workspaceId: string; sessionId: string } | null>(null);
+const sessionDrop = ref<{ workspaceId: string; sessionId: string; after: boolean } | null>(null);
+function endSessionDrag() {
+  draggedSession.value = null;
+  sessionDrop.value = null;
+}
+function startSessionDrag(ev: DragEvent, workspaceId: string, sessionId: string) {
+  if (!ev.dataTransfer) return;
+  ev.dataTransfer.effectAllowed = "move";
+  ev.dataTransfer.setData("text/plain", sessionId);
+  draggedSession.value = { workspaceId, sessionId };
+}
+function overSession(ev: DragEvent, workspaceId: string, sessionId: string) {
+  if (draggedSession.value?.workspaceId !== workspaceId) return;
+  ev.preventDefault();
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+  sessionDrop.value = { workspaceId, sessionId, after: ev.clientY >= rect.top + rect.height / 2 };
+}
+function dropSession(ev: DragEvent, workspaceId: string, sessionId: string) {
+  overSession(ev, workspaceId, sessionId);
+  const source = draggedSession.value;
+  const target = sessionDrop.value;
+  const ws = state.workspaces.find(w => w.id === workspaceId);
+  const group = tree.value.find(w => w.id === workspaceId);
+  if (source?.workspaceId === workspaceId && target && ws && group) {
+    ev.preventDefault();
+    ws.sessionOrder = reorderSessionIds(group.sessions.map(s => s.id), source.sessionId, sessionId, target.after);
+  }
+  endSessionDrag();
+}
+function sessionDropClass(workspaceId: string, sessionId: string) {
+  const target = sessionDrop.value;
+  if (!target || target.workspaceId !== workspaceId || target.sessionId !== sessionId) return "";
+  return target.after ? "insert-after" : "insert-before";
+}
 function activate(id: string) {
   setActiveWorkspace(id);
   closeMenu();
@@ -119,7 +159,7 @@ async function removeWorkspace(id: string) {
   const sessionIds = collectAllSessionIds(ws.layout);
   if (sessionIds.length > 0) {
     const choice = confirm(
-      `Workspace "${ws.name}" has ${sessionIds.length} session(s).\n\nOK: move them to the previous workspace.\nCancel: kill them.`,
+      t('Workspace "{name}" has {count} session(s). OK: move them to the previous workspace. Cancel: kill them.', { name: ws.name, count: sessionIds.length }),
     );
     if (choice) {
       const idx = state.workspaces.findIndex((w) => w.id === id);
@@ -154,6 +194,9 @@ const canDelete = computed(() => state.workspaces.length > 1);
 
 <template>
   <aside class="sidebar" @click="closeMenu">
+    <button class="add" :title="t('Add project')" :aria-label="t('Add project')" @click.stop="addWorkspace">
+      <Icon class="ico" :icon="plusIcon" />
+    </button>
     <div class="ws-list">
       <div v-for="ws in tree" :key="ws.id" class="ws-group">
         <div
@@ -180,7 +223,7 @@ const canDelete = computed(() => state.workspaces.length > 1);
             <span class="ws-name">{{ ws.name }}</span>
             <button
               class="add-terminal"
-              :title="`${ws.name}에 터미널 추가`"
+              :title="t('Add terminal to {name}', { name: ws.name })"
               @click.stop="addTerminal(ws.id)"
             >
               <Icon :icon="plusIcon" />
@@ -191,56 +234,72 @@ const canDelete = computed(() => state.workspaces.length > 1);
           <div
             v-for="s in ws.sessions"
             :key="s.id"
-            :class="['session', { focused: s.isFocusedSession }]"
+            :class="['session', sessionDropClass(ws.id, s.id), { focused: s.isFocusedSession }]"
             :title="s.displayName"
+            draggable="true"
+            @dragstart="startSessionDrag($event, ws.id, s.id)"
+            @dragend="endSessionDrag"
+            @dragover.stop="overSession($event, ws.id, s.id)"
+            @dragleave="sessionDrop = null"
+            @drop.stop="dropSession($event, ws.id, s.id)"
             @click.stop="focusSession(ws.id, s.id)"
           >
             <span
               :class="['agent-status', sessionIndicatorClass(s.agentStatus)]"
-              :title="s.agentStatus ?? 'ready'"
+              :title="t(s.agentStatus ?? 'ready')"
             />
             <Icon
               :class="['s-ico', `agent-${s.agent}`]"
               :icon="sessionAgentIcon(s.agent)"
             />
+            <SessionProfileTag :session-id="s.id" />
             <span class="s-name">{{ s.displayName }}</span>
             <Icon
               v-if="s.hasBell"
               class="s-badge bell"
               :icon="bellIcon"
-              title="Rang the bell"
+              :title="t('Rang the bell')"
             />
             <span
               v-else-if="s.hasActivity"
               class="s-badge dot"
-              title="New output"
+              :title="t('New output')"
             />
           </div>
         </div>
       </div>
     </div>
-    <button class="add" title="New workspace" @click.stop="addWorkspace">
-      <Icon class="ico" :icon="plusIcon" />
-    </button>
+    <div class="sidebar-footer">
+      <div class="footer-left">
+        <button class="settings-button" :title="t('Settings')" @click="openSettings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 1 3h4l1-3 3-1 2-3-2-2 1-3-3-2-1-3Z" />
+            <circle cx="10.5" cy="11.5" r="3" />
+          </svg>
+          <span>{{ t('Settings') }}</span>
+        </button>
+      </div>
+      <div class="footer-right" />
+    </div>
     <div
       v-if="menuFor"
       class="menu"
       :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
       @click.stop
     >
-      <div class="menu-item" @click="startRename(menuFor)">Rename</div>
+      <div class="menu-item" @click="startRename(menuFor)">{{ t("Rename") }}</div>
       <div
         class="menu-item"
         :class="{ disabled: !canDelete }"
         @click="canDelete && removeWorkspace(menuFor)"
-      >
-        Delete
-      </div>
+      >{{ t("Delete") }}</div>
     </div>
   </aside>
 </template>
 
 <style scoped>
+.session.insert-before { box-shadow: inset 0 2px #4ec9b0; }
+.session.insert-after { box-shadow: inset 0 -2px #4ec9b0; }
 .sidebar {
   position: relative;
   width: 100%;
@@ -264,6 +323,43 @@ const canDelete = computed(() => state.workspaces.length > 1);
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  min-height: 40px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+}
+.footer-left,
+.footer-right {
+  display: flex;
+  align-items: center;
+}
+.settings-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #b8b8b8;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-button:hover {
+  background: #333;
+  color: #e6e6e6;
+}
+.settings-button:focus-visible,
+.add:focus-visible {
+  outline: 1px solid #4ec9b0;
+  outline-offset: -1px;
 }
 .ws-group {
   display: flex;

@@ -50,6 +50,7 @@ function backfillWorkspace(ws: Workspace) {
       cwd: typeof snapshot.cwd === "string" && snapshot.cwd.trim()
         ? snapshot.cwd.trim()
         : null,
+      accountProfile: snapshot.accountProfile,
       terminal: normalizeTerminalConfig(snapshot.terminal),
     };
   }
@@ -173,6 +174,7 @@ export function useWorkspaces() {
     ws.terminalSnapshots[sessionId] = {
       name: snapshot.name.trim() || "session",
       cwd: snapshot.cwd?.trim() || null,
+      accountProfile: snapshot.accountProfile,
       terminal: cloneTerminalConfig(snapshot.terminal),
     };
   }

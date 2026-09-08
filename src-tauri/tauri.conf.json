@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "winmux",
+  "productName": "rhyme-terminal",
   "version": "0.1.0",
   "identifier": "com.user.winmux",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "winmux",
+        "title": "rhyme-terminal",
         "width": 1200,
         "height": 800,
         "resizable": true,

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Icon, type IconifyIcon } from "@iconify/vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -22,10 +23,10 @@ interface PaletteAction {
 }
 
 const allItems = computed<PaletteAction[]>(() => [
-  { id: "__open_folder", label: "Open Folder", icon: folderOpenIcon, builtin: true },
+  { id: "__open_folder", label: t("Open Folder"), icon: folderOpenIcon, builtin: true },
   ...items.map((item) => ({
     id: item.id,
-    label: item.label || "(unnamed)",
+    label: item.label || t("(unnamed)"),
     icon: terminalIcon,
     builtin: false,
   })),
@@ -203,7 +204,7 @@ onBeforeUnmount(() => {
     class="context-menu"
     :style="{ left: menuPosition.left + 'px', top: menuPosition.top + 'px' }"
     role="menu"
-    aria-label="Terminal palette"
+    :aria-label="t('Terminal palette')"
   >
     <template v-for="(item, index) in allItems" :key="item.id">
       <div v-if="index === 1" class="context-separator" role="separator" />

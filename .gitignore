@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-mobile
 dist-ssr
 *.local
 
@@ -25,3 +26,4 @@ dist-ssr
 
 target-agent-detection/
 target-agent-state-events/
+target-mobile/

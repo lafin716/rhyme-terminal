@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { useTitlebarInsets } from "../composables/useTitlebarInsets";
 import {
   ref,
@@ -9,6 +10,9 @@ import {
   onUnmounted,
 } from "vue";
 import { Icon } from "@iconify/vue";
+import SessionProfileTag from "./SessionProfileTag.vue";
+import { CLI_AGENTS, profilesForAgent, resolveProfileEnv, useAccountProfiles, type CliAgentKind, type AccountProfile } from "../composables/useAccountProfiles";
+import { resolveDefaultProfile } from "../lib/default-profile";
 import type { LeafNode } from "../lib/layout-types";
 import TerminalView from "./Terminal.vue";
 import BrowserView from "./BrowserView.vue";
@@ -59,10 +63,49 @@ const drag = useDragState();
 const { confirm } = useConfirm();
 const { prefs } = usePrefs();
 
+const tabInsertIndex = ref<number | null>(null);
 const editingId = ref<string | null>(null);
 const editValue = ref("");
 const catcherRef = ref<HTMLDivElement | null>(null);
 const terminalMenuOpen = ref(false);
+const profileMenuAgent = ref<CliAgentKind | null>(null);
+const profileMenuRef = ref<HTMLDivElement | null>(null);
+const profileMenuPosition = ref({ left: 0, top: 0 });
+let profileMenuTrigger: HTMLElement | null = null;
+
+async function openProfileMenu(agent: CliAgentKind, event: Event, focus = false) {
+  profileMenuAgent.value = agent;
+  profileMenuTrigger = event.currentTarget as HTMLElement;
+  const rect = profileMenuTrigger.getBoundingClientRect();
+  await nextTick();
+  const menu = profileMenuRef.value;
+  if (!menu) return;
+  const width = menu.offsetWidth;
+  profileMenuPosition.value = {
+    left: Math.max(8, rect.right + width + 8 <= window.innerWidth ? rect.right : rect.left - width),
+    top: Math.max(8, Math.min(rect.top, window.innerHeight - menu.offsetHeight - 8)),
+  };
+  if (focus) menu.querySelector<HTMLButtonElement>('button')?.focus();
+}
+
+function closeProfileMenu() {
+  profileMenuAgent.value = null;
+  profileMenuTrigger?.focus();
+}
+
+async function createWithAgent(agent: CliAgentKind, profile?: AccountProfile | null) {
+  const selected = profile === undefined
+    ? resolveDefaultProfile(agent, useAccountProfiles().profiles, prefs.defaultProfileId)
+    : profile;
+  closeTerminalMenu();
+  setFocusedLeaf(props.leaf.id);
+  try {
+    const env = selected ? await resolveProfileEnv(selected) : undefined;
+    await create({ env, launchCommand: agent });
+  } catch (error) {
+    alert(t("Failed to create terminal: {message}", { message: String(error) }));
+  }
+}
 const terminalMenuButtonRef = ref<HTMLButtonElement | null>(null);
 const terminalMenuRef = ref<HTMLDivElement | null>(null);
 const terminalMenuPosition = ref({ left: 0, top: 0 });
@@ -94,8 +137,8 @@ function sameTerminalConfig(a: TerminalConfig, b: TerminalConfig): boolean {
 }
 
 function terminalLabel(terminal: TerminalConfig): string {
-  return TERMINAL_PRESETS.find((preset) => preset.id === terminal.preset)?.label
-    ?? "Custom terminal";
+  return t(TERMINAL_PRESETS.find((preset) => preset.id === terminal.preset)?.label
+    ?? "Custom terminal");
 }
 
 function terminalGlyph(terminal: TerminalConfig): string {
@@ -188,9 +231,9 @@ async function closeTabs(ids: string[]) {
   if (terminalIds.length > 0) {
     const ok = await confirm({
       message: terminalIds.length === 1
-        ? `Kill session "${sessionName(terminalIds[0])}"?`
-        : `Kill ${terminalIds.length} terminal sessions?`,
-      confirmLabel: "Kill",
+        ? t('Kill session "{name}"?', { name: sessionName(terminalIds[0]) })
+        : t("Kill {count} terminal sessions?", { count: terminalIds.length }),
+      confirmLabel: t("Kill"),
       rememberKey: "skipKillSessionConfirm",
     });
     if (!ok) return;
@@ -282,6 +325,7 @@ function onTabDragStart(ev: DragEvent, sessionId: string) {
 }
 
 function onTabDragEnd() {
+  tabInsertIndex.value = null;
   drag.reset();
 }
 
@@ -323,7 +367,7 @@ function onCatcherDrop(ev: DragEvent) {
       // (has other tabs); otherwise it collapses away.
       const willGainLeaf = sourceSurvivesAfterMove(ws.layout, sessionId);
       if (willGainLeaf && leafCount(ws.layout) >= MAX_PANES) {
-        alert(`최대 ${MAX_PANES}개 pane까지 분할할 수 있습니다.`);
+        alert(t("You can split into at most {count} panes.", { count: MAX_PANES }));
         drag.reset();
         return;
       }
@@ -364,10 +408,21 @@ function findLeafIdOfSession(ws: any, sessionId: string): string | null {
 }
 
 // Tab-bar reorder: dragover on a tab placeholder
+function onTabBarDragLeave(ev: DragEvent) {
+  if (ev.relatedTarget instanceof Node && (ev.currentTarget as HTMLElement).contains(ev.relatedTarget)) return;
+  tabInsertIndex.value = null;
+}
 function onTabBarDragOver(ev: DragEvent) {
   if (!drag.state.active) return;
   ev.preventDefault();
   if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+  drag.setHover(null, null);
+  const tabs = Array.from((ev.currentTarget as HTMLElement).querySelectorAll<HTMLElement>(".tab"));
+  const index = tabs.findIndex(tab => {
+    const rect = tab.getBoundingClientRect();
+    return ev.clientX < rect.left + rect.width / 2;
+  });
+  tabInsertIndex.value = index < 0 ? props.leaf.tabs.length : index;
 }
 
 function onTabDropAtIndex(ev: DragEvent, atIndex: number) {
@@ -398,6 +453,7 @@ async function toggleTerminalMenu(ev: MouseEvent) {
   ev.stopPropagation();
   closeTabContextMenu();
   setFocusedLeaf(props.leaf.id);
+  profileMenuAgent.value = null;
   terminalMenuOpen.value = !terminalMenuOpen.value;
   if (!terminalMenuOpen.value) return;
   await nextTick();
@@ -423,6 +479,7 @@ function positionTerminalMenu() {
 }
 
 function closeTerminalMenu() {
+  profileMenuAgent.value = null;
   terminalMenuOpen.value = false;
 }
 
@@ -442,7 +499,8 @@ function onDocumentPointerDown(ev: PointerEvent) {
   }
   if (!terminalMenuOpen.value) return;
   if (target && (
-    terminalMenuRef.value?.contains(target)
+    profileMenuRef.value?.contains(target)
+    || terminalMenuRef.value?.contains(target)
     || terminalMenuButtonRef.value?.contains(target)
   )) return;
   closeTerminalMenu();
@@ -451,6 +509,10 @@ function onDocumentPointerDown(ev: PointerEvent) {
 function onWindowKeyDown(ev: KeyboardEvent) {
   if (ev.key === "Escape" && (terminalMenuOpen.value || tabMenuFor.value)) {
     ev.stopPropagation();
+    if (profileMenuAgent.value) {
+      closeProfileMenu();
+      return;
+    }
     closeTerminalMenu();
     closeTabContextMenu();
   }
@@ -479,16 +541,15 @@ onUnmounted(() => {
 <template>
   <div class="pane" :class="{ focused: isFocused }" @mousedown="onPaneClick">
     <div ref="titlebarRow" class="tab-row" data-tauri-drag-region>
-    <div class="tab-bar" :style="titlebarStyle" @dragover="onTabBarDragOver">
+    <div class="tab-bar" :style="titlebarStyle" @dragover="onTabBarDragOver" @dragleave="onTabBarDragLeave" @drop="onTabDropAtIndex($event, tabInsertIndex ?? leaf.tabs.length)">
       <template v-for="(id, i) in leaf.tabs" :key="id">
         <div
           class="drop-gap"
-          @dragover.prevent
-          @drop="onTabDropAtIndex($event, i)"
+          :class="{ 'insert-active': drag.state.active && tabInsertIndex === i }"
         />
         <div
           :class="['tab', { active: id === leaf.activeTabId }]"
-          draggable="true"
+          :draggable="editingId !== id"
           @click="selectTab(id)"
           @dblclick="startRename(id)"
           @mousedown="onTabMouseDown"
@@ -519,11 +580,12 @@ onUnmounted(() => {
               :icon="terminalTabIcon(id)"
             />
             <span v-else class="kind-icon">{{ tabIcon(id) }}</span>
+            <SessionProfileTag v-if="tabKind(id) === 'terminal'" :session-id="id" />
             <span class="name">{{ sessionName(id) }}</span>
             <span
               v-if="isFileDirty(id)"
               class="dirty-dot"
-              title="Unsaved changes"
+              :title="t('Unsaved changes')"
             >●</span>
           </template>
           <span class="close" @click="closeTab(id, $event)">×</span>
@@ -531,17 +593,16 @@ onUnmounted(() => {
       </template>
       <div
         class="drop-gap"
-        @dragover.prevent
-        @drop="onTabDropAtIndex($event, leaf.tabs.length)"
+        :class="{ 'insert-active': drag.state.active && tabInsertIndex === leaf.tabs.length }"
       />
       <div class="add-terminal">
-        <button class="add-tab" title="New terminal (Ctrl+N)" @click="onAddClick">+</button>
+        <button class="add-tab" :title="t('New terminal (Ctrl+N)')" @click="onAddClick">+</button>
         <button
           ref="terminalMenuButtonRef"
           class="terminal-menu-toggle"
           :class="{ active: terminalMenuOpen }"
-          title="Select terminal"
-          aria-label="Select terminal"
+          :title="t('Select terminal')"
+          :aria-label="t('Select terminal')"
           :aria-expanded="terminalMenuOpen"
           @click="toggleTerminalMenu"
         >
@@ -564,9 +625,24 @@ onUnmounted(() => {
         role="menu"
         @mousedown.stop
       >
-        <div class="terminal-picker-title">New terminal</div>
+        <div v-for="agent in CLI_AGENTS" :key="agent.id">
+          <button class="terminal-option" role="menuitem"
+            :aria-haspopup="profilesForAgent(agent.id).length ? 'menu' : undefined"
+            :aria-expanded="profileMenuAgent === agent.id"
+            @mouseenter="profilesForAgent(agent.id).length ? openProfileMenu(agent.id, $event) : profileMenuAgent = null"
+            @click="profilesForAgent(agent.id).length ? openProfileMenu(agent.id, $event, true) : createWithAgent(agent.id)"
+            @keydown.right.prevent="profilesForAgent(agent.id).length && openProfileMenu(agent.id, $event, true)">
+            <span class="terminal-agent-slot">
+              <Icon :class="['terminal-agent-icon', `agent-${agent.id}`]" :icon="sessionAgentIcon(agent.id)" />
+            </span>
+            <span class="terminal-option-name">{{ agent.id === 'claude' ? 'Claude' : 'Codex' }}</span>
+            <span v-if="profilesForAgent(agent.id).length" class="submenu-arrow">&#8250;</span>
+          </button>
+        </div>
+        <div class="terminal-option-separator" />
         <button
           class="terminal-option default-option"
+          @mouseenter="profileMenuAgent = null"
           role="menuitem"
           @click="createWithTerminal(effectiveTerminal)"
         >
@@ -574,24 +650,39 @@ onUnmounted(() => {
           <span class="terminal-option-copy">
             <span class="terminal-option-name">
               {{ terminalLabel(effectiveTerminal) }}
-              <span class="default-badge">Default</span>
+              <span class="default-badge">{{ t("Default") }}</span>
             </span>
-            <span class="terminal-option-path">{{ effectiveTerminal.program }}</span>
           </span>
         </button>
         <div v-if="selectableTerminals.length" class="terminal-option-separator" />
         <button
           v-for="terminal in selectableTerminals"
           :key="terminal.preset"
+          @mouseenter="profileMenuAgent = null"
           class="terminal-option"
           role="menuitem"
           @click="createWithTerminal(terminal)"
         >
           <span class="terminal-option-icon">{{ terminalGlyph(terminal) }}</span>
           <span class="terminal-option-copy">
-            <span class="terminal-option-name">{{ terminal.label }}</span>
-            <span class="terminal-option-path">{{ terminal.program }}</span>
+            <span class="terminal-option-name">{{ t(terminal.label) }}</span>
           </span>
+        </button>
+      </div>
+      <div v-if="terminalMenuOpen && profileMenuAgent" ref="profileMenuRef"
+        class="terminal-picker profile-picker" role="menu"
+        :aria-label="profileMenuAgent === 'claude' ? 'Claude' : 'Codex'"
+        :style="{ left: profileMenuPosition.left + 'px', top: profileMenuPosition.top + 'px' }"
+        @mousedown.stop @keydown.left.prevent.stop="closeProfileMenu" @keydown.esc.prevent.stop="closeProfileMenu">
+        <button class="terminal-option" role="menuitem" @click="createWithAgent(profileMenuAgent, null)">
+          <span class="profile-option-label">{{ t('System') }}</span>
+          <span v-if="!resolveDefaultProfile(profileMenuAgent, useAccountProfiles().profiles, prefs.defaultProfileId)" class="default-badge">{{ t('Default') }}</span>
+        </button>
+        <button v-for="profile in profilesForAgent(profileMenuAgent)" :key="profile.id"
+          class="terminal-option" role="menuitem" :title="profile.label"
+          @click="createWithAgent(profileMenuAgent, profile)">
+          <span class="profile-option-label">{{ profile.label }}</span>
+          <span v-if="prefs.defaultProfileId[profileMenuAgent] === profile.id" class="default-badge">{{ t('Default') }}</span>
         </button>
       </div>
     </Teleport>
@@ -615,25 +706,17 @@ onUnmounted(() => {
           role="menuitem"
           :disabled="tabKind(tabMenuFor) !== 'terminal'"
           @click="renameFromMenu"
-        >
-          Rename
-        </button>
+        >{{ t("Rename") }}</button>
         <div class="tab-menu-separator" />
-        <button class="tab-menu-item" role="menuitem" @click="closeAllTabsFromMenu">
-          Close All Tabs
-        </button>
-        <button class="tab-menu-item" role="menuitem" @click="closeCurrentFromMenu">
-          Close Current Tab
-        </button>
+        <button class="tab-menu-item" role="menuitem" @click="closeAllTabsFromMenu">{{ t("Close All Tabs") }}</button>
+        <button class="tab-menu-item" role="menuitem" @click="closeCurrentFromMenu">{{ t("Close Current Tab") }}</button>
         <button
           class="tab-menu-item"
           :class="{ disabled: leaf.tabs.length <= 1 }"
           role="menuitem"
           :disabled="leaf.tabs.length <= 1"
           @click="closeOtherTabsFromMenu"
-        >
-          Close Other Tabs
-        </button>
+        >{{ t("Close Other Tabs") }}</button>
       </div>
     </Teleport>
 
@@ -657,7 +740,7 @@ onUnmounted(() => {
           :active="id === leaf.activeTabId"
         />
       </template>
-      <div v-if="!leaf.activeTabId" class="empty">No tab in this pane.</div>
+      <div v-if="!leaf.activeTabId" class="empty">{{ t("No tab in this pane.") }}</div>
 
       <div
         v-if="drag.state.active"
@@ -723,12 +806,19 @@ onUnmounted(() => {
   color: #e6e6e6;
 }
 .kind-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
   color: #4ec9b0;
   font-family: Consolas, monospace;
   font-size: 11px;
+  line-height: 1;
 }
 .kind-icon.agent-codex {
-  font-size: 15px;
+  font-size: 17px;
 }
 .kind-icon.agent-claude {
   color: #d97757;
@@ -765,6 +855,7 @@ onUnmounted(() => {
   background: #5a2d2d;
   color: #fff;
 }
+.drop-gap.insert-active { background: #4ec9b0; }
 .drop-gap {
   width: 4px;
   flex-shrink: 0;
@@ -855,7 +946,8 @@ input {
 .terminal-picker {
   position: fixed;
   z-index: 1000;
-  width: 292px;
+  width: 240px;
+  max-width: calc(100vw - 16px);
   max-height: min(420px, calc(100vh - 16px));
   overflow-y: auto;
   padding: 5px;
@@ -866,20 +958,12 @@ input {
   color: #d4d4d4;
   font-size: 12px;
 }
-.terminal-picker-title {
-  padding: 5px 8px 7px;
-  color: #8f8f8f;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-}
 .terminal-option {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 42px;
+  min-height: 30px;
   padding: 6px 8px;
   color: inherit;
   text-align: left;
@@ -899,7 +983,7 @@ input {
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 26px;
+  height: 20px;
   flex: 0 0 30px;
   color: #4ec9b0;
   background: #1e1e1e;
@@ -907,6 +991,21 @@ input {
   border-radius: 4px;
   font: 600 10px/1 Consolas, "Cascadia Mono", monospace;
 }
+.terminal-agent-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 24px;
+  flex: 0 0 30px;
+}
+.terminal-agent-icon { width: 16px; height: 16px; }
+.terminal-agent-icon.agent-claude { color: #d97757; }
+/* The Codex SVG includes padding around its artwork. */
+.terminal-agent-icon.agent-codex { width: 24px; height: 24px; }
+.submenu-arrow { margin-left: auto; font-size: 18px; }
+.profile-picker { z-index: 1001; }
+.profile-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-option-copy {
   display: flex;
   flex-direction: column;
@@ -920,17 +1019,7 @@ input {
   color: #e6e6e6;
   font-weight: 500;
 }
-.terminal-option-path {
-  overflow: hidden;
-  color: #888;
-  font: 10px/1.2 Consolas, "Cascadia Mono", monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.terminal-option:hover .terminal-option-path,
-.terminal-option:focus-visible .terminal-option-path {
-  color: #c8dce9;
-}
+
 .default-badge {
   padding: 1px 5px;
   color: #9fe3d4;

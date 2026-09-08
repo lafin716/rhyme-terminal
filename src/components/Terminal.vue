@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Terminal,
@@ -267,7 +268,7 @@ function openResource(raw: string) {
 
 function showOpenError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  alert(`Unable to open resource:\n${message}`);
+  alert(t("Unable to open resource: {message}", { message }));
 }
 
 function handleKeyEvent(ev: KeyboardEvent): boolean {

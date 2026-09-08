@@ -73,7 +73,7 @@ fn validate_account_profile_id(profile_id: &str) -> Result<(), String> {
 /// Builds `<base>/accounts/<agent>/<profile_id>`, the isolated login directory
 /// for one account profile. Pure and unit-testable; [`resolve_account_dir`]
 /// wraps it with the app's local-data directory and creates it on disk.
-fn account_dir_path(base: &Path, agent: &str, profile_id: &str) -> Result<PathBuf, String> {
+pub(crate) fn account_dir_path(base: &Path, agent: &str, profile_id: &str) -> Result<PathBuf, String> {
     validate_account_agent(agent)?;
     validate_account_profile_id(profile_id)?;
     Ok(base.join("accounts").join(agent).join(profile_id))
@@ -107,6 +107,37 @@ pub fn resolve_account_dir(
 /// `resolveProfileEnv` in `useAccountProfiles.ts`.
 const ACCOUNT_TOKEN_FILE: &str = "oauth-token.txt";
 
+/// A setup token authenticates API calls but does not complete the interactive
+/// CLI's first-run login wizard. Keep this state inside the selected profile.
+fn prepare_setup_token_profile(dir: &Path) -> Result<(), String> {
+    // Usage collection must not prevent starting an authenticated CLI session.
+    // The usage query reports installation errors in the profile popup.
+    let _ = crate::usage_bridge::install(dir);
+    let path = dir.join(".claude.json");
+    let mut config: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str(&contents)
+            .map_err(|_| "Unable to parse Claude profile settings".to_string())?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(format!("Unable to read Claude profile settings: {e}")),
+    };
+    let object = config.as_object_mut()
+        .ok_or_else(|| "Claude profile settings must be a JSON object".to_string())?;
+    if object.get("hasCompletedOnboarding") == Some(&serde_json::Value::Bool(true)) {
+        return Ok(());
+    }
+    object.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
+    object.entry("theme").or_insert_with(|| serde_json::json!("dark"));
+    let contents = serde_json::to_vec_pretty(&config)
+        .map_err(|e| format!("Unable to encode Claude profile settings: {e}"))?;
+    let temporary = dir.join(format!(".claude-winmux-{}.tmp", Uuid::new_v4()));
+    let result = std::fs::write(&temporary, contents)
+        .and_then(|_| std::fs::rename(&temporary, &path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|e| format!("Unable to save Claude profile settings: {e}"))
+}
+
 /// Persists a `claude setup-token`-issued token for one account profile, so a
 /// session launched for it can be authenticated non-interactively via
 /// `CLAUDE_CODE_OAUTH_TOKEN` instead of running an interactive browser login.
@@ -126,6 +157,17 @@ pub fn set_account_token(
     let token = token.trim();
     if token.is_empty() {
         return Err("Token is empty".to_string());
+    }
+    if agent == "claude" {
+        prepare_setup_token_profile(&dir)?;
+    }
+    if agent == "claude" && std::fs::read_to_string(dir.join(ACCOUNT_TOKEN_FILE)).ok().as_deref().map(str::trim) != Some(token) {
+        // A new token can represent a different account in the same profile.
+        match std::fs::remove_file(dir.join("winmux-usage.json")) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err("Unable to clear previous account usage".into()),
+        }
     }
     std::fs::write(dir.join(ACCOUNT_TOKEN_FILE), token)
         .map_err(|e| format!("Failed to save token: {e}"))
@@ -147,6 +189,10 @@ pub fn get_account_token(
     match std::fs::read_to_string(dir.join(ACCOUNT_TOKEN_FILE)) {
         Ok(contents) => {
             let trimmed = contents.trim();
+            // Also migrate profiles registered before onboarding was initialized.
+            if agent == "claude" && !trimmed.is_empty() {
+                prepare_setup_token_profile(&dir)?;
+            }
             Ok(if trimmed.is_empty() { None } else { Some(trimmed.to_string()) })
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -971,7 +1017,7 @@ mod preview_tests {
 
 #[cfg(test)]
 mod account_dir_tests {
-    use super::account_dir_path;
+    use super::{account_dir_path, prepare_setup_token_profile};
     use std::path::Path;
 
     #[test]
@@ -1001,5 +1047,40 @@ mod account_dir_tests {
     #[test]
     fn accepts_profile_ids_with_underscores_and_hyphens() {
         assert!(account_dir_path(Path::new(r"C:\data"), "claude", "work-account_2").is_ok());
+    }
+
+    #[test]
+    fn setup_token_skips_login_onboarding_and_preserves_existing_settings() {
+        let dir = std::env::temp_dir().join(format!("winmux-onboarding-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".claude.json");
+        std::fs::write(&path, r#"{"theme":"light","projects":{"work":{"hasTrustDialogAccepted":false}}}"#).unwrap();
+        prepare_setup_token_profile(&dir).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(config["theme"], "light");
+        assert_eq!(config["projects"]["work"]["hasTrustDialogAccepted"], false);
+        prepare_setup_token_profile(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        std::fs::remove_file(&path).unwrap();
+        prepare_setup_token_profile(&dir).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(config["theme"], "dark");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn setup_token_does_not_overwrite_invalid_config() {
+        let dir = std::env::temp_dir().join(format!("winmux-onboarding-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".claude.json");
+        for contents in ["broken-json", "[]", "null"] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(prepare_setup_token_profile(&dir).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

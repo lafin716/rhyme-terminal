@@ -47,6 +47,10 @@ pub enum Method {
     AttachSession {
         id: Uuid,
     },
+    /// Snapshot/live barrier for a dedicated mobile connection.
+    AttachSessionAtomic {
+        id: Uuid,
+    },
     DetachSession {
         id: Uuid,
     },
@@ -105,7 +109,9 @@ mod tests {
         .expect("request should deserialize");
 
         match request.method {
-            Method::CreateSession { shell_args, env, .. } => {
+            Method::CreateSession {
+                shell_args, env, ..
+            } => {
                 assert!(shell_args.is_empty());
                 assert!(env.is_none());
             }
@@ -134,7 +140,10 @@ mod tests {
     #[test]
     fn create_session_preserves_env_overrides() {
         let mut env = std::collections::HashMap::new();
-        env.insert("CLAUDE_CONFIG_DIR".to_string(), r"C:\accounts\claude\work".to_string());
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            r"C:\accounts\claude\work".to_string(),
+        );
         let request = Request {
             id: 1,
             method: Method::CreateSession {

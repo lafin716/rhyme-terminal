@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "./composables/useI18n";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
@@ -22,7 +23,7 @@ import { useKeybindings, loadKeybindingsFromStorage } from "./composables/useKey
 import { useGlobalShortcuts, registerAction, registerFocusSessionByIndex } from "./composables/useGlobalShortcuts";
 import { useSettings } from "./composables/useSettings";
 import { useConfirm } from "./composables/useConfirm";
-import { loadPrefsFromStorage, usePrefs } from "./composables/usePrefs";
+import { usePrefs } from "./composables/usePrefs";
 import { loadPaletteFromStorage } from "./composables/usePalette";
 import {
   loadAccountProfilesFromStorage,
@@ -152,7 +153,7 @@ const leftRegionStyle = computed(() => ({
 const rightRegionStyle = computed(() => ({ width: `${panels.right.width}px` }));
 
 async function bootstrap() {
-  loadPrefsFromStorage();
+
   loadKeybindingsFromStorage();
   loadPaletteFromStorage();
   loadAccountProfilesFromStorage();
@@ -219,6 +220,7 @@ async function restorePersistedSessions(validIds: Set<string>) {
         console.warn(`Failed to restore terminal tab ${oldId}`);
         continue;
       }
+      if (ws.sessionOrder) ws.sessionOrder = ws.sessionOrder.map(id => id === oldId ? restored.id : id);
       if (replaceTabId(ws.layout, oldId, restored.id)) {
         removeTerminalSnapshot(ws.id, oldId);
         validIds.add(restored.id);
@@ -230,7 +232,7 @@ async function restorePersistedSessions(validIds: Set<string>) {
 async function promptRename() {
   const s = focusedSession.value;
   if (!s) return;
-  const name = window.prompt("Rename session", displayName(s.name));
+  const name = window.prompt(t("Rename session"), displayName(s.name));
   if (name && name.trim()) await rename(s.id, name.trim());
 }
 
@@ -244,8 +246,8 @@ async function killFocused() {
   const s = focusedSession.value;
   if (!s) return;
   const ok = await confirm({
-    message: `Kill session "${displayName(s.name)}"?`,
-    confirmLabel: "Kill",
+    message: t('Kill session "{name}"?', { name: displayName(s.name) }),
+    confirmLabel: t("Kill"),
     rememberKey: "skipKillSessionConfirm",
   });
   if (ok) {
@@ -295,7 +297,7 @@ async function splitAndCreate(direction: "horizontal" | "vertical") {
   const ws = activeWorkspace.value;
   if (!ws || !focusedLeafId.value) return;
   if (leafCount(ws.layout) >= MAX_PANES) {
-    alert(`최대 ${MAX_PANES}개 pane까지 분할할 수 있습니다.`);
+    alert(t("You can split into at most {count} panes.", { count: MAX_PANES }));
     return;
   }
   const info = await createForWorkspace(ws, {
@@ -334,7 +336,7 @@ async function splitOrMove(dir: "left" | "right" | "up" | "down") {
     setFocusedLeaf(neighborId);
   } else {
     if (leafCount(ws.layout) >= MAX_PANES) {
-      alert(`최대 ${MAX_PANES}개 pane까지 분할할 수 있습니다.`);
+      alert(t("You can split into at most {count} panes.", { count: MAX_PANES }));
       return;
     }
     const direction = (dir === "left" || dir === "right") ? "horizontal" : "vertical";
@@ -355,7 +357,7 @@ async function quadrantSplit(corner: "tl" | "tr" | "bl" | "br") {
   const ws = activeWorkspace.value;
   if (!ws || !focusedLeafId.value) return;
   if (leafCount(ws.layout) + 2 > MAX_PANES) {
-    alert(`최대 ${MAX_PANES}개 pane까지 분할할 수 있습니다.`);
+    alert(t("You can split into at most {count} panes.", { count: MAX_PANES }));
     return;
   }
   const a = await createForWorkspace(ws, {
@@ -470,7 +472,7 @@ onBeforeUnmount(() => {
       <div
         v-if="panels.left.open"
         class="region-splitter"
-        title="Drag to resize"
+        :title="t('Drag to resize')"
         @mousedown="startRegionResize('left', $event)"
       />
       <div class="content">
@@ -486,7 +488,7 @@ onBeforeUnmount(() => {
       <div
         v-if="panels.right.open"
         class="region-splitter"
-        title="Drag to resize"
+        :title="t('Drag to resize')"
         @mousedown="startRegionResize('right', $event)"
       />
       <div v-if="panels.right.open" class="region region-right" :style="rightRegionStyle">

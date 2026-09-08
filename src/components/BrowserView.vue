@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Webview } from "@tauri-apps/api/webview";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
@@ -66,7 +67,7 @@ async function createChild() {
 async function navigate() {
   try {
     const url = new URL(address.value.trim());
-    if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only HTTP(S) URLs are allowed.");
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error(t("Only HTTP(S) URLs are allowed."));
     address.value = url.toString();
     useResources().updateBrowserUrl(props.tab.id, address.value);
     await api.browserNavigate(props.tab.webviewLabel, address.value);
@@ -113,11 +114,11 @@ onBeforeUnmount(() => {
 <template>
   <div class="browser-view" :class="{ hidden: !active }">
     <div class="toolbar">
-      <button title="Back" @click="api.browserBack(tab.webviewLabel)">‹</button>
-      <button title="Forward" @click="api.browserForward(tab.webviewLabel)">›</button>
-      <button title="Reload" @click="api.browserReload(tab.webviewLabel)">↻</button>
+      <button :title="t('Back')" @click="api.browserBack(tab.webviewLabel)">‹</button>
+      <button :title="t('Forward')" @click="api.browserForward(tab.webviewLabel)">›</button>
+      <button :title="t('Reload')" @click="api.browserReload(tab.webviewLabel)">↻</button>
       <input v-model="address" @keydown.enter="navigate" />
-      <button title="Open in default browser" @click="openUrl(address)">↗</button>
+      <button :title="t('Open in default browser')" @click="openUrl(address)">↗</button>
     </div>
     <div ref="viewport" class="viewport">
       <span v-if="error" class="error">{{ error }}</span>

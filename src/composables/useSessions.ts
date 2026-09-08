@@ -1,3 +1,7 @@
+import { t } from "./useI18n";
+import { useAccountProfiles } from "./useAccountProfiles";
+import { profileForLaunch } from "../lib/session-profile";
+import { sessionAccountEnv } from "../lib/account-env";
 import { reactive, computed, watch } from "vue";
 import {
   api,
@@ -201,7 +205,7 @@ export function useSessions() {
       ? withAgentLaunch(terminal, hookedArgs, argsForHook, opts.launchCommand)
       : hookedArgs;
     if (!shell) {
-      alert("Select a terminal program in Settings before creating a session.");
+      alert(t("Select a terminal program in Settings before creating a session."));
       return null;
     }
     try {
@@ -211,12 +215,13 @@ export function useSessions() {
         shell,
         shellArgs: [...shellArgs],
         cwd,
-        env: opts.env,
+        env: sessionAccountEnv(opts.launchCommand, opts.env, prefs.systemAccountEnv),
       })], snapshotRevision);
       state.sessions.push(info);
       if (info.cwd) currentCwds[info.id] = info.cwd;
       if (ws) {
         setTerminalSnapshot(ws.id, info.id, {
+          accountProfile: profileForLaunch(useAccountProfiles().profiles, opts.env, opts.launchCommand),
           name: displayName(info.name),
           terminal,
           cwd: info.cwd ?? cwd ?? null,
@@ -228,7 +233,7 @@ export function useSessions() {
       if (opts.showError === false) {
         console.warn("Failed to create terminal", message);
       } else {
-        alert(`Failed to create terminal:\n${message}`);
+        alert(t("Failed to create terminal: {message}", { message }));
       }
       return null;
     }

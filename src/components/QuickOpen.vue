@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { computed, nextTick, ref, watch } from "vue";
 import { Icon, type IconifyIcon } from "@iconify/vue";
 import { useQuickOpen } from "../composables/useQuickOpen";
@@ -170,13 +171,13 @@ watch(
 
 <template>
   <div v-if="state.open" class="qo-backdrop" @mousedown.self="close">
-    <div class="qo-panel" role="dialog" aria-label="Quick Open">
+    <div class="qo-panel" role="dialog" :aria-label="t('Quick Open')">
       <input
         ref="inputEl"
         class="qo-input"
         type="text"
         :value="state.query"
-        placeholder="Search workspaces, sessions, files, commands…"
+        :placeholder="t('Search workspaces, sessions, files, commands…')"
         spellcheck="false"
         autocomplete="off"
         @input="onInput"
@@ -196,10 +197,10 @@ watch(
           <Icon class="qo-icon" :icon="KIND_ICONS[result.kind]" />
           <span class="qo-label">{{ result.label }}</span>
           <span v-if="result.subtitle" class="qo-subtitle">{{ result.subtitle }}</span>
-          <span class="qo-kind">{{ result.kind }}</span>
+          <span class="qo-kind">{{ t(result.kind) }}</span>
         </li>
       </ul>
-      <div v-else class="qo-empty">No matches</div>
+      <div v-else class="qo-empty">{{ t("No matches") }}</div>
     </div>
   </div>
 </template>

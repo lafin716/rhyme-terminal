@@ -6,6 +6,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { Icon } from "@iconify/vue";
 import { panelRightIcon } from "../lib/offline-icons";
 import { useShellPanels } from "../composables/useShellPanels";
+import { t } from "../composables/useI18n";
 
 const { panels, toggleRight } = useShellPanels();
 const maximized = ref(false);
@@ -30,16 +31,16 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); });
 
 <template>
   <div class="window-controls">
-    <button class="panel-toggle" :class="{ active: panels.right.open }" :title="'Toggle Right Panel (Explorer)'" :aria-label="'Toggle Right Panel (Explorer)'" @click="toggleRight">
+    <button class="panel-toggle" :class="{ active: panels.right.open }" :title="t('Toggle Right Panel (Explorer)')" :aria-label="t('Toggle Right Panel (Explorer)')" @click="toggleRight">
       <Icon :icon="panelRightIcon" />
     </button>
-    <button :title="'Minimize'" :aria-label="'Minimize'" @click="run('minimize')">
+    <button :title="t('Minimize')" :aria-label="t('Minimize')" @click="run('minimize')">
       <svg viewBox="0 0 12 12"><path d="M1 6.5h10" /></svg>
     </button>
-    <button :title="maximized ? 'Restore' : 'Maximize'" :aria-label="maximized ? 'Restore' : 'Maximize'" @click="run('toggleMaximize')">
+    <button :title="t(maximized ? 'Restore' : 'Maximize')" :aria-label="t(maximized ? 'Restore' : 'Maximize')" @click="run('toggleMaximize')">
       <svg viewBox="0 0 12 12"><path v-if="maximized" d="M3.5 3.5v-2h7v7h-2m-7-5h7v7h-7z" /><path v-else d="M1.5 1.5h9v9h-9z" /></svg>
     </button>
-    <button class="close-window" :title="'Close'" :aria-label="'Close'" @click="run('close')">
+    <button class="close-window" :title="t('Close')" :aria-label="t('Close')" @click="run('close')">
       <svg viewBox="0 0 12 12"><path d="m1.5 1.5 9 9m0-9-9 9" /></svg>
     </button>
   </div>

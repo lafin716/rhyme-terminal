@@ -95,9 +95,16 @@ export function removeAccountProfile(id: string): void {
   persist();
 }
 
-/** Env override(s) that select this profile's login for its agent's CLI. */
+/** Custom variables plus the isolated login directory, which takes precedence. */
 export function envForProfile(profile: AccountProfile): Record<string, string> {
-  return { [agentDef(profile.agent).envVar]: profile.configDir };
+  return { ...profile.env, [agentDef(profile.agent).envVar]: profile.configDir };
+}
+
+export function setAccountProfileEnv(id: string, env: Record<string, string>): void {
+  const profile = profiles.find((p) => p.id === id);
+  if (!profile) return;
+  profile.env = { ...env };
+  persist();
 }
 
 /**

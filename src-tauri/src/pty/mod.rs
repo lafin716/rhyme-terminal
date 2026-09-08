@@ -161,9 +161,10 @@ pub fn spawn_session(
                             while sb.len() > SCROLLBACK_BYTES {
                                 sb.pop_front();
                             }
+                            // Atomic attach subscribes and snapshots under this same lock.
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                            let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
                         }
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                        let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
                         let _ = events_clone.send(Event::SessionActivity { id, bell: sig.bell });
                         let agent = *agent_kind_clone.lock();
                         if let Some(status) = task_tracker_clone.lock().observe(agent, AgentTaskEvent::Output(chunk)) {

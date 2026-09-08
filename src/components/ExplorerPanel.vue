@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { computed, onMounted, ref, watch } from "vue";
 import { Icon, type IconifyIcon } from "@iconify/vue";
 import {
@@ -191,24 +192,24 @@ function iconFor(node: TreeNode): IconifyIcon {
 }
 
 const rootName = computed(() => (rootNode.value ? rootNode.value.name : ""));
-const title = computed(() => explorerPanelTitle(rootName.value));
+const title = computed(() => rootName.value ? explorerPanelTitle(rootName.value) : t("Explorer"));
 const canSync = computed(() => !!focusedCwd.value);
 </script>
 
 <template>
   <section class="explorer">
     <div class="body">
-      <nav class="strip" aria-label="Right panel tools">
+      <nav class="strip" :aria-label="t('Right panel tools')">
         <button
           class="tool"
           :class="{ active: activeTab === 'files' }"
           :aria-current="activeTab === 'files' ? 'page' : undefined"
-          title="Files"
+          :title="t('Files')"
           type="button"
           @click="activeTab = 'files'"
         >
           <Icon class="ico" :icon="filesIcon" />
-          <span>Files</span>
+          <span>{{ t("Files") }}</span>
         </button>
       </nav>
 
@@ -217,7 +218,7 @@ const canSync = computed(() => !!focusedCwd.value);
         <button
           class="sync"
           type="button"
-          title="Sync to current terminal"
+          :title="t('Sync to current terminal')"
           :disabled="!canSync"
           @click="syncToTerminal"
         >
@@ -227,9 +228,9 @@ const canSync = computed(() => !!focusedCwd.value);
 
       <div class="tree">
         <template v-if="rootNode">
-          <div v-if="rootNode.loading && !rootNode.loaded" class="hint">Loading…</div>
+          <div v-if="rootNode.loading && !rootNode.loaded" class="hint"> {{ t("Loading…") }} </div>
           <div v-else-if="rootNode.error" class="hint error">{{ rootNode.error }}</div>
-          <div v-else-if="!rows.length" class="hint">Empty folder.</div>
+          <div v-else-if="!rows.length" class="hint">{{ t("Empty folder.") }}</div>
           <div
             v-for="{ node, depth } in rows"
             :key="node.path"
@@ -251,13 +252,7 @@ const canSync = computed(() => !!focusedCwd.value);
             <span class="entry-name">{{ node.name }}</span>
           </div>
         </template>
-        <div v-else class="hint">
-          No folder yet. Focus a terminal and press
-          <button class="inline-sync" type="button" :disabled="!canSync" @click="syncToTerminal">
-            sync
-          </button>
-          to root the tree.
-        </div>
+        <div v-else class="hint">{{ t("No folder yet. Focus a terminal and press") }} <button class="inline-sync" type="button" :disabled="!canSync" @click="syncToTerminal">{{ t("sync") }}</button> {{ t("to root the tree.") }}</div>
       </div>
     </div>
   </section>

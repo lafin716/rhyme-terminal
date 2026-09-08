@@ -1,4 +1,8 @@
-import { createApp } from "vue";
+import { createApp, watchEffect } from "vue";
+import { useI18n } from "./composables/useI18n";
+import { loadPrefsFromStorage } from "./composables/usePrefs";
+import { isTauri } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import App from "./App.vue";
 import OAuthLoginWindow from "./OAuthLoginWindow.vue";
 
@@ -8,5 +12,15 @@ import OAuthLoginWindow from "./OAuthLoginWindow.vue";
 // so it mounts a different, minimal root instead of the full app shell.
 const params = new URLSearchParams(window.location.search);
 const root = params.get("win") === "oauth-login" ? OAuthLoginWindow : App;
+
+loadPrefsFromStorage();
+const { locale } = useI18n();
+watchEffect(() => {
+  document.documentElement.lang = locale.value;
+  if (root === App && isTauri()) {
+    void emit("app-language-changed", locale.value)
+      .catch((error) => console.warn("Failed to update tray language", error));
+  }
+});
 
 createApp(root).mount("#app");

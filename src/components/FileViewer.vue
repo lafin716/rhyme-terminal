@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watchEffect } from "vue";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/esm/vs/language/json/monaco.contribution";
@@ -123,7 +124,7 @@ async function createEditor() {
   // save dialog while the editor is focused.
   editor.addAction({
     id: "winmux.saveFile",
-    label: "Save File",
+    label: t("Save File"),
     keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
     run: () => {
       void save();
@@ -164,9 +165,9 @@ onBeforeUnmount(() => {
   <div class="file-viewer">
     <div class="toolbar">
       <span class="path" :title="preview.canonicalPath">{{ preview.canonicalPath }}</span>
-      <button v-if="mode === 'text'" title="Find (Ctrl+F)" @click="openFind">Find</button>
-      <span v-if="saveError" class="save-error" :title="saveError">Save failed</span>
-      <span class="meta">{{ preview.language }} · {{ preview.size.toLocaleString() }} bytes</span>
+      <button v-if="mode === 'text'" :title="t('Find (Ctrl+F)')" @click="openFind">{{ t("Find") }}</button>
+      <span v-if="saveError" class="save-error" :title="saveError">{{ t("Save failed") }}</span>
+      <span class="meta">{{ preview.language }} · {{ preview.size.toLocaleString() }} {{ t("bytes") }}</span>
     </div>
 
     <div v-if="mode === 'image'" class="image-wrap">
@@ -180,12 +181,8 @@ onBeforeUnmount(() => {
       :src="pdfSrc"
       :title="preview.name"
     />
-    <div v-else-if="mode === 'binary'" class="message">
-      Binary files cannot be previewed.
-    </div>
-    <div v-else-if="mode === 'too_large'" class="message">
-      This file is too large to preview.
-    </div>
+    <div v-else-if="mode === 'binary'" class="message">{{ t("Binary files cannot be previewed.") }}</div>
+    <div v-else-if="mode === 'too_large'" class="message">{{ t("This file is too large to preview.") }}</div>
     <div v-else ref="editorHost" class="editor-host" />
   </div>
 </template>

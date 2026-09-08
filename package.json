@@ -1,11 +1,12 @@
 {
-  "name": "winmux",
+  "name": "rhyme-terminal",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "dev": "pnpm run build:mobile && vite",
+    "build": "pnpm run build:mobile && vue-tsc --noEmit && vite build",
+    "build:mobile": "vite build --config vite.mobile.config.ts",
     "build:portable": "tauri build --no-bundle",
     "preview": "vite preview",
     "tauri": "tauri",

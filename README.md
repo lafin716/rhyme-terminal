@@ -1,4 +1,4 @@
-# winmux
+# rhyme-terminal
 
 Rhyme Flow: [로컬 자동화 사용법과 검증 안내](docs/rhyme-flow.md)
 
@@ -137,7 +137,7 @@ pnpm build:portable
 생성 위치:
 
 ```text
-src-tauri/target/release/winmux.exe
+src-tauri/target/release/rhyme-terminal.exe
 ```
 
 이 빌드는 installer 없이 실행할 수 있는 portable GUI exe를 만듭니다.
@@ -367,7 +367,7 @@ middle-click palette에 표시할 명령을 관리합니다.
 
 winmux는 GUI 앱과 별도로 daemon이 PTY 세션을 관리합니다.
 
-- GUI 앱: `winmux.exe`
+- GUI 앱: `rhyme-terminal.exe`
 - daemon: `winmuxd.exe`
 - CLI: `winmuxctl.exe`
 
@@ -459,7 +459,7 @@ daemon 종료:
 │   ├── composables/     # 상태/동작 로직
 │   └── lib/             # keybindings, tauri bridge, persistence 등
 ├── src-tauri/           # Rust/Tauri backend
-│   ├── src/bin/         # winmuxd, winmuxctl
+│   ├── src/bin/         # rhyme-terminald, winmuxctl
 │   ├── src/ipc/         # named-pipe IPC
 │   ├── src/pty/         # portable-pty wrapper
 │   └── src/commands.rs  # Tauri command handlers

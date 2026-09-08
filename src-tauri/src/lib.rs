@@ -2,8 +2,11 @@ pub mod commands;
 pub mod flow;
 pub mod daemon;
 pub mod ipc;
+pub mod mobile_pairing;
 pub mod pty;
 pub mod tray;
+pub mod usage;
+pub mod usage_bridge;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager, WindowEvent};
@@ -30,6 +33,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(mobile_pairing::MobilePairing::default())
         .manage(client.clone())
         .manage(rt.clone())
         .setup(move |app| {
@@ -115,6 +119,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             flow::flow_request,
+            mobile_pairing::mobile_pairing_interfaces,
+            mobile_pairing::mobile_pairing_status,
+            mobile_pairing::mobile_pairing_start,
+            mobile_pairing::mobile_pairing_stop,
+            mobile_pairing::mobile_pairing_invite,
+            mobile_pairing::mobile_pairing_approve,
+            mobile_pairing::mobile_pairing_revoke,
             commands::create_session,
             commands::list_sessions,
             commands::kill_session,
@@ -125,6 +136,7 @@ pub fn run() {
             commands::resolve_account_dir,
             commands::set_account_token,
             commands::get_account_token,
+            usage::get_account_usage,
             commands::read_file_preview,
             commands::write_file,
             commands::read_directory,

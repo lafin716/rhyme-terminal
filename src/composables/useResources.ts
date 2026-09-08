@@ -1,3 +1,4 @@
+import { t } from "./useI18n";
 import { reactive } from "vue";
 import { api, type FilePreview } from "../lib/tauri";
 import { nodeId } from "../lib/layout-types";
@@ -36,7 +37,7 @@ function normalizeUrl(raw: string): string {
   const trimmed = raw.trim();
   const url = new URL(trimmed);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Only HTTP and HTTPS URLs can be opened inside winmux.");
+    throw new Error(t("Only HTTP and HTTPS URLs can be opened inside rhyme-terminal."));
   }
   url.hash = url.hash;
   return url.toString();
