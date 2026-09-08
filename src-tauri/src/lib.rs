@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod flow;
 pub mod daemon;
 pub mod ipc;
 pub mod pty;
@@ -32,6 +33,12 @@ pub fn run() {
         .manage(client.clone())
         .manage(rt.clone())
         .setup(move |app| {
+            let flow = app.path().app_local_data_dir().map_err(anyhow::Error::from)
+                .and_then(|path| flow::runtime::Engine::open(path.join("flow")));
+            app.manage(match flow {
+                Ok(engine) => flow::FlowService { engine: Some(engine), error: None },
+                Err(error) => flow::FlowService { engine: None, error: Some(format!("{error:#}")) },
+            });
             // Set the window icon explicitly as well as embedding it through the
             // bundle configuration. This keeps dev builds and the tray in sync.
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
@@ -107,6 +114,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            flow::flow_request,
             commands::create_session,
             commands::list_sessions,
             commands::kill_session,
