@@ -107,6 +107,7 @@ function terminalSnapshotsForLayout(
   for (const [id, snapshot] of Object.entries(snapshots)) {
     if (!ids.has(id)) continue;
     out[id] = {
+      agent: snapshot.agent,
       accountProfile: snapshot.accountProfile,
       name: snapshot.name,
       cwd: snapshot.cwd ?? null,

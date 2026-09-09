@@ -16,6 +16,14 @@ pub struct Request {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Method {
+    LoopRequest {
+        request: serde_json::Value,
+    },
+    AccountUsage {
+        agent: String,
+        dir: std::path::PathBuf,
+        session_usage: bool,
+    },
     CreateSession {
         name: Option<String>,
         shell: Option<String>,

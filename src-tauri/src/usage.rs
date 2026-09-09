@@ -1,16 +1,106 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use tauri::{AppHandle, Manager, State};
 
-#[derive(Debug, Serialize)]
+use crate::ipc::{client::DaemonClient, protocol::Method};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageWindow {
-    label: String,
-    percent_used: f64,
-    resets_at: Option<Value>,
+    pub label: String,
+    pub kind: String,
+    pub percent_used: f64,
+    pub resets_at: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    received_at: Option<u64>,
+    pub received_at: Option<u64>,
+}
+
+type UsageResult = Result<Vec<UsageWindow>, String>;
+type CacheKey = (String, PathBuf, bool);
+#[derive(Default)]
+struct CacheEntry {
+    fetched_at: Option<Instant>,
+    result: Option<UsageResult>,
+}
+type CacheSlot = Arc<tokio::sync::Mutex<CacheEntry>>;
+static USAGE_CACHE: OnceLock<parking_lot::Mutex<HashMap<CacheKey, CacheSlot>>> = OnceLock::new();
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+/// Freshness describes the original provider/sample receipt, never a cache hit.
+pub fn usage_windows_are_fresh(windows: &[UsageWindow], max_age: Duration) -> bool {
+    windows_are_fresh_at(windows, now_millis(), max_age)
+}
+
+fn windows_are_fresh_at(windows: &[UsageWindow], now: u64, max_age: Duration) -> bool {
+    !windows.is_empty()
+        && windows.iter().all(|window| {
+            window.received_at.is_some_and(|received| {
+                received > 0 && received <= now && u128::from(now - received) <= max_age.as_millis()
+            })
+        })
+}
+
+fn session_result_at(result: UsageResult, now: u64) -> UsageResult {
+    result.and_then(|mut windows| {
+        windows.retain(|window| {
+            window
+                .resets_at
+                .as_ref()
+                .and_then(Value::as_u64)
+                .is_some_and(|reset| reset > now)
+        });
+        if windows.is_empty() {
+            Err("Waiting for session usage. Start this profile and send a message".into())
+        } else {
+            Ok(windows)
+        }
+    })
+}
+
+/// Coalesces concurrent requests per profile and caches failures as well as success.
+pub async fn query_account_usage(agent: &str, dir: &Path, session_usage: bool) -> UsageResult {
+    if agent != "claude" && agent != "codex" {
+        return Err("Unsupported agent".into());
+    }
+    if session_usage && agent != "claude" {
+        return Err("Session usage requires a Claude profile".into());
+    }
+    let slot = {
+        let mut cache = USAGE_CACHE.get_or_init(Default::default).lock();
+        cache
+            .entry((agent.to_owned(), dir.to_path_buf(), session_usage))
+            .or_default()
+            .clone()
+    };
+    // This lock deliberately spans the fetch so waiters consume the same result.
+    let mut entry = slot.lock().await;
+    let ttl = Duration::from_secs(if session_usage { 5 } else { 60 });
+    if entry.fetched_at.is_some_and(|at| at.elapsed() < ttl) {
+        if let Some(result) = &entry.result {
+            return if session_usage {
+                session_result_at(result.clone(), now_millis())
+            } else {
+                result.clone()
+            };
+        }
+    }
+    let result = fetch_account_usage(agent, dir, session_usage).await;
+    entry.fetched_at = Some(Instant::now());
+    entry.result = Some(result.clone());
+    result
 }
 
 fn parse_windows(agent: &str, body: &Value) -> Vec<UsageWindow> {
@@ -59,9 +149,24 @@ fn parse_windows(agent: &str, body: &Value) -> Vec<UsageWindow> {
             };
             windows.push(UsageWindow {
                 label,
+                kind: if agent == "claude" {
+                    match key {
+                        "five_hour" => "short",
+                        "seven_day" => "weekly",
+                        _ => "model_weekly",
+                    }
+                } else {
+                    match window["limit_window_seconds"].as_u64() {
+                        Some(seconds) if seconds >= 604800 => "weekly",
+                        Some(_) => "short",
+                        None if key == "secondary_window" => "weekly",
+                        None => "short",
+                    }
+                }
+                .into(),
                 percent_used: percent.clamp(0.0, 100.0),
                 resets_at: reset,
-                received_at: None,
+                received_at: Some(now_millis()),
             });
         }
     }
@@ -88,6 +193,12 @@ fn parse_session_windows(sample: &Value, now_seconds: u64) -> Result<Vec<UsageWi
             if let Some(milliseconds) = reset.checked_mul(1000) {
                 windows.push(UsageWindow {
                     label: label.into(),
+                    kind: if key == "five_hour" {
+                        "short"
+                    } else {
+                        "weekly"
+                    }
+                    .into(),
                     percent_used: percent.clamp(0.0, 100.0),
                     resets_at: Some(Value::from(milliseconds)),
                     received_at: Some(received_at),
@@ -105,6 +216,7 @@ fn parse_session_windows(sample: &Value, now_seconds: u64) -> Result<Vec<UsageWi
 #[tauri::command]
 pub async fn get_account_usage(
     app: AppHandle,
+    client: State<'_, Arc<DaemonClient>>,
     agent: String,
     profile_id: Option<String>,
     session_usage: Option<bool>,
@@ -137,6 +249,20 @@ pub async fn get_account_usage(
             })
             .ok_or("Profile directory unavailable")?
     };
+    if !crate::loop_routing::daemon_supports_routing(&client).await {
+        return query_account_usage(&agent, &dir, use_session).await;
+    }
+    client
+        .request(Method::AccountUsage {
+            agent,
+            dir,
+            session_usage: use_session,
+        })
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn fetch_account_usage(agent: &str, dir: &Path, use_session: bool) -> UsageResult {
     if use_session {
         crate::usage_bridge::install(&dir)?;
         let bytes = tokio::fs::read(dir.join("winmux-usage.json"))
@@ -249,5 +375,82 @@ mod tests {
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].percent_used, 100.0);
         assert!(parse_windows("codex", &json!({})).is_empty());
+    }
+
+    #[test]
+    fn duration_identifies_codex_windows_even_when_reordered() {
+        let windows = parse_windows(
+            "codex",
+            &json!({"rate_limit": {
+                "primary_window": {"used_percent": 2, "limit_window_seconds": 604800},
+                "secondary_window": {"used_percent": 3, "limit_window_seconds": 18000}
+            }}),
+        );
+        assert_eq!(windows[0].kind, "weekly");
+        assert_eq!(windows[1].kind, "short");
+        let fallback = parse_windows(
+            "codex",
+            &json!({"rate_limit": {
+                "primary_window": {"used_percent": 2}, "secondary_window": {"used_percent": 3}
+            }}),
+        );
+        assert_eq!(fallback[0].kind, "short");
+        assert_eq!(fallback[1].kind, "weekly");
+    }
+
+    #[test]
+    fn cache_hits_do_not_refresh_samples_and_expired_session_windows_are_removed() {
+        let sample = json!({"version":1,"receivedAt":900000,"rate_limits":{
+            "five_hour":{"used_percentage":0,"resets_at":1100},
+            "seven_day":{"used_percentage":72,"resets_at":2000}
+        }});
+        let windows = parse_session_windows(&sample, 1000).unwrap();
+        assert!(windows_are_fresh_at(
+            &windows,
+            950000,
+            Duration::from_secs(60)
+        ));
+        assert!(!windows_are_fresh_at(
+            &windows,
+            960001,
+            Duration::from_secs(60)
+        ));
+        assert!(!windows_are_fresh_at(
+            &windows,
+            899999,
+            Duration::from_secs(60)
+        ));
+        assert!(!windows_are_fresh_at(&[], 950000, Duration::from_secs(60)));
+        let remaining = session_result_at(Ok(windows), 1100000).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].kind, "weekly");
+        assert_eq!(remaining[0].received_at, Some(900000));
+        assert!(session_result_at(Ok(remaining), 2000000).is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_share_cached_failure_without_reading_credentials() {
+        let dir = std::env::temp_dir().join(format!("winmux-usage-test-{}", uuid::Uuid::new_v4()));
+        let (first, second) = tokio::join!(
+            query_account_usage("codex", &dir, false),
+            query_account_usage("codex", &dir, false)
+        );
+        assert_eq!(first.unwrap_err(), "Sign in through the CLI to view usage");
+        assert_eq!(second.unwrap_err(), "Sign in through the CLI to view usage");
+        let slot = USAGE_CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .get(&("codex".into(), dir.clone(), false))
+            .unwrap()
+            .clone();
+        let initial_fetch = slot.lock().await.fetched_at;
+        assert!(query_account_usage("codex", &dir, false).await.is_err());
+        assert_eq!(slot.lock().await.fetched_at, initial_fetch);
+        USAGE_CACHE
+            .get()
+            .unwrap()
+            .lock()
+            .remove(&("codex".into(), dir, false));
     }
 }

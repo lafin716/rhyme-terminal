@@ -1,5 +1,5 @@
 import { t } from "./useI18n";
-import { useAccountProfiles } from "./useAccountProfiles";
+import { resolveProfileEnv, useAccountProfiles } from "./useAccountProfiles";
 import { profileForLaunch } from "../lib/session-profile";
 import { sessionAccountEnv } from "../lib/account-env";
 import { reactive, computed, watch } from "vue";
@@ -22,7 +22,7 @@ import {
   applySessionAgentUpdates,
   type VersionedSessionAgentPayload,
 } from "../lib/session-agent";
-import type { Workspace } from "../lib/layout-types";
+import type { TerminalTabSnapshot, Workspace } from "../lib/layout-types";
 import { useWorkspaces, workspaceDefaultCwd } from "./useWorkspaces";
 import { useFocus } from "./useFocus";
 import { usePrefs } from "./usePrefs";
@@ -63,11 +63,23 @@ let activityListenerStarted = false;
 let agentTaskStatusListenerStarted = false;
 let sessionAgentRevision = 0;
 const latestSessionAgentUpdates = new Map<string, VersionedSessionAgentPayload>();
+const pendingAgentLaunches = new Set<string>();
+
+function saveAgentSnapshot(payload: SessionAgentPayload): void {
+  const { state: workspaces, updateTerminalSnapshot } = useWorkspaces();
+  for (const ws of workspaces.workspaces) {
+    const snapshot = ws.terminalSnapshots[payload.id];
+    if (!snapshot || snapshot.agent === payload.agent) continue;
+    updateTerminalSnapshot(ws.id, payload.id, { agent: payload.agent });
+  }
+}
 
 function applyAgentUpdate(payload: SessionAgentPayload): void {
   const update = { revision: ++sessionAgentRevision, payload };
   latestSessionAgentUpdates.set(payload.id, update);
   state.sessions = applySessionAgent(state.sessions, payload);
+  pendingAgentLaunches.delete(payload.id);
+  saveAgentSnapshot(payload);
 }
 
 function reconcileAgentUpdates(
@@ -171,6 +183,10 @@ export function useSessions() {
     state.sessions = reconcileAgentUpdates(await api.listSessions(), snapshotRevision);
     for (const session of state.sessions) {
       if (session.cwd && !currentCwds[session.id]) currentCwds[session.id] = session.cwd;
+      if (session.agent !== "terminal" || !pendingAgentLaunches.has(session.id)) {
+        pendingAgentLaunches.delete(session.id);
+        saveAgentSnapshot(session);
+      }
     }
   }
 
@@ -217,15 +233,23 @@ export function useSessions() {
         cwd,
         env: sessionAccountEnv(opts.launchCommand, opts.env, prefs.systemAccountEnv),
       })], snapshotRevision);
+      // A detected transition (including an early exit) wins over launch intent.
+      const awaitingAgent = info.agent === "terminal"
+        && (opts.launchCommand === "claude" || opts.launchCommand === "codex")
+        && (latestSessionAgentUpdates.get(info.id)?.revision ?? 0) <= snapshotRevision;
       state.sessions.push(info);
       if (info.cwd) currentCwds[info.id] = info.cwd;
       if (ws) {
         setTerminalSnapshot(ws.id, info.id, {
+          agent: awaitingAgent ? opts.launchCommand as "claude" | "codex" : info.agent,
           accountProfile: profileForLaunch(useAccountProfiles().profiles, opts.env, opts.launchCommand),
           name: displayName(info.name),
           terminal,
           cwd: info.cwd ?? cwd ?? null,
         });
+      }
+      if (awaitingAgent) {
+        pendingAgentLaunches.add(info.id);
       }
       return info;
     } catch (error) {
@@ -237,6 +261,31 @@ export function useSessions() {
       }
       return null;
     }
+  }
+
+  async function restoreForWorkspace(ws: Workspace, snapshot: TerminalTabSnapshot): Promise<SessionInfo | null> {
+    const agent = snapshot.agent ?? snapshot.accountProfile?.agent ?? "terminal";
+    const launchCommand = agent === "claude" || agent === "codex" ? agent : undefined;
+    let env: Record<string, string> | undefined;
+    const account = snapshot.accountProfile;
+    if (launchCommand && account?.agent === agent && account.id) {
+      const profile = useAccountProfiles().profiles.find(p => p.id === account.id && p.agent === agent);
+      // Do not silently switch an unavailable saved account to the system account.
+      if (!profile) {
+        console.warn(`Cannot restore terminal: saved account profile ${account.id} is unavailable`);
+        return null;
+      }
+      try {
+        env = await resolveProfileEnv(profile);
+      } catch {
+        console.warn("Cannot restore terminal: failed to resolve saved account profile");
+        return null;
+      }
+    }
+    const opts = { name: snapshot.name, launchCommand, env, showError: false };
+    return await createForWorkspace(ws, {
+      ...opts, terminal: snapshot.terminal, cwd: snapshot.cwd ?? undefined,
+    }) ?? await createForWorkspace(ws, opts);
   }
 
   async function create(opts: {
@@ -268,6 +317,7 @@ export function useSessions() {
     const idx = state.sessions.findIndex((s) => s.id === id);
     if (idx >= 0) state.sessions.splice(idx, 1);
     latestSessionAgentUpdates.delete(id);
+    pendingAgentLaunches.delete(id);
     delete currentCwds[id];
     delete activity[id];
     delete agentTaskStatus[id];
@@ -299,6 +349,7 @@ export function useSessions() {
     refresh,
     create,
     createForWorkspace,
+    restoreForWorkspace,
     kill,
     rename,
     getById,

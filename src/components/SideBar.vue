@@ -2,6 +2,8 @@
 import { t } from "../composables/useI18n";
 import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Icon } from "@iconify/vue";
+import { useLoopRouting } from '../composables/useLoopRouting';
+import { loopNavigatorSessions, loopTabId, loopStatusLabel } from '../lib/loop-routing';
 import SessionProfileTag from "./SessionProfileTag.vue";
 import { useWorkspaces, workspaceDefaultCwd } from "../composables/useWorkspaces";
 import { useSessions } from "../composables/useSessions";
@@ -16,6 +18,7 @@ import {
   addTabToLeaf,
   findFirstLeaf,
   activateSessionTab,
+  findLeafById,
 } from "../composables/useLayout";
 import { buildNavigatorTree, reorderSessionIds } from "../lib/navigator";
 import {
@@ -43,7 +46,8 @@ const {
   rename,
 } = useSessions();
 const { confirm: confirmSessionDelete } = useConfirm();
-const { setFocusedLeaf } = useFocus();
+const { focusedLeafId, setFocusedLeaf } = useFocus();
+const loops = useLoopRouting();
 const { openSettings } = useSettings();
 const { openFlow } = useFlowPage();
 const resources = useResources();
@@ -51,12 +55,16 @@ const resources = useResources();
 // Grouped Workspace -> Session tree the Navigator renders. Derivation and its
 // active/focused flags are unit-tested in `../lib/navigator`; this component
 // only renders the result and wires clicks back to focus/activation.
+const focusedLoopTab = computed(() => {
+  const ws = state.workspaces.find(ws => ws.id === state.activeWorkspaceId);
+  return ws && focusedLeafId.value ? findLeafById(ws.layout, focusedLeafId.value)?.activeTabId ?? null : null;
+});
 const tree = computed(() =>
   buildNavigatorTree({
     workspaces: state.workspaces,
-    sessions: sessState.sessions,
+    sessions: loopNavigatorSessions(sessState.sessions, loops.state.groups, state.workspaces),
     activeWorkspaceId: state.activeWorkspaceId,
-    focusedSessionId: focusedSession.value?.id ?? null,
+    focusedSessionId: focusedSession.value?.id ?? focusedLoopTab.value,
     activityById: activity,
     agentStatusById: agentTaskStatus,
   }),
@@ -74,9 +82,10 @@ const sessionEditValue = ref("");
 async function startSessionRename(id: string) {
   closeMenu();
   const session = sessState.sessions.find(s => s.id === id);
-  if (!session) return;
+  const group = loops.getByTab(id);
+  if (!session && !group) return;
   editingSessionId.value = id;
-  sessionEditValue.value = displayName(session.name);
+  sessionEditValue.value = group?.name ?? displayName(session!.name);
   await nextTick();
   const input = document.querySelector<HTMLInputElement>(".session-rename-input");
   input?.focus();
@@ -87,10 +96,23 @@ async function commitSessionRename() {
   const id = editingSessionId.value;
   const name = sessionEditValue.value.trim();
   editingSessionId.value = null;
-  if (id && name) await rename(id, name);
+  if (id && name) {
+    const group = loops.getByTab(id);
+    try {
+      if (group) await loops.rename(group.id, name);
+      else await rename(id, name);
+    } catch (error) { window.alert(String(error)); }
+  }
 }
 
 async function removeSession(id: string) {
+  const group = loops.getByTab(id);
+  if (group) {
+    closeMenu();
+    const ok = await confirmSessionDelete({ message: `루프 "${group.name}"을 중지하고 닫을까요?`, confirmLabel: t('Kill'), rememberKey: 'skipKillSessionConfirm' });
+    if (ok) await loops.close(group.id);
+    return;
+  }
   closeMenu();
   const session = sessState.sessions.find(s => s.id === id);
   if (!session) return;
@@ -197,21 +219,27 @@ async function removeWorkspace(id: string) {
   if (state.workspaces.length <= 1) return;
   const ws = state.workspaces.find((w) => w.id === id);
   if (!ws) return;
-  const sessionIds = collectAllSessionIds(ws.layout);
+  const sessionIds = [...new Set([...collectAllSessionIds(ws.layout), ...loops.state.groups.filter(group => group.workspaceId === id && group.status !== 'stopped').map(group => loopTabId(group.id))])];
   if (sessionIds.length > 0) {
     const choice = confirm(
       t('Workspace "{name}" has {count} session(s). OK: move them to the previous workspace. Cancel: kill them.', { name: ws.name, count: sessionIds.length }),
     );
     if (choice) {
       const idx = state.workspaces.findIndex((w) => w.id === id);
-      const target = state.workspaces[Math.max(0, idx - 1)] ?? state.workspaces[1];
+      const target = state.workspaces[idx > 0 ? idx - 1 : 1];
       if (target && target.id !== id) {
         const leaf = findFirstLeaf(target.layout);
-        for (const sid of sessionIds) addTabToLeaf(target.layout, leaf.id, sid);
+        for (const sid of sessionIds) {
+          const group = loops.getByTab(sid);
+          if (group) await loops.move(group.id, target.id, target.index);
+          addTabToLeaf(target.layout, leaf.id, sid);
+        }
       }
     } else {
       for (const sid of sessionIds) {
-        if (resources.getById(sid)) resources.forgetResource(sid);
+        const group = loops.getByTab(sid);
+        if (group) await loops.close(group.id);
+        else if (resources.getById(sid)) resources.forgetResource(sid);
         else await kill(sid);
       }
     }
@@ -332,10 +360,12 @@ onBeforeUnmount(() => {
               :class="['s-ico', `agent-${s.agent}`]"
               :icon="sessionAgentIcon(s.agent)"
             />
-            <SessionProfileTag :session-id="s.id" />
+            <span v-if="loops.getByTab(s.id)" class="loop-profile">↻ {{ loops.getByTab(s.id)!.attempts.slice(-1)[0]?.label }}</span>
+            <SessionProfileTag v-else :session-id="s.id" />
             <input
               v-if="editingSessionId === s.id"
               v-model="sessionEditValue"
+              maxlength="256"
               class="session-rename-input"
               :aria-label="t('Rename')"
               @blur="commitSessionRename"
@@ -345,7 +375,7 @@ onBeforeUnmount(() => {
               @click.stop
               @contextmenu.stop
             />
-            <span v-else class="s-name">{{ s.displayName }}</span>
+            <span v-else class="s-name">{{ s.displayName }}<small v-if="loops.getByTab(s.id)" class="loop-state"> · {{ loopStatusLabel(loops.getByTab(s.id)!.status) }}</small></span>
             <Icon
               v-if="s.hasBell"
               class="s-badge bell"
@@ -393,6 +423,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.loop-profile { color: #4ec9b0; font-size: 10px; white-space: nowrap; }
+.loop-state { color: #aaa; font-size: 10px; }
 .session.insert-before { box-shadow: inset 0 2px #4ec9b0; }
 .session.insert-after { box-shadow: inset 0 -2px #4ec9b0; }
 .sidebar {

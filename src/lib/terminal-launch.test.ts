@@ -75,7 +75,7 @@ describe("withAgentLaunch", () => {
   it("chains the launch command onto the PowerShell -Command script with ;", () => {
     const { terminal, argsForHook, hookedArgs } = hooked("powershell");
     const args = withAgentLaunch(terminal, hookedArgs, argsForHook, "claude");
-    expect(args[args.length - 1].endsWith("; claude")).toBe(true);
+    expect(args[args.length - 1].endsWith("; claude --permission-mode auto")).toBe(true);
     // Only the trailing script argument changes; -NoExit/-Command are untouched.
     expect(args.slice(0, 2)).toEqual(hookedArgs.slice(0, 2));
   });
@@ -83,19 +83,19 @@ describe("withAgentLaunch", () => {
   it("chains the launch command onto the cmd /K string with &", () => {
     const { terminal, argsForHook, hookedArgs } = hooked("cmd");
     const args = withAgentLaunch(terminal, hookedArgs, argsForHook, "codex");
-    expect(args).toEqual(["/K", "prompt $E]9;9;$P$E\\$P$G & codex"]);
+    expect(args).toEqual(["/K", "prompt $E]9;9;$P$E\\$P$G & codex --approve-for-me"]);
   });
 
   it("inserts the launch command before exec for git-bash, keeping the shell alive after", () => {
     const { terminal, argsForHook, hookedArgs } = hooked("git-bash", ["--login", "-i"]);
     const args = withAgentLaunch(terminal, hookedArgs, argsForHook, "claude");
-    expect(args[1]).toContain("; claude; exec bash --login -i");
+    expect(args[1]).toContain("; claude --permission-mode auto; exec bash --login -i");
   });
 
   it("inserts the launch command before exec for wsl", () => {
     const { terminal, argsForHook, hookedArgs } = hooked("wsl");
     const args = withAgentLaunch(terminal, hookedArgs, argsForHook, "codex");
-    expect(args[args.length - 1]).toContain('; codex; exec "${SHELL:-bash}" -l');
+    expect(args[args.length - 1]).toContain('; codex --approve-for-me; exec "${SHELL:-bash}" -l');
   });
 
   it("is a no-op for the custom preset", () => {

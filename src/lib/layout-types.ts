@@ -31,6 +31,7 @@ export interface WorkspaceSettings {
 }
 
 export interface TerminalTabSnapshot {
+  agent?: import("./tauri").AgentKind;
   accountProfile?: import("./session-profile").SessionProfile;
   name: string;
   terminal: TerminalConfig;

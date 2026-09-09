@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { initializeLoopRouting, disposeLoopRouting, useLoopRouting } from './composables/useLoopRouting';
+import { loopTabId } from './lib/loop-routing';
 import { t } from "./composables/useI18n";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -60,6 +62,7 @@ const {
   refresh,
   create,
   createForWorkspace,
+  restoreForWorkspace,
   kill,
   focusedSession,
   workspaceSessions,
@@ -164,7 +167,11 @@ async function bootstrap() {
   loadFromStorage();
   await refresh();
 
+  await initializeLoopRouting();
   const validIds = new Set(sessState.sessions.map((s) => s.id));
+  const loopGroups = useLoopRouting().state.groups;
+  for (const group of loopGroups) validIds.add(loopTabId(group.id));
+  const managedSessions = new Set(loopGroups.flatMap(group => group.attempts.flatMap(a => a.sessionId ? [a.sessionId] : [])));
   await restorePersistedSessions(validIds);
 
   // Prune missing sessions from every workspace layout.
@@ -182,7 +189,7 @@ async function bootstrap() {
   if (ws) {
     const leaf = findFirstLeaf(ws.layout);
     for (const s of sessState.sessions) {
-      if (!placed.has(s.id)) addTabToLeaf(ws.layout, leaf.id, s.id);
+      if (!placed.has(s.id) && !managedSessions.has(s.id)) addTabToLeaf(ws.layout, leaf.id, s.id);
     }
     // Set initial focus to the first non-empty leaf with an active tab.
     const firstLeafWithTabs = collectAllLeaves(ws.layout).find((l) => l.tabs.length > 0);
@@ -197,7 +204,7 @@ async function bootstrap() {
   }
 
   // Ensure at least one session exists.
-  if (sessState.sessions.length === 0) {
+  if (sessState.sessions.length === 0 && !useLoopRouting().state.groups.some(group => group.status !== 'stopped')) {
     await create();
   }
 }
@@ -210,18 +217,12 @@ async function restorePersistedSessions(validIds: Set<string>) {
       const snapshot = ws.terminalSnapshots?.[oldId];
       if (!snapshot) continue;
 
-      const restored = await createForWorkspace(ws, {
-        name: snapshot.name,
-        terminal: snapshot.terminal,
-        cwd: snapshot.cwd ?? undefined,
-        showError: false,
-      }) ?? await createForWorkspace(ws, {
-        name: snapshot.name,
-        showError: false,
-      });
+      const restored = await restoreForWorkspace(ws, snapshot);
 
       if (!restored) {
         console.warn(`Failed to restore terminal tab ${oldId}`);
+        // Keep the saved tab and launch identity available for the next retry.
+        validIds.add(oldId);
         continue;
       }
       if (ws.sessionOrder) ws.sessionOrder = ws.sessionOrder.map(id => id === oldId ? restored.id : id);
@@ -260,6 +261,12 @@ async function killFocused() {
     await closeResourceTab(leaf.activeTabId);
     return;
   }
+  const group = useLoopRouting().getByTab(leaf?.activeTabId ?? null);
+  if (group) {
+    const ok = await confirm({ message: `루프 "${group.name}"을 중지하고 닫을까요?`, confirmLabel: t('Kill'), rememberKey: 'skipKillSessionConfirm' });
+    if (ok) await useLoopRouting().close(group.id);
+    return;
+  }
   const s = focusedSession.value;
   if (!s) return;
   const ok = await confirm({
@@ -269,7 +276,7 @@ async function killFocused() {
   });
   if (ok) {
     await kill(s.id);
-    if (sessState.sessions.length === 0) await create();
+    if (sessState.sessions.length === 0 && !useLoopRouting().state.groups.some(group => group.status !== 'stopped')) await create();
   }
 }
 
@@ -280,10 +287,12 @@ async function killFocusedNow() {
     await closeResourceTab(leaf.activeTabId);
     return;
   }
+  const group = useLoopRouting().getByTab(leaf?.activeTabId ?? null);
+  if (group) { await useLoopRouting().close(group.id); return; }
   const s = focusedSession.value;
   if (!s) return;
   await kill(s.id);
-  if (sessState.sessions.length === 0) await create();
+  if (sessState.sessions.length === 0 && !useLoopRouting().state.groups.some(group => group.status !== 'stopped')) await create();
 }
 
 async function detach() {
@@ -470,6 +479,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  disposeLoopRouting();
   appUnmounted = true;
   if (agentListenerRetry) clearTimeout(agentListenerRetry);
   unlistenSessionAgent?.();

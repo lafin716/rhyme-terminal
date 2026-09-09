@@ -66,25 +66,27 @@ export function withAgentLaunch(
   launchCommand: string,
 ): string[] {
   if (hookedArgs === argsForHook || hookedArgs.length === 0) return hookedArgs;
+  const command = launchCommand === "claude" ? "claude --permission-mode auto"
+    : launchCommand === "codex" ? "codex --approve-for-me" : launchCommand;
   const out = [...hookedArgs];
   const last = out[out.length - 1];
   switch (terminal.preset) {
     case "windows-powershell":
     case "powershell":
       // last = the whole -Command script; script blocks chain with `;`.
-      out[out.length - 1] = `${last}; ${launchCommand}`;
+      out[out.length - 1] = `${last}; ${command}`;
       return out;
     case "cmd":
       // last = the whole /K command string; `&` chains another command.
-      out[out.length - 1] = `${last} & ${launchCommand}`;
+      out[out.length - 1] = `${last} & ${command}`;
       return out;
     case "git-bash":
     case "wsl":
       // last ends in "; exec ..." (replaces the shell to stay interactive);
       // run the launch command just before that so the shell survives it.
       out[out.length - 1] = last.includes("; exec ")
-        ? last.replace("; exec ", `; ${launchCommand}; exec `)
-        : `${last}; ${launchCommand}`;
+        ? last.replace("; exec ", `; ${command}; exec `)
+        : `${last}; ${command}`;
       return out;
     case "custom":
     default:

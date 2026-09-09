@@ -58,19 +58,33 @@ impl SessionManager {
         changes
     }
 
-    pub fn note_input(&self, id: Uuid) -> Option<AgentTaskStatus> {
+    pub fn note_input(&self, id: Uuid, bytes: &[u8]) -> Option<AgentTaskStatus> {
         let map = self.sessions.lock();
         let session = map.get(&id)?;
         let agent = *session.agent_kind.lock();
-        let status = session.task_tracker.lock().observe(agent, AgentTaskEvent::Input);
+        let status = session
+            .task_tracker
+            .lock()
+            .observe(agent, AgentTaskEvent::Input(bytes));
         status
     }
 
-    pub fn complete_idle_tasks(&self, timeout: std::time::Duration) -> Vec<(Uuid, AgentTaskStatus)> {
-        self.sessions.lock().iter().filter_map(|(id, session)| {
-            let agent = *session.agent_kind.lock();
-            session.task_tracker.lock().complete_if_idle(agent, timeout).map(|status| (*id, status))
-        }).collect()
+    pub fn complete_idle_tasks(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Vec<(Uuid, AgentTaskStatus)> {
+        self.sessions
+            .lock()
+            .iter()
+            .filter_map(|(id, session)| {
+                let agent = *session.agent_kind.lock();
+                session
+                    .task_tracker
+                    .lock()
+                    .complete_if_idle(agent, timeout)
+                    .map(|status| (*id, status))
+            })
+            .collect()
     }
 
     pub fn next_default_name(&self) -> String {

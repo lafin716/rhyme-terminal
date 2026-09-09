@@ -1,7 +1,8 @@
 pub mod commands;
-pub mod flow;
 pub mod daemon;
+pub mod flow;
 pub mod ipc;
+pub mod loop_routing;
 pub mod mobile_pairing;
 pub mod pty;
 pub mod tray;
@@ -37,11 +38,20 @@ pub fn run() {
         .manage(client.clone())
         .manage(rt.clone())
         .setup(move |app| {
-            let flow = app.path().app_local_data_dir().map_err(anyhow::Error::from)
+            let flow = app
+                .path()
+                .app_local_data_dir()
+                .map_err(anyhow::Error::from)
                 .and_then(|path| flow::runtime::Engine::open(path.join("flow")));
             app.manage(match flow {
-                Ok(engine) => flow::FlowService { engine: Some(engine), error: None },
-                Err(error) => flow::FlowService { engine: None, error: Some(format!("{error:#}")) },
+                Ok(engine) => flow::FlowService {
+                    engine: Some(engine),
+                    error: None,
+                },
+                Err(error) => flow::FlowService {
+                    engine: None,
+                    error: Some(format!("{error:#}")),
+                },
             });
             // Set the window icon explicitly as well as embedding it through the
             // bundle configuration. This keeps dev builds and the tray in sync.
@@ -118,6 +128,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            loop_routing::loop_request,
             flow::flow_request,
             mobile_pairing::mobile_pairing_interfaces,
             mobile_pairing::mobile_pairing_status,

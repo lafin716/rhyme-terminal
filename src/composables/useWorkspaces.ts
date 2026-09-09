@@ -44,6 +44,8 @@ function backfillWorkspace(ws: Workspace) {
   for (const [id, snapshot] of Object.entries(ws.terminalSnapshots ?? {})) {
     if (!snapshot?.terminal) continue;
     snapshots[id] = {
+      agent: snapshot.agent === "claude" || snapshot.agent === "codex" || snapshot.agent === "terminal"
+        ? snapshot.agent : snapshot.accountProfile?.agent ?? "terminal",
       name: typeof snapshot.name === "string" && snapshot.name.trim()
         ? snapshot.name.trim()
         : "session",
@@ -172,6 +174,7 @@ export function useWorkspaces() {
     const ws = state.workspaces.find((w) => w.id === workspaceId);
     if (!ws) return;
     ws.terminalSnapshots[sessionId] = {
+      agent: snapshot.agent,
       name: snapshot.name.trim() || "session",
       cwd: snapshot.cwd?.trim() || null,
       accountProfile: snapshot.accountProfile,

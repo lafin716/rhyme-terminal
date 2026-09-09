@@ -22,6 +22,7 @@ use crate::pty::{scrollback_snapshot, spawn_session};
 const DEFAULT_SHELL: &str = "powershell.exe";
 
 pub struct DaemonState {
+    pub routing: crate::loop_routing::Service,
     pub manager: Arc<SessionManager>,
     pub events: broadcast::Sender<Event>,
 }
@@ -30,6 +31,7 @@ impl DaemonState {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(1024);
         Self {
+            routing: crate::loop_routing::Service::default(),
             manager: Arc::new(SessionManager::new()),
             events: tx,
         }
@@ -46,6 +48,7 @@ pub async fn run_server(state: Arc<DaemonState>) -> Result<()> {
             anyhow!("failed to bind named pipe {name}: {e} (another daemon already running?)")
         })?;
     info!("daemon listening on {name}");
+    crate::loop_routing::Service::start(state.clone());
 
     let monitor_state = state.clone();
     tokio::spawn(async move {
@@ -129,6 +132,32 @@ async fn handle_client(state: Arc<DaemonState>, pipe: NamedPipeServer) -> Result
             };
 
             let req_id = req.id;
+            // Usage may wait on the provider network. Keep terminal input and
+            // loop control responsive on this same multiplexed IPC connection.
+            if matches!(req.method, Method::AccountUsage { .. }) {
+                let usage_state = state.clone();
+                let usage_attached = attached.clone();
+                let usage_writer = writer.clone();
+                tokio::spawn(async move {
+                    let response = match dispatch(usage_state, usage_attached, req).await {
+                        Ok(value) => ServerMsg::Response {
+                            id: req_id,
+                            result: value,
+                        },
+                        Err(error) => ServerMsg::Error {
+                            id: req_id,
+                            message: error.to_string(),
+                        },
+                    };
+                    if let Ok(bytes) = serde_json::to_vec(&response) {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                            write_frame(&mut *usage_writer.lock().await, &bytes).await
+                        })
+                        .await;
+                    }
+                });
+                continue;
+            }
             let kill_server = matches!(req.method, Method::KillServer);
             if let Method::AttachSessionAtomic { id } = req.method {
                 // Wait for a complete frame before stopping the old relay.
@@ -255,6 +284,17 @@ async fn dispatch(
     req: Request,
 ) -> Result<serde_json::Value> {
     match req.method {
+        Method::LoopRequest { request } => state.routing.request(&state, request).await,
+        Method::AccountUsage {
+            agent,
+            dir,
+            session_usage,
+        } => {
+            let windows = crate::usage::query_account_usage(&agent, &dir, session_usage)
+                .await
+                .map_err(|e| anyhow!(e))?;
+            Ok(serde_json::to_value(windows)?)
+        }
         Method::AttachSessionAtomic { .. } => {
             Err(anyhow!("atomic attach requires connection handler"))
         }
@@ -292,6 +332,9 @@ async fn dispatch(
             Ok(serde_json::to_value(list)?)
         }
         Method::KillSession { id } => {
+            if state.routing.owned.lock().contains(&id) {
+                return Err(anyhow!("루프 그룹의 종료 버튼을 사용하세요"));
+            }
             let removed = {
                 let mut map = state.manager.sessions.lock();
                 map.remove(&id)
@@ -310,9 +353,15 @@ async fn dispatch(
             Ok(json!(null))
         }
         Method::WriteSession { id, data } => {
+            if state.routing.blocked.lock().contains(&id) {
+                return Err(anyhow!("루프 그룹이 전환 또는 일시정지 중입니다"));
+            }
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
                 .map_err(|e| anyhow!("invalid base64: {e}"))?;
+            if state.routing.write_managed(&state, id, &bytes).await? {
+                return Ok(json!(null));
+            }
             {
                 let mut map = state.manager.sessions.lock();
                 let session = map
@@ -321,7 +370,7 @@ async fn dispatch(
                 session.writer.write_all(&bytes)?;
                 session.writer.flush()?;
             }
-            if let Some(status) = state.manager.note_input(id) {
+            if let Some(status) = state.manager.note_input(id, &bytes) {
                 let _ = state
                     .events
                     .send(Event::SessionAgentStatusChanged { id, status });

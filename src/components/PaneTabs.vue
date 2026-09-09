@@ -19,6 +19,13 @@ import { orderedSessionMenuItems } from "../lib/session-menu";
 import { resolveDefaultProfile } from "../lib/default-profile";
 import type { LeafNode } from "../lib/layout-types";
 import TerminalView from "./Terminal.vue";
+import LoopGroupView from './LoopGroupView.vue';
+import LoopCreateDialog from './LoopCreateDialog.vue';
+import { homeDir } from '@tauri-apps/api/path';
+import { useLoopRouting } from '../composables/useLoopRouting';
+import { loopTabId, loopStatusLabel, type LoopGroup } from '../lib/loop-routing';
+import { workspaceDefaultCwd } from '../composables/useWorkspaces';
+const loops = useLoopRouting();
 import BrowserView from "./BrowserView.vue";
 import { useSessions, displayName } from "../composables/useSessions";
 import {
@@ -39,6 +46,7 @@ import {
   type TerminalConfig,
 } from "../lib/terminal-config";
 import {
+  addTabToLeaf,
   computeDropZone,
   leafCount,
   MAX_PANES,
@@ -165,7 +173,24 @@ function terminalGlyph(terminal: TerminalConfig): string {
   }
 }
 
+const loopDraft = ref<{ workspaceId: string; workspaceIndex: number; cwd: string; name: string }>();
+async function createLoop() {
+  closeTerminalMenu();
+  const ws = activeWorkspace.value;
+  if (!ws) return;
+  loopDraft.value = { workspaceId: ws.id, workspaceIndex: ws.index, cwd: workspaceDefaultCwd(ws) ?? await homeDir(), name: `루프 ${loops.state.groups.length + 1}` };
+}
+function loopCreated(group: LoopGroup) {
+  const ws = activeWorkspace.value;
+  if (ws && ws.id === group.workspaceId) {
+    addTabToLeaf(ws.layout, props.leaf.id, loopTabId(group.id));
+    setFocusedLeaf(props.leaf.id);
+  }
+  loopDraft.value = undefined;
+}
 function sessionName(id: string): string {
+  const group = loops.getByTab(id);
+  if (group) return group.name;
   const resource = resources.getById(id);
   if (resource?.kind === "file") return resource.preview.name;
   if (resource?.kind === "browser") {
@@ -192,7 +217,7 @@ function tabIcon(id: string): string {
 }
 
 function terminalTabIcon(id: string) {
-  return sessionAgentIcon(getSessionById(id)?.agent ?? "terminal");
+  return sessionAgentIcon(loops.getByTab(id)?.attempts.slice(-1)[0]?.agent ?? getSessionById(id)?.agent ?? "terminal");
 }
 
 function fileTab(id: string | null): FileTab | null {
@@ -225,10 +250,15 @@ function startRename(id: string) {
 }
 
 async function commitRename() {
-  if (editingId.value && editValue.value.trim()) {
-    await rename(editingId.value, editValue.value.trim());
-  }
+  const id = editingId.value;
+  const name = editValue.value.trim();
   editingId.value = null;
+  if (!id || !name) return;
+  try {
+    const group = loops.getByTab(id);
+    if (group) await loops.rename(group.id, name);
+    else await rename(id, name);
+  } catch (error) { alert(String(error)); }
 }
 
 async function closeTab(id: string, ev: MouseEvent) {
@@ -265,6 +295,8 @@ async function closeTabs(ids: string[]) {
 }
 
 async function closeTabById(id: string) {
+  const group = loops.getByTab(id);
+  if (group) { await loops.close(group.id); return; }
   if (resources.getById(id)) {
     resources.closeResource(id);
     return;
@@ -588,9 +620,10 @@ onUnmounted(() => {
           <template v-if="editingId === id">
             <input
               v-model="editValue"
+              maxlength="256"
               autofocus
               @blur="commitRename"
-              @keydown.enter="commitRename"
+              @keydown.enter.prevent.stop="!$event.isComposing && commitRename()"
               @keydown.escape="editingId = null"
               @click.stop
               @mousedown.stop
@@ -603,11 +636,12 @@ onUnmounted(() => {
             />
             <Icon
               v-if="tabKind(id) === 'terminal'"
-              :class="['kind-icon', `agent-${getSessionById(id)?.agent ?? 'terminal'}`]"
+              :class="['kind-icon', `agent-${loops.getByTab(id)?.attempts.slice(-1)[0]?.agent ?? getSessionById(id)?.agent ?? 'terminal'}`]"
               :icon="terminalTabIcon(id)"
             />
             <span v-else class="kind-icon">{{ tabIcon(id) }}</span>
-            <SessionProfileTag v-if="tabKind(id) === 'terminal'" :session-id="id" />
+            <span v-if="loops.getByTab(id)" class="loop-tag">↻ {{ loops.getByTab(id)!.attempts.slice(-1)[0]?.label }} · {{ loopStatusLabel(loops.getByTab(id)!.status) }}</span>
+            <SessionProfileTag v-else-if="tabKind(id) === 'terminal'" :session-id="id" />
             <span class="name">{{ sessionName(id) }}</span>
             <span
               v-if="isFileDirty(id)"
@@ -652,6 +686,8 @@ onUnmounted(() => {
         role="menu"
         @mousedown.stop
       >
+        <button class="terminal-option" role="menuitem" @mouseenter="profileMenuAgent = null" @click="createLoop"><span class="terminal-agent-slot">↻</span>새 에이전트 루프</button>
+        <div class="terminal-option-separator" />
         <template v-for="(item, index) in terminalMenuItems" :key="item.id">
           <div v-if="index > 0 && item.kind !== terminalMenuItems[index - 1].kind" class="terminal-option-separator" />
           <button v-if="item.kind === 'page'" class="terminal-option" role="menuitem" @mouseenter="profileMenuAgent = null" @click="openNewPage">
@@ -734,8 +770,9 @@ onUnmounted(() => {
     </Teleport>
 
     <div class="body">
+      <LoopGroupView v-if="loops.getByTab(leaf.activeTabId)" :key="leaf.activeTabId!" :group="loops.getByTab(leaf.activeTabId)!" :active="isFocused" />
       <TerminalView
-        v-if="leaf.activeTabId && tabKind(leaf.activeTabId) === 'terminal'"
+        v-else-if="leaf.activeTabId && tabKind(leaf.activeTabId) === 'terminal'"
         :key="leaf.activeTabId"
         :session-id="leaf.activeTabId"
         :active="isFocused"
@@ -772,9 +809,11 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  <LoopCreateDialog v-if="loopDraft" v-bind="loopDraft" @close="loopDraft = undefined" @created="loopCreated" />
 </template>
 
 <style scoped>
+.loop-tag { color: #4ec9b0; font-size: 10px; }
 .pane {
   display: flex;
   flex-direction: column;
@@ -926,7 +965,7 @@ input {
   min-width: 0;
   overflow: hidden;
 }
-.body :deep(.term-host) {
+.body > :deep(.term-host) {
   position: absolute;
   inset: 0;
 }
