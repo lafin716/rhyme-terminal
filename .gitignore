@@ -27,3 +27,17 @@ dist-ssr
 target-agent-detection/
 target-agent-state-events/
 target-mobile/
+
+# Local signing material (never publish in the public repository)
+*.jks
+*.keystore
+*.p12
+*.pfx
+src-tauri/gen/android/keystore.properties
+src-tauri/gen/android/local.properties
+
+# Local CI validation tools and collected build output
+.scratch/ci-cd/
+artifacts/
+
+dist-android/

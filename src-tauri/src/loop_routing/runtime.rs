@@ -59,10 +59,7 @@ pub struct Engine {
     quotas: HashMap<String, Quota>,
 }
 fn data_root() -> Result<PathBuf> {
-    Ok(
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?)
-            .join("com.user.winmux"),
-    )
+    crate::platform::data_dir()
 }
 fn profile_dir(c: &Candidate) -> Result<PathBuf> {
     if let Some(id) = &c.profile_id {
@@ -77,8 +74,7 @@ fn profile_dir(c: &Candidate) -> Result<PathBuf> {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| {
-                std::env::var_os("USERPROFILE")
-                    .map(|p| PathBuf::from(p).join(format!(".{}", c.agent)))
+                crate::platform::home_dir().map(|p| PathBuf::from(p).join(format!(".{}", c.agent)))
             })
             .context("System profile directory unavailable")
     }
@@ -322,7 +318,7 @@ impl Engine {
                     .as_str()
                     .filter(|s| !s.trim().is_empty())
                     .map(PathBuf::from)
-                    .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+                    .or_else(|| crate::platform::home_dir().map(PathBuf::from))
                     .context("작업 폴더가 필요합니다")?
                     .canonicalize()?;
                 ensure!(cwd.is_dir(), "작업 폴더가 아닙니다");
@@ -1230,6 +1226,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "runtime_tests.rs"]
 mod regression_tests;

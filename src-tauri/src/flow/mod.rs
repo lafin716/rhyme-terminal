@@ -301,7 +301,13 @@ fn validate_intake_plan(e: &Engine, project: &str, plan: &Value) -> Result<()> {
     Ok(())
 }
 pub fn example_flow() -> Flow {
-    serde_json::from_value(json!({"schema_version":1,"flow_id":"command-example","revision":0,"name":"PowerShell 확인","inputs":{},"outputs":{},"nodes":[{"id":"command","kind":"command","config":{"program":"powershell.exe","args":["-NoProfile","-Command","[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Write-Output 'Rhyme Flow 준비 완료'"]},"input_bindings":{},"execution_policy":{"timeout_secs":30}},{"id":"result","kind":"output","config":{},"input_bindings":{"log":{"source":"command","path":"/stdout"}},"execution_policy":{"timeout_secs":30}}],"edges":[{"id":"command-result","source":"command","target":"result","source_port":"success","target_port":"input"}],"policies":{"concurrency":2,"timeout_secs":300,"capabilities":["command"]},"layout":{"command":{"x":60,"y":100},"result":{"x":360,"y":100}}})).expect("Built-in example must follow schema")
+    let mut flow: Flow = serde_json::from_value(json!({"schema_version":1,"flow_id":"command-example","revision":0,"name":"PowerShell 확인","inputs":{},"outputs":{},"nodes":[{"id":"command","kind":"command","config":{"program":"powershell.exe","args":["-NoProfile","-Command","[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); Write-Output 'Rhyme Flow 준비 완료'"]},"input_bindings":{},"execution_policy":{"timeout_secs":30}},{"id":"result","kind":"output","config":{},"input_bindings":{"log":{"source":"command","path":"/stdout"}},"execution_policy":{"timeout_secs":30}}],"edges":[{"id":"command-result","source":"command","target":"result","source_port":"success","target_port":"input"}],"policies":{"concurrency":2,"timeout_secs":300,"capabilities":["command"]},"layout":{"command":{"x":60,"y":100},"result":{"x":360,"y":100}}})).expect("Built-in example must follow schema");
+    if cfg!(unix) {
+        flow.name = "Shell 확인".into();
+        flow.nodes[0].config =
+            json!({"program":"/bin/sh","args":["-lc","printf 'Rhyme Flow 준비 완료\\n'"]});
+    }
+    flow
 }
 
 #[cfg(test)]

@@ -1,0 +1,26 @@
+name: Build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform
+        type: choice
+        default: all
+        options: [all, windows, macos, android]
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.platform || 'all' }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'windows'
+    uses: ./.github/workflows/build-windows.yml
+  macos:
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'macos'
+    uses: ./.github/workflows/build-macos.yml
+  android:
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'android'
+    uses: ./.github/workflows/build-android.yml

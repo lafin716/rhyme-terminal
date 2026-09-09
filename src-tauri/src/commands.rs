@@ -73,7 +73,11 @@ fn validate_account_profile_id(profile_id: &str) -> Result<(), String> {
 /// Builds `<base>/accounts/<agent>/<profile_id>`, the isolated login directory
 /// for one account profile. Pure and unit-testable; [`resolve_account_dir`]
 /// wraps it with the app's local-data directory and creates it on disk.
-pub(crate) fn account_dir_path(base: &Path, agent: &str, profile_id: &str) -> Result<PathBuf, String> {
+pub(crate) fn account_dir_path(
+    base: &Path,
+    agent: &str,
+    profile_id: &str,
+) -> Result<PathBuf, String> {
     validate_account_agent(agent)?;
     validate_account_profile_id(profile_id)?;
     Ok(base.join("accounts").join(agent).join(profile_id))
@@ -120,18 +124,24 @@ fn prepare_setup_token_profile(dir: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(format!("Unable to read Claude profile settings: {e}")),
     };
-    let object = config.as_object_mut()
+    let object = config
+        .as_object_mut()
         .ok_or_else(|| "Claude profile settings must be a JSON object".to_string())?;
     if object.get("hasCompletedOnboarding") == Some(&serde_json::Value::Bool(true)) {
         return Ok(());
     }
-    object.insert("hasCompletedOnboarding".into(), serde_json::Value::Bool(true));
-    object.entry("theme").or_insert_with(|| serde_json::json!("dark"));
+    object.insert(
+        "hasCompletedOnboarding".into(),
+        serde_json::Value::Bool(true),
+    );
+    object
+        .entry("theme")
+        .or_insert_with(|| serde_json::json!("dark"));
     let contents = serde_json::to_vec_pretty(&config)
         .map_err(|e| format!("Unable to encode Claude profile settings: {e}"))?;
     let temporary = dir.join(format!(".claude-winmux-{}.tmp", Uuid::new_v4()));
-    let result = std::fs::write(&temporary, contents)
-        .and_then(|_| std::fs::rename(&temporary, &path));
+    let result =
+        std::fs::write(&temporary, contents).and_then(|_| std::fs::rename(&temporary, &path));
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
@@ -161,7 +171,13 @@ pub fn set_account_token(
     if agent == "claude" {
         prepare_setup_token_profile(&dir)?;
     }
-    if agent == "claude" && std::fs::read_to_string(dir.join(ACCOUNT_TOKEN_FILE)).ok().as_deref().map(str::trim) != Some(token) {
+    if agent == "claude"
+        && std::fs::read_to_string(dir.join(ACCOUNT_TOKEN_FILE))
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            != Some(token)
+    {
         // A new token can represent a different account in the same profile.
         match std::fs::remove_file(dir.join("winmux-usage.json")) {
             Ok(()) => (),
@@ -193,7 +209,11 @@ pub fn get_account_token(
             if agent == "claude" && !trimmed.is_empty() {
                 prepare_setup_token_profile(&dir)?;
             }
-            Ok(if trimmed.is_empty() { None } else { Some(trimmed.to_string()) })
+            Ok(if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            })
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("Failed to read token: {e}")),
@@ -287,7 +307,9 @@ pub async fn resolve_resource_path(target: String, cwd: Option<String>) -> Resul
     tauri::async_runtime::spawn_blocking(move || {
         resolve_resource_path_sync(&target, cwd.as_deref())
             .map(|path| path.to_string_lossy().into_owned())
-    }).await.map_err(|e| e.to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn resolve_resource_path_sync(target: &str, cwd: Option<&str>) -> Result<PathBuf, String> {
@@ -999,9 +1021,13 @@ mod preview_tests {
         let dir = temp_dir("resolve");
         let file = dir.join("space name.txt");
         fs::write(&file, b"text").unwrap();
-        let resolved = super::resolve_resource_path_sync("\"space name.txt\":12:3", dir.to_str()).unwrap();
+        let resolved =
+            super::resolve_resource_path_sync("\"space name.txt\":12:3", dir.to_str()).unwrap();
         assert_eq!(resolved, file.canonicalize().unwrap());
-        assert_eq!(super::resolve_resource_path_sync(".", dir.to_str()).unwrap(), dir.canonicalize().unwrap());
+        assert_eq!(
+            super::resolve_resource_path_sync(".", dir.to_str()).unwrap(),
+            dir.canonicalize().unwrap()
+        );
         assert!(super::resolve_resource_path_sync("missing.txt", dir.to_str()).is_err());
         fs::remove_dir_all(&dir).ok();
     }
@@ -1049,7 +1075,13 @@ mod account_dir_tests {
     #[test]
     fn joins_base_agent_and_profile_id() {
         let dir = account_dir_path(Path::new(r"C:\data"), "claude", "acct_1").unwrap();
-        assert_eq!(dir, Path::new(r"C:\data").join("accounts").join("claude").join("acct_1"));
+        assert_eq!(
+            dir,
+            Path::new(r"C:\data")
+                .join("accounts")
+                .join("claude")
+                .join("acct_1")
+        );
     }
 
     #[test]
@@ -1080,7 +1112,11 @@ mod account_dir_tests {
         let dir = std::env::temp_dir().join(format!("winmux-onboarding-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(".claude.json");
-        std::fs::write(&path, r#"{"theme":"light","projects":{"work":{"hasTrustDialogAccepted":false}}}"#).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"theme":"light","projects":{"work":{"hasTrustDialogAccepted":false}}}"#,
+        )
+        .unwrap();
         prepare_setup_token_profile(&dir).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
         let config: serde_json::Value = serde_json::from_str(&saved).unwrap();
@@ -1091,7 +1127,8 @@ mod account_dir_tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
         std::fs::remove_file(&path).unwrap();
         prepare_setup_token_profile(&dir).unwrap();
-        let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(config["hasCompletedOnboarding"], true);
         assert_eq!(config["theme"], "dark");
         std::fs::remove_dir_all(dir).unwrap();

@@ -589,7 +589,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod positive_integration {
     use super::*;
     use crate::ipc::{

@@ -1,3 +1,4 @@
+use super::transport::{Listener, Server as NamedPipeServer};
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use portable_pty::PtySize;
@@ -7,7 +8,6 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::broadcast;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
@@ -19,7 +19,10 @@ use crate::pty::agent::process_snapshot;
 use crate::pty::manager::SessionManager;
 use crate::pty::{scrollback_snapshot, spawn_session};
 
+#[cfg(windows)]
 const DEFAULT_SHELL: &str = "powershell.exe";
+#[cfg(unix)]
+const DEFAULT_SHELL: &str = "/bin/zsh";
 
 pub struct DaemonState {
     pub routing: crate::loop_routing::Service,
@@ -41,12 +44,7 @@ impl DaemonState {
 pub async fn run_server(state: Arc<DaemonState>) -> Result<()> {
     let name = pipe_name();
 
-    let first = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&name)
-        .map_err(|e| {
-            anyhow!("failed to bind named pipe {name}: {e} (another daemon already running?)")
-        })?;
+    let mut listener = Listener::bind(&name).await?;
     info!("daemon listening on {name}");
     crate::loop_routing::Service::start(state.clone());
 
@@ -82,15 +80,8 @@ pub async fn run_server(state: Arc<DaemonState>) -> Result<()> {
         }
     });
 
-    let mut server = first;
     loop {
-        server.connect().await?;
-        let connected = server;
-
-        server = ServerOptions::new()
-            .create(&name)
-            .map_err(|e| anyhow!("failed to create next pipe instance: {e}"))?;
-
+        let connected = listener.accept().await?;
         let st = state.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(st, connected).await {
@@ -437,11 +428,11 @@ fn snapshot_and_subscribe(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod mobile_stream_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::windows::named_pipe::ClientOptions;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
     #[test]
     fn concurrent_snapshot_and_live_output_have_no_missing_or_duplicate_bytes() {
         let scrollback = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));

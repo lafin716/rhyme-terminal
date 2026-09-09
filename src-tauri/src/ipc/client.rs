@@ -1,3 +1,4 @@
+use super::transport::{self, Client as NamedPipeClient};
 use anyhow::{anyhow, bail, Result};
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -5,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::sync::{broadcast, oneshot, Mutex as AsyncMutex};
 use tokio::time::sleep;
 
@@ -47,7 +47,7 @@ impl DaemonClient {
         let name = pipe_name();
         let mut spawned = false;
         for attempt in 0..50 {
-            match ClientOptions::new().open(&name) {
+            match transport::connect(&name).await {
                 Ok(client) => return Self::from_pipe(client).await,
                 Err(_) => {
                     if !spawned {
@@ -66,14 +66,14 @@ impl DaemonClient {
 
     pub async fn connect_existing() -> Result<Arc<Self>> {
         let name = pipe_name();
-        let client = ClientOptions::new()
-            .open(&name)
+        let client = transport::connect(&name)
+            .await
             .map_err(|e| anyhow!("daemon not running at {name}: {e}"))?;
         Self::from_pipe(client).await
     }
 
     pub async fn connect_mobile() -> Result<Arc<Self>> {
-        let client = ClientOptions::new().open(pipe_name())?;
+        let client = transport::connect(&pipe_name()).await?;
         Self::from_pipe_capacity(client, 64).await
     }
 
@@ -248,10 +248,10 @@ fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod mobile_lifetime_tests {
     use super::*;
-    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
     async fn pair() -> (
         Arc<DaemonClient>,
         tokio::net::windows::named_pipe::NamedPipeServer,

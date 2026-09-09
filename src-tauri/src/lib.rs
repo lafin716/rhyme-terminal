@@ -1,24 +1,39 @@
+#[cfg(desktop)]
 pub mod commands;
+#[cfg(desktop)]
 pub mod daemon;
+#[cfg(desktop)]
 pub mod flow;
+#[cfg(desktop)]
 pub mod ipc;
+#[cfg(desktop)]
 pub mod loop_routing;
+#[cfg(desktop)]
 pub mod mobile_pairing;
+#[cfg(desktop)]
 pub mod pty;
+#[cfg(desktop)]
 pub mod tray;
+#[cfg(desktop)]
 pub mod usage;
+#[cfg(desktop)]
 pub mod usage_bridge;
 
+#[cfg(desktop)]
 use std::sync::Arc;
+#[cfg(desktop)]
 use tauri::{Emitter, Manager, WindowEvent};
 
+#[cfg(desktop)]
 use crate::ipc::client::DaemonClient;
+#[cfg(desktop)]
 use crate::ipc::protocol::Event;
 
 pub const DAEMON_ARG: &str = "--winmux-daemon";
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(desktop)]
 pub fn run() {
+    platform::prepare_environment();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -161,3 +176,12 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(mobile)]
+mod mobile;
+#[cfg(desktop)]
+pub mod platform;
+#[cfg(all(desktop, unix))]
+pub mod unix_cli;
+#[cfg(mobile)]
+pub use mobile::run;

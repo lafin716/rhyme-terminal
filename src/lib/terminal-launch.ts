@@ -65,6 +65,11 @@ export function withAgentLaunch(
   argsForHook: string[],
   launchCommand: string,
 ): string[] {
+  if (terminal.preset === "zsh" && argsForHook.join("\0") === "-l\0-i") {
+    const command = launchCommand === "claude" ? "claude --permission-mode auto"
+      : launchCommand === "codex" ? "codex --approve-for-me" : launchCommand;
+    return ["-l", "-i", "-c", command + "; exec /bin/zsh -l -i"];
+  }
   if (hookedArgs === argsForHook || hookedArgs.length === 0) return hookedArgs;
   const command = launchCommand === "claude" ? "claude --permission-mode auto"
     : launchCommand === "codex" ? "codex --approve-for-me" : launchCommand;

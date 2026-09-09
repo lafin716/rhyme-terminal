@@ -1,0 +1,71 @@
+name: Windows build
+
+on:
+  workflow_call:
+    inputs:
+      run-checks:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: windows-x64
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Verify Windows prerequisites
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'MSVC C++ build tools are required' }
+          # windows-latest includes MSVC, Windows SDK and WebView2. Tauri
+          # downloads its pinned WiX/NSIS tools when creating installers.
+          rustup show active-toolchain
+      - name: Check Rust formatting
+        if: inputs.run-checks
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - name: Build embedded mobile assets
+        if: inputs.run-checks
+        run: pnpm build:mobile
+      - name: Clippy
+        if: inputs.run-checks
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets
+      - name: Rust tests
+        if: inputs.run-checks
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets -- --test-threads=2
+      - name: Cargo check
+        if: inputs.run-checks
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+      - name: Build native app and installers
+        run: pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles nsis,msi -- --locked
+      - name: Verify both installers exist
+        shell: pwsh
+        run: |
+          foreach ($pattern in @('src-tauri/target/release/bundle/nsis/*.exe', 'src-tauri/target/release/bundle/msi/*.msi')) {
+            if (-not (Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue)) { throw "Missing installer: $pattern" }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x64-installers
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14

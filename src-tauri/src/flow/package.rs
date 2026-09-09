@@ -26,7 +26,11 @@ pub fn development(e: &Engine) -> Result<Value> {
     let build = node(
         "verify",
         "command",
-        json!({"program":"powershell.exe","args":["-NoProfile","-Command","& pnpm.cmd build; exit $LASTEXITCODE"],"verification":true}),
+        if cfg!(windows) {
+            json!({"program":"powershell.exe","args":["-NoProfile","-Command","& pnpm.cmd build; exit $LASTEXITCODE"],"verification":true})
+        } else {
+            json!({"program":"/bin/sh","args":["-lc","pnpm build"],"verification":true})
+        },
         json!({}),
     );
     let mut review = node(

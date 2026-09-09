@@ -345,7 +345,9 @@ fn encode_write_data(text: &str, enter: bool) -> String {
 /// already-prefixed name is left as-is to avoid double-prefixing.
 fn apply_workspace_prefix(name: Option<String>, workspace: Option<u32>) -> Option<String> {
     match (name, workspace) {
-        (Some(name), Some(index)) if !has_workspace_prefix(&name) => Some(format!("w{index}.{name}")),
+        (Some(name), Some(index)) if !has_workspace_prefix(&name) => {
+            Some(format!("w{index}.{name}"))
+        }
         (name, _) => name,
     }
 }
@@ -391,8 +393,14 @@ mod tests {
         let sessions = vec![session(listed, "dev", "pwsh", 80, 24)];
         // A well-formed UUID resolves to itself even if absent from the list.
         let absent = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
-        assert_eq!(resolve_target_in(&sessions, &absent.to_string()), Some(absent));
-        assert_eq!(resolve_target_in(&sessions, &listed.to_string()), Some(listed));
+        assert_eq!(
+            resolve_target_in(&sessions, &absent.to_string()),
+            Some(absent)
+        );
+        assert_eq!(
+            resolve_target_in(&sessions, &listed.to_string()),
+            Some(listed)
+        );
     }
 
     #[test]
@@ -598,9 +606,16 @@ mod tests {
 
     #[test]
     fn parses_resize_with_cols_and_rows() {
-        let cli =
-            Cli::try_parse_from(["winmuxctl", "resize", "dev", "--cols", "100", "--rows", "40"])
-                .unwrap();
+        let cli = Cli::try_parse_from([
+            "winmuxctl",
+            "resize",
+            "dev",
+            "--cols",
+            "100",
+            "--rows",
+            "40",
+        ])
+        .unwrap();
         match cli.cmd {
             Cmd::Resize { target, cols, rows } => {
                 assert_eq!(target, "dev");

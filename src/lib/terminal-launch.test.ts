@@ -114,3 +114,17 @@ describe("withAgentLaunch", () => {
     expect(args).not.toContain("claude");
   });
 });
+
+describe("macOS shell launch", () => {
+  it("launches an account CLI and leaves a login shell after it exits", () => {
+    const terminal = configForPreset("zsh");
+    const args = terminal.args;
+    expect(withAgentLaunch(terminal, withCwdIntegration(terminal, args), args, "claude"))
+      .toEqual(["-l", "-i", "-c", "claude --permission-mode auto; exec /bin/zsh -l -i"]);
+  });
+  it("preserves an explicitly configured zsh command", () => {
+    const terminal = configForPreset("zsh");
+    const args = ["-c", "echo custom"];
+    expect(withAgentLaunch(terminal, args, args, "claude")).toBe(args);
+  });
+});

@@ -9,7 +9,7 @@ export interface FlowRun { id: string; task_id: string; flow_id: string; revisio
 export interface FlowCatalog { workers: Worker[]; flows: Flow[]; tasks: FlowTask[]; runs: FlowRun[] }
 export const flowId = () => crypto.randomUUID();
 export function newNode(kind: NodeKind, id: string = flowId()): FlowNode {
-  const config: Record<string, unknown> = kind === 'command' ? { program: 'powershell.exe', args: ['-NoProfile', '-Command', "Write-Output 'Rhyme Flow'"] } : kind === 'agent' ? { prompt: '입력 요구사항을 수행하고 결과를 설명하세요.' } : kind === 'condition' ? { binding: 'value', equals: true } : kind === 'builtin_action' ? { action: 'prepare_worktree' } : kind === 'bounded_repeat' ? { max_attempts: 3, body: [newNode('command', 'verify')], until: { node: 'verify', path: '/exit_code', equals: 0 } } : {};
+  const config: Record<string, unknown> = kind === 'command' ? (typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? { program: '/bin/sh', args: ['-lc', "printf 'Rhyme Flow\\n'"] } : { program: 'powershell.exe', args: ['-NoProfile', '-Command', "Write-Output 'Rhyme Flow'"] }) : kind === 'agent' ? { prompt: '입력 요구사항을 수행하고 결과를 설명하세요.' } : kind === 'condition' ? { binding: 'value', equals: true } : kind === 'builtin_action' ? { action: 'prepare_worktree' } : kind === 'bounded_repeat' ? { max_attempts: 3, body: [newNode('command', 'verify')], until: { node: 'verify', path: '/exit_code', equals: 0 } } : {};
   return { id, kind, config, input_bindings: {}, execution_policy: { timeout_secs: 300 } };
 }
 export function newFlow(): Flow {

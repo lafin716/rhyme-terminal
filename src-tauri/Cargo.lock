@@ -3361,6 +3361,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "if-addrs",
+ "libc",
  "parking_lot",
  "portable-pty",
  "qrcode",

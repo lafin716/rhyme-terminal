@@ -17,6 +17,11 @@ const state = ref<ClientState>({
 let terminal: Terminal | null = null;
 let terminalRenderGeneration = 0;
 
+const nativeKey = "winmux:native-remote:v1";
+const nativeRemote = new URLSearchParams(window.location.hash.slice(1)).get("native") === "android" || sessionStorage.getItem(nativeKey) === "android";
+if (nativeRemote) sessionStorage.setItem(nativeKey, "android");
+function returnToApp() { client.disconnect(); window.location.assign("http://tauri.localhost/native-mobile.html"); }
+
 const invite = takeInvitation(window.location, url => window.history.replaceState(null, "", url));
 const socketUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`;
 const client = new MobileClient({
@@ -121,6 +126,7 @@ onBeforeUnmount(() => { client.disconnect(); terminal?.dispose(); });
   <main>
     <header>
       <div class="brand"><img :src="appIcon" alt="" /><div class="brand-text"><strong>rhyme-terminal</strong><span>모바일 터미널</span></div></div>
+      <button v-if="nativeRemote" type="button" @click="returnToApp">다른 PC 연결</button>
       <span class="status" :data-phase="state.phase">{{ statusText }}</span>
     </header>
 

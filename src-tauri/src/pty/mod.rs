@@ -97,7 +97,13 @@ pub fn spawn_session(
         .filter(|s| !s.is_empty())
         .map(Path::new)
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| {
+            if cfg!(unix) {
+                crate::platform::home_dir()
+            } else {
+                std::env::current_dir().ok()
+            }
+        });
 
     let mut cmd = CommandBuilder::new(&shell);
     cmd.args(shell_args);

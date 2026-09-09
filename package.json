@@ -3,14 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@8.15.0",
+  "engines": {
+    "node": ">=22.14.0"
+  },
   "scripts": {
+    "lint": "eslint src --max-warnings 0",
+    "typecheck": "vue-tsc --noEmit",
     "dev": "pnpm run build:mobile && vite",
     "build": "pnpm run build:mobile && vue-tsc --noEmit && vite build",
     "build:mobile": "vite build --config vite.mobile.config.ts",
     "build:portable": "tauri build --no-bundle",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:android": "vue-tsc --noEmit && vite build --config vite.android.config.ts"
   },
   "dependencies": {
     "@iconify/vue": "^5.0.1",
@@ -29,10 +36,14 @@
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2",
     "@types/markdown-it": "^14.1.2",
     "@vitejs/plugin-vue": "^5.2.1",
+    "eslint": "^10.10.0",
+    "eslint-plugin-vue": "10",
     "typescript": "~5.6.2",
+    "typescript-eslint": "8",
     "vite": "^6.0.3",
     "vitest": "^4.1.10",
     "vue-tsc": "^2.1.10"

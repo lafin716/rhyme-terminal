@@ -4,6 +4,7 @@ export type TerminalPreset =
   | "cmd"
   | "wsl"
   | "git-bash"
+  | "zsh"
   | "custom";
 
 export interface TerminalConfig {
@@ -50,6 +51,7 @@ export const TERMINAL_PRESETS: TerminalPresetOption[] = [
     program: "C:\\Program Files\\Git\\bin\\bash.exe",
     args: ["--login", "-i"],
   },
+  { id: "zsh", label: "Zsh (macOS)", program: "/bin/zsh", args: ["-l", "-i"] },
   {
     id: "custom",
     label: "Custom",
@@ -59,7 +61,7 @@ export const TERMINAL_PRESETS: TerminalPresetOption[] = [
 ];
 
 export function defaultTerminalConfig(): TerminalConfig {
-  return configForPreset("windows-powershell");
+  return configForPreset(typeof navigator !== "undefined" && /Mac/.test(navigator.platform) ? "zsh" : "windows-powershell");
 }
 
 export function configForPreset(preset: TerminalPreset): TerminalConfig {

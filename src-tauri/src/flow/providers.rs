@@ -77,6 +77,8 @@ async fn execute_with_home(
     // Suspended creation closes the race where the child could spawn outside its job.
     #[cfg(windows)]
     command.creation_flags(0x08000000 | 0x00000004);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command
         .spawn()
         .with_context(|| format!("Could not start {program}"))?;
@@ -88,6 +90,8 @@ async fn execute_with_home(
             return Err(error);
         }
     };
+    #[cfg(unix)]
+    let group = UnixGroup(child.id().context("Missing process ID")?);
     let out = tokio::spawn(drain(child.stdout.take().context("Missing stdout")?));
     let err = tokio::spawn(drain(child.stderr.take().context("Missing stderr")?));
     let writer = if let Some(input) = stdin {
@@ -112,6 +116,8 @@ async fn execute_with_home(
     // Closing the job also kills descendants that inherited output handles.
     #[cfg(windows)]
     drop(job);
+    #[cfg(unix)]
+    drop(group);
     if status.is_err() {
         let _ = child.kill().await;
     }
@@ -432,5 +438,16 @@ mod tests {
         let (text, truncated) = drain(input.as_slice()).await.unwrap();
         assert_eq!(text.len(), OUTPUT_LIMIT);
         assert!(truncated);
+    }
+}
+
+#[cfg(unix)]
+struct UnixGroup(u32);
+#[cfg(unix)]
+impl Drop for UnixGroup {
+    fn drop(&mut self) {
+        unsafe {
+            libc::kill(-(self.0 as i32), libc::SIGKILL);
+        }
     }
 }

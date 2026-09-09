@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 use crate::ipc::server::{run_server, DaemonState};
 
 pub fn run() -> Result<()> {
+    crate::platform::prepare_environment();
     init_logging();
     tracing::info!("winmuxd starting");
 

@@ -19,9 +19,17 @@ pub fn install(dir: &Path) -> Result<(), String> {
         .as_object_mut()
         .ok_or("Invalid profile statusline settings")?;
     let script = dir.join("winmux-statusline.ps1");
+    #[cfg(windows)]
     let command = format!(
         "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
         script.to_string_lossy().replace('\\', "/")
+    );
+    #[cfg(unix)]
+    let command = format!(
+        "{} {}",
+        crate::unix_cli::command("--winmux-statusline")
+            .map_err(|_| "Unable to resolve statusline helper")?,
+        crate::unix_cli::quote(&dir.to_string_lossy())
     );
     write_if_changed(&script, SCRIPT.as_bytes())?;
     let metadata = dir.join("winmux-statusline.json");

@@ -1,0 +1,100 @@
+name: Android build
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+    secrets:
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+      ANDROID_STORE_PASSWORD:
+        required: false
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Keep SDK/NDK versions explicit; add ABI/target pairs here when needed.
+      ANDROID_NDK_VERSION: 27.2.12479018
+      ANDROID_ABI: aarch64
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-frontend
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      - name: Install Android tools and host prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;$ANDROID_NDK_VERSION"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: android-aarch64-ndk27
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ runner.arch }}-ndk27-${{ hashFiles('pnpm-lock.yaml', '**/*.gradle.kts', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-${{ runner.arch }}-ndk27-
+      - name: Initialize only when Android project is absent
+        run: |
+          if [[ ! -d src-tauri/gen/android ]]; then
+            pnpm tauri android init --ci --skip-targets-install
+          elif [[ ! -f src-tauri/gen/android/app/build.gradle.kts ]]; then
+            echo "::error::Incomplete Android project: refusing to overwrite src-tauri/gen/android"
+            exit 1
+          fi
+      - name: Configure direct LAN and Tailscale networking
+        run: node scripts/ci/prepare-android.mjs
+      - name: Prepare optional release signing
+        env:
+          RELEASE_BUILD: ${{ inputs.release }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: node scripts/ci/android-signing.mjs
+      - name: Build arm64 APK and AAB
+        env:
+          RELEASE_BUILD: ${{ inputs.release }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          args=(--ci --target "$ANDROID_ABI" --apk --aab)
+          if [[ "$RELEASE_BUILD" != true ]]; then args+=(--debug); fi
+          pnpm tauri android build "${args[@]}"
+          git diff --exit-code -- src-tauri/Cargo.lock
+      - name: Collect and verify Android packages
+        env:
+          RELEASE_BUILD: ${{ inputs.release }}
+        run: node scripts/ci/collect-android.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-arm64-packages
+          path: artifacts/android/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/rhyme-upload.jks"

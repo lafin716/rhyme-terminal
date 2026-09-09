@@ -53,7 +53,7 @@ async function activate(item: PaletteAction) {
   if (!sid) return;
 
   if (item.builtin && item.id === "__open_folder") {
-    let selected: string | string[] | null = null;
+    let selected: string | string[] | null;
     try {
       selected = await openDialog({ directory: true, multiple: false });
     } catch (e) {

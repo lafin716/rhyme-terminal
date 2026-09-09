@@ -244,7 +244,7 @@ pub async fn get_account_usage(
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from)
             .or_else(|| {
-                std::env::var_os("USERPROFILE")
+                crate::platform::home_dir()
                     .map(|home| std::path::PathBuf::from(home).join(format!(".{agent}")))
             })
             .ok_or("Profile directory unavailable")?

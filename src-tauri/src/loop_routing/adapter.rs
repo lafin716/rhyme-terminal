@@ -61,8 +61,12 @@ pub fn prepare_launch(
     // Keep the hook definition stable across attempts so trust is per-profile,
     // not invalidated by every generated attempt path. The environment value is
     // passed as data to Path.Combine, never evaluated as shell source.
+    #[cfg(windows)]
     let encoded = encoded_hook_script();
+    #[cfg(windows)]
     let command = format!("powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}");
+    #[cfg(unix)]
+    let command = crate::unix_cli::command("--winmux-hook")?;
     let mut events = EVENTS.to_vec();
     if agent == "claude" {
         events.push("PostToolUseFailure");
@@ -161,11 +165,15 @@ fn resolve_native(agent: &str) -> Result<String> {
     let paths: Vec<_> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
     for path in &paths {
-        let binary = path.join(format!("{agent}.exe"));
+        let binary = path.join(if cfg!(windows) {
+            format!("{agent}.exe")
+        } else {
+            agent.to_owned()
+        });
         if binary.is_file() {
             return Ok(binary.to_string_lossy().into_owned());
         }
-        if agent == "codex" {
+        if cfg!(windows) && agent == "codex" {
             for (package, target) in [
                 ("codex-win32-x64", "x86_64-pc-windows-msvc"),
                 ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
