@@ -124,7 +124,7 @@ Runner: `macos-latest`. 해당 hosted runner의 기본 CPU architecture로 빌�
 Universal binary나 Intel/Apple Silicon 양쪽 지원을 검증한 것으로 간주하지 않는다.
 
 ```sh
-pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles dmg -- --locked
+pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles app,dmg -- --locked
 ```
 
 - DMG: `src-tauri/target/release/bundle/dmg/*.dmg`

@@ -53,7 +53,7 @@ jobs:
           for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [[ -z "${!name}" ]]; then unset "$name"; fi
           done
-          pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles dmg -- --locked
+          pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles app,dmg -- --locked
       - name: Verify Unix IPC framing and exclusive listener
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib ipc::transport
       - name: Smoke test packaged Unix CLI helpers
