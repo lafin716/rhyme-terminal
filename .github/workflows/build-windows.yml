@@ -27,7 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri -> target
-          shared-key: windows-x64
+          shared-key: windows-x64${{ inputs.run-checks && '-checks' || '' }}
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Verify Windows prerequisites
         shell: pwsh
