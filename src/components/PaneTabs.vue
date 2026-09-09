@@ -169,6 +169,7 @@ function terminalGlyph(terminal: TerminalConfig): string {
     case "cmd": return "C:\\";
     case "wsl": return "WSL";
     case "git-bash": return "GB";
+    case "zsh": return "ZSH";
     case "custom": return ">_";
   }
 }
