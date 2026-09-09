@@ -138,6 +138,7 @@ pub fn run() {
             commands::get_account_token,
             usage::get_account_usage,
             commands::read_file_preview,
+            commands::resolve_resource_path,
             commands::write_file,
             commands::read_directory,
             commands::list_files,

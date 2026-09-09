@@ -28,6 +28,8 @@ import { useSessions } from "../composables/useSessions";
 import { FILE_DRAG_MIME, formatPathForInsertion } from "../lib/path-insert";
 import { TERMINAL_BASE_FONT_SIZE, useTerminalZoom } from "../composables/useTerminalZoom";
 import { useKeybindings } from "../composables/useKeybindings";
+import TerminalLinkMenu from "./TerminalLinkMenu.vue";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { matchesEvent } from "../lib/keybindings";
 
 const props = defineProps<{
@@ -35,6 +37,7 @@ const props = defineProps<{
   active: boolean;
 }>();
 
+const linkMenu = ref<{ target: string; x: number; y: number; web: boolean } | null>(null);
 const host = ref<HTMLDivElement | null>(null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -89,7 +92,7 @@ async function init() {
     windowsPty: { backend: "conpty", buildNumber: detectWindowsBuild() },
     linkHandler: {
       activate: (event, text) => {
-        if (event.ctrlKey) openResource(text);
+        activateResource(event, text);
       },
     },
     theme: {
@@ -100,8 +103,7 @@ async function init() {
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new WebLinksAddon((event, uri) => {
-    if (!event.ctrlKey) return;
-    resources.openBrowser(uri).catch(showOpenError);
+    activateResource(event, uri);
   }));
   term.registerLinkProvider(createFileLinkProvider(term));
   term.parser.registerOscHandler(7, (data) => {
@@ -241,7 +243,7 @@ function createFileLinkProvider(terminal: Terminal): ILinkProvider {
           },
           decorations,
           activate(event, target) {
-            if (event.ctrlKey) openResource(target);
+            activateResource(event, target);
           },
         };
         links.push(link);
@@ -264,6 +266,33 @@ function cwdFromOsc7(data: string): string | null {
   } catch {
     return null;
   }
+}
+
+function activateResource(event: MouseEvent, raw: string) {
+  event.preventDefault();
+  const text = raw.trim();
+  const matches = (id: string) => {
+    const b = bindingFor(id);
+    return b?.key === "Click" && !!b.ctrl === event.ctrlKey && !!b.shift === event.shiftKey
+      && !!b.alt === event.altKey && !!b.meta === event.metaKey;
+  };
+  if (matches("terminal.openLinkExternal")) { void openExternal(text).catch(showOpenError); return; }
+  if (matches("terminal.openLink")) { openResource(text); return; }
+  linkMenu.value = { target: text, x: event.clientX, y: event.clientY, web: /^https?:\/\//i.test(text) };
+}
+
+async function openExternal(text: string) {
+  if (/^https?:\/\//i.test(text)) await openUrl(text);
+  else await revealItemInDir(await api.resolveResourcePath(text, sessions.currentCwd(props.sessionId)));
+}
+
+function closeLinkMenu() { linkMenu.value = null; if (props.active) term?.focus(); }
+function openMenuResource(external: boolean) {
+  const text = linkMenu.value?.target;
+  closeLinkMenu();
+  if (!text) return;
+  if (external) void openExternal(text).catch(showOpenError);
+  else openResource(text);
 }
 
 function openResource(raw: string) {
@@ -394,6 +423,7 @@ function nextRaf(): Promise<void> {
 watch(
   () => props.active,
   async (isActive) => {
+    if (!isActive) linkMenu.value = null;
     if (isActive) {
       await nextRaf();
       safeFit();
@@ -443,6 +473,7 @@ defineExpose({
 </script>
 
 <template>
+  <TerminalLinkMenu v-if="linkMenu" :key="`${linkMenu.target}:${linkMenu.x}:${linkMenu.y}`" v-bind="linkMenu" @close="closeLinkMenu" @open="openMenuResource" />
   <div
     ref="host"
     class="term-host"

@@ -1,5 +1,13 @@
 // English messages are stable keys. User content is never translated.
 export const ko: Record<string, string> = {
+  "Open resource": "리소스 열기",
+  "rhyme Browser": "rhyme 브라우저",
+  "System Browser": "시스템 브라우저",
+  "Open in Editor": "편집기에서 열기",
+  "Show in Explorer": "탐색기에서 표시",
+  "Open Terminal Link Internally": "터미널 링크 내부에서 열기",
+  "Open Terminal Link Externally": "터미널 링크 외부에서 열기",
+  "Click with modifiers... (Esc to cancel)": "보조 키를 누른 채 클릭... (Esc로 취소)",
   "Zoom In Terminal": "터미널 확대",
   "Zoom Out Terminal": "터미널 축소",
   "Zoom In Terminal (Wheel)": "터미널 확대 (휠)",

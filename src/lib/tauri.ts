@@ -121,6 +121,9 @@ export const api = {
   getAccountToken(agent: CliAgentKind, profileId: string): Promise<string | null> {
     return invoke("get_account_token", { agent, profileId });
   },
+  resolveResourcePath(target: string, cwd?: string): Promise<string> {
+    return invoke("resolve_resource_path", { target, cwd });
+  },
   readFilePreview(target: string, cwd?: string): Promise<FilePreview> {
     return invoke("read_file_preview", { target, cwd });
   },

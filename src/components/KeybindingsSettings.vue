@@ -33,7 +33,7 @@ function start(id: string, prefix = false) {
   capture.value = capture.value?.id === id && capture.value.prefix === prefix ? null : { id, prefix };
 }
 function display(id: string, prefix = false) {
-  if (capture.value?.id === id && capture.value.prefix === prefix) return t("Press a key... (Esc to cancel)");
+  if (capture.value?.id === id && capture.value.prefix === prefix) return t(id.startsWith("terminal.openLink") ? "Click with modifiers... (Esc to cancel)" : "Press a key... (Esc to cancel)");
   if (prefix) return prefixFor(id) ?? t("(unbound)");
   const binding = bindingFor(id);
   if (binding?.key?.startsWith("Wheel")) {
@@ -47,6 +47,7 @@ function onKey(ev: KeyboardEvent) {
   ev.stopImmediatePropagation();
   if (ev.key === "Escape") { capture.value = null; return; }
   if (ev.isComposing || ["Control", "Shift", "Alt", "Meta"].includes(ev.key)) return;
+  if (capture.value.id.startsWith("terminal.openLink")) return;
   if (capture.value.prefix) {
     if (ev.ctrlKey || ev.altKey || ev.metaKey) return;
     setPrefix(capture.value.id, ev.key);
@@ -66,6 +67,12 @@ function onWheel(ev: WheelEvent) {
   setBinding(capture.value.id, binding);
   capture.value = null;
 }
+function onClick(ev: MouseEvent) {
+  if (!capture.value?.id.startsWith("terminal.openLink") || ev.button !== 0) return;
+  ev.preventDefault(); ev.stopImmediatePropagation();
+  setBinding(capture.value.id, { key: "Click", ctrl: ev.ctrlKey, shift: ev.shiftKey, alt: ev.altKey, meta: ev.metaKey });
+  capture.value = null;
+}
 function clear(id: string, prefix = false) {
   capture.value = null;
   if (prefix) setPrefix(id, null);
@@ -77,10 +84,12 @@ function reset(id: string) {
   resetPrefix(id);
 }
 onMounted(() => {
+  window.addEventListener("click", onClick, true);
   window.addEventListener("keydown", onKey, true);
   window.addEventListener("wheel", onWheel, { capture: true, passive: false });
 });
 onUnmounted(() => {
+  window.removeEventListener("click", onClick, true);
   window.removeEventListener("keydown", onKey, true);
   window.removeEventListener("wheel", onWheel, true);
 });

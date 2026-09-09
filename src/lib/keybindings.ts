@@ -17,6 +17,8 @@ export interface ActionDef {
 }
 
 export const ACTIONS: ReadonlyArray<ActionDef> = [
+  { id: "terminal.openLink", label: "Open Terminal Link Internally", category: "terminal", scope: "terminal", default: { ctrl: true, key: "Click" }, defaultPrefix: null },
+  { id: "terminal.openLinkExternal", label: "Open Terminal Link Externally", category: "terminal", scope: "terminal", default: { ctrl: true, shift: true, key: "Click" }, defaultPrefix: null },
   { id: "terminal.zoomIn", label: "Zoom In Terminal", category: "terminal", scope: "terminal", default: { ctrl: true, shift: true, key: "+" }, defaultPrefix: null },
   { id: "terminal.zoomOut", label: "Zoom Out Terminal", category: "terminal", scope: "terminal", default: { ctrl: true, shift: true, key: "-" }, defaultPrefix: null },
   { id: "terminal.zoomInWheel", label: "Zoom In Terminal (Wheel)", category: "terminal", scope: "terminal", default: { ctrl: true, shift: true, key: "WheelUp" }, defaultPrefix: null },

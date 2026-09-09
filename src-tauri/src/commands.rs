@@ -282,8 +282,16 @@ pub async fn read_file_preview(target: String, cwd: Option<String>) -> Result<Fi
         .map_err(|e| e.to_string())?
 }
 
-fn read_file_preview_sync(target: &str, cwd: Option<&str>) -> Result<FilePreview, String> {
-    let (raw_path, line, column) = split_file_location(target);
+#[tauri::command]
+pub async fn resolve_resource_path(target: String, cwd: Option<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_resource_path_sync(&target, cwd.as_deref())
+            .map(|path| path.to_string_lossy().into_owned())
+    }).await.map_err(|e| e.to_string())?
+}
+
+fn resolve_resource_path_sync(target: &str, cwd: Option<&str>) -> Result<PathBuf, String> {
+    let (raw_path, _, _) = split_file_location(target);
     let candidate = PathBuf::from(&raw_path);
     let joined = if candidate.is_absolute() {
         candidate
@@ -298,6 +306,12 @@ fn read_file_preview_sync(target: &str, cwd: Option<&str>) -> Result<FilePreview
     let canonical = joined
         .canonicalize()
         .map_err(|e| format!("File not found: {} ({e})", joined.display()))?;
+    Ok(canonical)
+}
+
+fn read_file_preview_sync(target: &str, cwd: Option<&str>) -> Result<FilePreview, String> {
+    let (_, line, column) = split_file_location(target);
+    let canonical = resolve_resource_path_sync(target, cwd)?;
     if !canonical.is_file() {
         return Err(format!("Not a file: {}", canonical.display()));
     }
@@ -978,6 +992,18 @@ mod preview_tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn resolves_relative_files_with_locations_and_directories() {
+        let dir = temp_dir("resolve");
+        let file = dir.join("space name.txt");
+        fs::write(&file, b"text").unwrap();
+        let resolved = super::resolve_resource_path_sync("\"space name.txt\":12:3", dir.to_str()).unwrap();
+        assert_eq!(resolved, file.canonicalize().unwrap());
+        assert_eq!(super::resolve_resource_path_sync(".", dir.to_str()).unwrap(), dir.canonicalize().unwrap());
+        assert!(super::resolve_resource_path_sync("missing.txt", dir.to_str()).is_err());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
