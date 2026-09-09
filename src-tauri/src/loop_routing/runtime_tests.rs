@@ -797,7 +797,9 @@ async fn explicit_prompt_is_sent_once_after_verified_startup() {
         exited: session.exited.clone(),
     };
     let bytes = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    session.writer = Box::new(Capture(bytes.clone()));
+    // Keep ConPTY's input handle open while capturing writes. Dropping it sends
+    // EOF to PowerShell and lets a fast runner retire the session before cleanup.
+    let _pty_input = std::mem::replace(&mut session.writer, Box::new(Capture(bytes.clone())));
     state.manager.sessions.lock().insert(sid, session);
     f.group.active_session_id = Some(sid);
 
