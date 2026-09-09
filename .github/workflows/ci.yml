@@ -30,7 +30,7 @@ jobs:
       - run: pnpm build
 
   windows:
-    name: Windows checks and installers
+    name: Windows checks and native build
     uses: ./.github/workflows/build-windows.yml
     with:
       run-checks: true

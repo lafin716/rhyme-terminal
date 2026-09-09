@@ -53,15 +53,21 @@ jobs:
       - name: Cargo check
         if: inputs.run-checks
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+      - name: Validate Windows native build
+        if: inputs.run-checks
+        run: pnpm tauri build --ci --debug --no-bundle -- --locked
       - name: Build native app and installers
+        if: ${{ !inputs.run-checks }}
         run: pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles nsis,msi -- --locked
       - name: Verify both installers exist
+        if: ${{ !inputs.run-checks }}
         shell: pwsh
         run: |
           foreach ($pattern in @('src-tauri/target/release/bundle/nsis/*.exe', 'src-tauri/target/release/bundle/msi/*.msi')) {
             if (-not (Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue)) { throw "Missing installer: $pattern" }
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !inputs.run-checks }}
         with:
           name: windows-x64-installers
           path: |

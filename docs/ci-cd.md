@@ -46,7 +46,7 @@ assets를 만든다. Android Rust/Gradle 빌드와 `build:mobile`은 서로 다�
 
 | 진입점 | 실행 작업 |
 | --- | --- |
-| main 대상 PR | `ci.yml`: frontend 검증 + Windows 검증/설치 프로그램 빌드 병렬 |
+| main 대상 PR | `ci.yml`: frontend 검증 + Windows 검증/native debug 빌드 병렬 |
 | main push | `build.yml`: Windows / macOS / Android 재사용 workflow 병렬 호출 |
 | 수동 | `build.yml`: all / windows / macos / android 중 하나 선택 |
 | v* tag push | `release.yml`: 버전 일치 검사 → 3개 플랫폼 병렬 → 전체 성공 후 Release |
@@ -77,8 +77,10 @@ Windows job:
 5. `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets`
 6. `cargo test --manifest-path src-tauri/Cargo.toml --locked --all-targets -- --test-threads=2`
 7. `cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets`
-8. 실제 release native build + NSIS EXE + MSI 생성
-9. 두 설치 프로그램 존재 검사 후 artifact 업로드
+8. `pnpm tauri build --ci --debug --no-bundle -- --locked`로 실제 Windows native build
+
+PR은 Rust 검사와 debug build cache를 공유한다. 설치 프로그램 생성/업로드는 main, 수동,
+Release에서 실행한다.
 
 Clippy의 기존 스타일 경고는 표시하지만 `-D warnings`는 사용하지 않는다.
 실제 Clippy 오류는 job을 실패시킨다. 테스트 전체를 skip하거나 `continue-on-error`로
@@ -89,7 +91,7 @@ TypeScript strict가 담당하는 unused 검사와 기존 any 타입은 lint에�
 기존 공유 reactive prop 하위 필드 갱신, Terminal 이름, Vue 타입 선언 및 URL setter 패턴은
 설정에서 명시적으로 허용한다. 이 작업 때문에 앱 동작이나 이름을 바꾸지 않는다.
 
-Branch protection에서 `Frontend checks`와 `Windows checks and installers / build`
+Branch protection에서 `Frontend checks`와 `Windows checks and native build / build`
 체크를 필수로 지정하면 Windows 실패 PR의 병합을 막을 수 있다.
 첫 PR 실행에서 실제 표시되는 check 이름을 확인하고 설정한다. Workflow 추가 자체가
 저장소 branch protection 설정을 바꾸지는 않는다.
@@ -324,6 +326,10 @@ Windows에서 CLI help를 확인하는 것만으로 macOS/Android 빌드 성공�
 | Windows 로컬 pnpm EPERM/모듈 접근 오류 | dependency 링크/권한/다른 install 프로세스 확인 후 단독 재실행 |
 
 
+PR의 native 검증은 `pnpm tauri build --ci --debug --no-bundle -- --locked`로 수행한다.
+Rust 테스트와 debug target cache를 재사용하며, NSIS/MSI 패키징은 main/수동/Release에서 수행한다.
+macOS에서는 DMG 생성 후 Unix IPC와 번들에 포함된 CLI helper를 검사한다.
+
 ## 검증 기록
 
 초기 Windows CI 구성은 로컬에서 frontend/Rust 테스트 및 NSIS/MSI 빌드를 통과했다.
@@ -338,7 +344,7 @@ Actions → Build → all로 세 플랫폼의 artifact 생성을 확인한다.
 - `.github/actions/setup-frontend/action.yml`: 공통 Node/pnpm 설치와 cache.
 - `.github/dependabot.yml`: 고정 Action SHA 업데이트.
 - `scripts/ci/apple-keychain.sh`, `android-signing.mjs`, `collect-android.mjs`,
-  `check-release-version.mjs`, `pipeline.test.mjs`: 서명 준비, 산출물 검사, 버전 검사와 회귀 테스트.
+  `check-release-version.mjs`, `pipeline.test.mjs`, `unix-smoke.test.mjs`: 서명 준비, 산출물 검사, 버전 검사와 회귀 테스트.
 - `src-tauri/tauri.ci.conf.json`: 원래 portable 설정을 유지하는 CI bundle overlay.
 - `package.json`, `pnpm-lock.yaml`, `eslint.config.js`, `vitest.config.ts`:
   실제 lint/typecheck 명령과 개발 도구, Windows에서도 안정적인 테스트 실행 설정.

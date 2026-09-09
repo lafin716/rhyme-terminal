@@ -3,21 +3,8 @@
 
 fn main() {
     #[cfg(all(desktop, unix))]
-    match std::env::args().nth(1).as_deref() {
-        Some("--winmux-hook") => {
-            if winmux_lib::unix_cli::hook().is_err() {
-                eprintln!("Rhyme Loop lifecycle bridge failed");
-                std::process::exit(2);
-            }
-            return;
-        }
-        Some("--winmux-statusline") => {
-            if let Some(dir) = std::env::args_os().nth(2) {
-                let _ = winmux_lib::unix_cli::statusline(std::path::Path::new(&dir));
-            }
-            return;
-        }
-        _ => (),
+    if winmux_lib::unix_cli::dispatch() {
+        return;
     }
     #[cfg(desktop)]
     if std::env::args().nth(1).as_deref() == Some(winmux_lib::DAEMON_ARG) {

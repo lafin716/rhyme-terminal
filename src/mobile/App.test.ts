@@ -42,7 +42,7 @@ beforeEach(() => {
   mocks.terminals.length = 0; mocks.sendInput.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("window", { location: { hash: "", pathname: "/", search: "", protocol: "http:", host: "localhost" }, history: { replaceState() {} } });
   vi.stubGlobal("navigator", { platform: "test" });
-  vi.stubGlobal("sessionStorage", {});
+  vi.stubGlobal("sessionStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
 });
 afterEach(() => { mocks.unmounted?.(); scope?.stop(); vi.unstubAllGlobals(); });
 async function attach() {
@@ -60,6 +60,12 @@ async function attach() {
   return mocks.terminals[0];
 }
 describe("mobile terminal keyboard", () => {
+  it("retains the native return marker while passing the invitation to the existing client", async () => {
+    window.location.hash = "#invite=example-invitation&native=android";
+    await attach();
+    expect(sessionStorage.setItem).toHaveBeenCalledWith("winmux:native-remote:v1", "android");
+    expect(mocks.options!.invite).toBe("example-invitation");
+  });
   it("enables terminal typing and forwards consecutive keys before earlier acknowledgments", async () => {
     const terminal = await attach();
     expect(terminal.options.disableStdin).toBe(false);

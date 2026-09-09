@@ -56,6 +56,8 @@ jobs:
           pnpm tauri build --ci --config src-tauri/tauri.ci.conf.json --bundles dmg -- --locked
       - name: Verify Unix IPC framing and exclusive listener
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib ipc::transport
+      - name: Smoke test packaged Unix CLI helpers
+        run: node --test scripts/ci/unix-smoke.test.mjs
       - name: Verify DMG exists
         run: test -n "$(find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

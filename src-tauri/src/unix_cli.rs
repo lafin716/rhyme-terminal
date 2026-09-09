@@ -222,3 +222,24 @@ pub fn statusline(dir: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Handle helper modes before GUI or daemon initialization.
+pub fn dispatch() -> bool {
+    match std::env::args().nth(1).as_deref() {
+        Some("--winmux-hook") => {
+            if hook().is_err() {
+                eprintln!("Rhyme Loop lifecycle bridge failed");
+                std::process::exit(2);
+            }
+            return true;
+        }
+        Some("--winmux-statusline") => {
+            if let Some(dir) = std::env::args_os().nth(2) {
+                let _ = statusline(std::path::Path::new(&dir));
+            }
+            return true;
+        }
+        _ => (),
+    }
+    false
+}

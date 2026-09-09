@@ -205,11 +205,17 @@ fn spawn_daemon_detached() -> Result<()> {
     }
     #[cfg(not(windows))]
     {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
         let mut command = std::process::Command::new(&exe);
         if let Some(arg) = arg {
             command.arg(arg);
         }
         command
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| anyhow!("failed to spawn daemon: {e}"))?;
     }
