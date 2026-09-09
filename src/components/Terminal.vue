@@ -26,6 +26,9 @@ import { openPalette } from "../composables/usePalette";
 import { useResources } from "../composables/useResources";
 import { useSessions } from "../composables/useSessions";
 import { FILE_DRAG_MIME, formatPathForInsertion } from "../lib/path-insert";
+import { TERMINAL_BASE_FONT_SIZE, useTerminalZoom } from "../composables/useTerminalZoom";
+import { useKeybindings } from "../composables/useKeybindings";
+import { matchesEvent } from "../lib/keybindings";
 
 const props = defineProps<{
   sessionId: string;
@@ -43,6 +46,12 @@ let suppressUntil = 0;
 let disposed = false;
 const resources = useResources();
 const sessions = useSessions();
+const { bindingFor } = useKeybindings();
+const { onZoomKeyDown, onZoomWheel, toastPercent } = useTerminalZoom((fontSize) => {
+  if (!term) return;
+  term.options.fontSize = fontSize;
+  safeFit();
+});
 
 const FILE_LINK_RE = /(?:"[^"\r\n]+"|'[^'\r\n]+'|(?:[a-zA-Z]:[\\/]|\.{1,2}[\\/]|[\\/])[^ \t<>|?"'\r\n]+|(?:[\w.@()-]+[\\/])+[\w.@()-]+|[\w.@()-]+\.[a-zA-Z0-9]{1,10})(?::\d+){0,2}/g;
 
@@ -62,7 +71,7 @@ async function init() {
     allowProposedApi: true,
     allowTransparency: false,
     fontFamily: '"Cascadia Mono", "Consolas", "Courier New", monospace',
-    fontSize: 13,
+    fontSize: TERMINAL_BASE_FONT_SIZE,
     fontWeight: "normal",
     fontWeightBold: "bold",
     lineHeight: 1.0,
@@ -272,32 +281,35 @@ function showOpenError(error: unknown) {
 }
 
 function handleKeyEvent(ev: KeyboardEvent): boolean {
-  if (ev.type !== "keydown" || !term) return true;
-  const key = ev.key.toLowerCase();
+  if (ev.type !== "keydown" || !term || ev.isComposing) return true;
+  const matches = (id: string) => matchesEvent(bindingFor(id), ev);
 
-  // Ctrl+Shift+C / Ctrl+Shift+V — always copy/paste
-  if (ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "c") {
+  // Clipboard commands use the current settings, including alternate bindings.
+  if (matches("terminal.copy")) {
+    ev.preventDefault();
     copySelection();
     return false;
   }
-  if (ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "v") {
-    // Suppress xterm's keydown; the browser's separate `paste` event will
-    // trigger xterm's built-in paste handler once. Manually calling paste here
-    // would result in double insertion.
+  if (matches("terminal.paste") || matches("terminal.pasteAlternate")) {
+    ev.preventDefault();
+    pasteFromClipboard();
     return false;
   }
 
-  // Ctrl+C — copy if selection, else fall through to ^C (SIGINT)
-  if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && key === "c") {
+  // Copy the selection, or send the terminal interrupt byte when none is selected.
+  if (matches("terminal.copyOrInterrupt")) {
+    ev.preventDefault();
     if (term.hasSelection()) {
       copySelection();
-      return false;
+    } else {
+      api.writeSession(props.sessionId, stringToBase64("\x03")).catch(console.error);
     }
-    return true;
+    return false;
   }
 
-  // Ctrl+V — paste clipboard
-  if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && key === "v") {
+  // Do not let the browser's native paste bypass a remapped/cleared binding.
+  if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === "v") {
+    ev.preventDefault();
     return false;
   }
 
@@ -434,9 +446,18 @@ defineExpose({
   <div
     ref="host"
     class="term-host"
+    @keydown.capture="onZoomKeyDown"
+    @wheel.capture="onZoomWheel"
     @dragover="onHostDragOver"
     @drop="onHostDrop"
   />
+  <Teleport to="body">
+    <Transition name="terminal-zoom">
+      <div v-if="toastPercent !== null" class="terminal-zoom-toast" role="status" aria-live="polite" aria-atomic="true">
+        {{ toastPercent }}%
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -447,5 +468,43 @@ defineExpose({
   padding: 4px;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+.terminal-zoom-toast {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10000;
+  pointer-events: none;
+  user-select: none;
+  padding: 16px 28px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 14px;
+  background: rgb(30 30 30 / 78%);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 24%);
+  color: #f5f5f5;
+  font-size: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.terminal-zoom-enter-active,
+.terminal-zoom-leave-active {
+  transition: opacity 150ms ease;
+}
+
+.terminal-zoom-enter-from,
+.terminal-zoom-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-zoom-enter-active,
+  .terminal-zoom-leave-active {
+    transition: none;
+  }
 }
 </style>

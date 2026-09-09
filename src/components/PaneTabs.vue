@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { useKeybindings } from "../composables/useKeybindings";
+import { formatKeybinding } from "../lib/keybindings";
+const { bindingFor } = useKeybindings();
 import { t } from "../composables/useI18n";
 import { useTitlebarInsets } from "../composables/useTitlebarInsets";
 import {
@@ -11,7 +14,8 @@ import {
 } from "vue";
 import { Icon } from "@iconify/vue";
 import SessionProfileTag from "./SessionProfileTag.vue";
-import { CLI_AGENTS, profilesForAgent, resolveProfileEnv, useAccountProfiles, type CliAgentKind, type AccountProfile } from "../composables/useAccountProfiles";
+import { profilesForAgent, resolveProfileEnv, useAccountProfiles, type CliAgentKind, type AccountProfile } from "../composables/useAccountProfiles";
+import { orderedSessionMenuItems } from "../lib/session-menu";
 import { resolveDefaultProfile } from "../lib/default-profile";
 import type { LeafNode } from "../lib/layout-types";
 import TerminalView from "./Terminal.vue";
@@ -129,6 +133,15 @@ const selectableTerminals = computed(() => {
     .filter((preset) => !sameTerminalConfig(defaultTerminal, preset));
 });
 
+const terminalMenuItems = computed(() => orderedSessionMenuItems(prefs.sessionMenuOrder)
+  .map((item) => ({
+    ...item,
+    terminal: item.kind === "terminal"
+      ? selectableTerminals.value.find((preset) => preset.preset === item.preset)
+      : effectiveTerminal.value,
+  }))
+  .filter((item) => item.terminal !== undefined));
+
 function sameTerminalConfig(a: TerminalConfig, b: TerminalConfig): boolean {
   return a.preset === b.preset
     && a.program.trim().toLowerCase() === b.program.trim().toLowerCase()
@@ -227,6 +240,14 @@ async function closeTabs(ids: string[]) {
   closeTabContextMenu();
   const uniqueIds = [...new Set(ids)].filter((id) => props.leaf.tabs.includes(id));
   if (!uniqueIds.length) return;
+  for (const id of uniqueIds) {
+    if (!isFileDirty(id)) continue;
+    const ok = await confirm({
+      message: t('Discard changes to "{name}"?', { name: sessionName(id) }),
+      confirmLabel: t("Discard"),
+    });
+    if (!ok) return;
+  }
   const terminalIds = uniqueIds.filter((id) => !resources.getById(id));
   if (terminalIds.length > 0) {
     const ok = await confirm({
@@ -489,6 +510,12 @@ async function createWithTerminal(terminal: TerminalConfig) {
   await create({ terminal: cloneTerminalConfig(terminal) });
 }
 
+function openNewPage() {
+  closeTerminalMenu();
+  setFocusedLeaf(props.leaf.id);
+  resources.openNewPage();
+}
+
 function onDocumentPointerDown(ev: PointerEvent) {
   const target = ev.target as Node | null;
   if (tabMenuFor.value) {
@@ -596,7 +623,7 @@ onUnmounted(() => {
         :class="{ 'insert-active': drag.state.active && tabInsertIndex === leaf.tabs.length }"
       />
       <div class="add-terminal">
-        <button class="add-tab" :title="t('New terminal (Ctrl+N)')" @click="onAddClick">+</button>
+        <button class="add-tab" :title="`${t('New Terminal')} (${formatKeybinding(bindingFor('session.new'))})`" @click="onAddClick">+</button>
         <button
           ref="terminalMenuButtonRef"
           class="terminal-menu-toggle"
@@ -625,49 +652,35 @@ onUnmounted(() => {
         role="menu"
         @mousedown.stop
       >
-        <div v-for="agent in CLI_AGENTS" :key="agent.id">
-          <button class="terminal-option" role="menuitem"
-            :aria-haspopup="profilesForAgent(agent.id).length ? 'menu' : undefined"
-            :aria-expanded="profileMenuAgent === agent.id"
-            @mouseenter="profilesForAgent(agent.id).length ? openProfileMenu(agent.id, $event) : profileMenuAgent = null"
-            @click="profilesForAgent(agent.id).length ? openProfileMenu(agent.id, $event, true) : createWithAgent(agent.id)"
-            @keydown.right.prevent="profilesForAgent(agent.id).length && openProfileMenu(agent.id, $event, true)">
-            <span class="terminal-agent-slot">
-              <Icon :class="['terminal-agent-icon', `agent-${agent.id}`]" :icon="sessionAgentIcon(agent.id)" />
-            </span>
-            <span class="terminal-option-name">{{ agent.id === 'claude' ? 'Claude' : 'Codex' }}</span>
-            <span v-if="profilesForAgent(agent.id).length" class="submenu-arrow">&#8250;</span>
+        <template v-for="(item, index) in terminalMenuItems" :key="item.id">
+          <div v-if="index > 0 && item.kind !== terminalMenuItems[index - 1].kind" class="terminal-option-separator" />
+          <button v-if="item.kind === 'page'" class="terminal-option" role="menuitem" @mouseenter="profileMenuAgent = null" @click="openNewPage">
+            <span class="terminal-agent-slot"><Icon icon="lucide:file-plus-2" /></span>
+            <span class="terminal-option-name">{{ t(item.label) }}</span>
           </button>
-        </div>
-        <div class="terminal-option-separator" />
-        <button
-          class="terminal-option default-option"
-          @mouseenter="profileMenuAgent = null"
-          role="menuitem"
-          @click="createWithTerminal(effectiveTerminal)"
-        >
-          <span class="terminal-option-icon">{{ terminalGlyph(effectiveTerminal) }}</span>
-          <span class="terminal-option-copy">
-            <span class="terminal-option-name">
-              {{ terminalLabel(effectiveTerminal) }}
-              <span class="default-badge">{{ t("Default") }}</span>
+          <button v-else-if="item.kind === 'agent'" class="terminal-option" role="menuitem"
+            :aria-haspopup="profilesForAgent(item.agent).length ? 'menu' : undefined"
+            :aria-expanded="profileMenuAgent === item.agent"
+            @mouseenter="profilesForAgent(item.agent).length ? openProfileMenu(item.agent, $event) : profileMenuAgent = null"
+            @click="profilesForAgent(item.agent).length ? openProfileMenu(item.agent, $event, true) : createWithAgent(item.agent)"
+            @keydown.right.prevent="profilesForAgent(item.agent).length && openProfileMenu(item.agent, $event, true)">
+            <span class="terminal-agent-slot">
+              <Icon :class="['terminal-agent-icon', 'agent-' + item.agent]" :icon="sessionAgentIcon(item.agent)" />
             </span>
-          </span>
-        </button>
-        <div v-if="selectableTerminals.length" class="terminal-option-separator" />
-        <button
-          v-for="terminal in selectableTerminals"
-          :key="terminal.preset"
-          @mouseenter="profileMenuAgent = null"
-          class="terminal-option"
-          role="menuitem"
-          @click="createWithTerminal(terminal)"
-        >
-          <span class="terminal-option-icon">{{ terminalGlyph(terminal) }}</span>
-          <span class="terminal-option-copy">
-            <span class="terminal-option-name">{{ t(terminal.label) }}</span>
-          </span>
-        </button>
+            <span class="terminal-option-name">{{ item.label }}</span>
+            <span v-if="profilesForAgent(item.agent).length" class="submenu-arrow">&#8250;</span>
+          </button>
+          <button v-else-if="item.terminal" class="terminal-option" :class="{ 'default-option': item.kind === 'default' }"
+            @mouseenter="profileMenuAgent = null" role="menuitem" @click="createWithTerminal(item.terminal)">
+            <span class="terminal-option-icon">{{ terminalGlyph(item.terminal) }}</span>
+            <span class="terminal-option-copy">
+              <span class="terminal-option-name">
+                {{ item.kind === 'default' ? terminalLabel(item.terminal) : t(item.label) }}
+                <span v-if="item.kind === 'default'" class="default-badge">{{ t('Default') }}</span>
+              </span>
+            </span>
+          </button>
+        </template>
       </div>
       <div v-if="terminalMenuOpen && profileMenuAgent" ref="profileMenuRef"
         class="terminal-picker profile-picker" role="menu"

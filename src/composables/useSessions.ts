@@ -29,7 +29,7 @@ import { usePrefs } from "./usePrefs";
 import { cloneTerminalConfig } from "../lib/terminal-config";
 import type { TerminalConfig } from "../lib/terminal-config";
 import { withAgentLaunch, withCwdIntegration } from "../lib/terminal-launch";
-import { displayName, withWorkspacePrefix } from "../lib/session-names";
+import { displayName, withWorkspacePrefix, workspaceIndexOf } from "../lib/session-names";
 import {
   addTabToLeaf,
   collectAllSessionIds,
@@ -282,8 +282,10 @@ export function useSessions() {
 
   async function rename(id: string, name: string) {
     const s = state.sessions.find((x) => x.id === id);
-    const ws = activeWorkspace.value;
-    const prefix = ws ? `w${ws.index}.` : "";
+    if (!s) return;
+    const index = workspaceIndexOf(s.name);
+    const ws = wsState.workspaces.find(w => w.index === index);
+    const prefix = index !== null ? `w${index}.` : "";
     const fullName = `${prefix}${displayName(name)}`;
     await api.renameSession(id, fullName);
     if (s) s.name = fullName;

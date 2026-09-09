@@ -17,21 +17,25 @@ import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import MarkdownIt from "markdown-it";
-import { api, base64ToBytes, type FilePreview } from "../lib/tauri";
+import { base64ToBytes, type FilePreview } from "../lib/tauri";
 import { resolveViewerMode } from "../lib/viewer-mode";
 import { useResources } from "../composables/useResources";
+import { useKeybindings } from "../composables/useKeybindings";
+import { formatKeybinding, matchesEvent } from "../lib/keybindings";
 
 const props = defineProps<{ preview: FilePreview; tabId: string }>();
 
 const resources = useResources();
+const { bindingFor } = useKeybindings();
+const fileTab = computed(() => {
+  const tab = resources.getById(props.tabId);
+  return tab?.kind === "file" ? tab : undefined;
+});
 
 const editorHost = ref<HTMLDivElement | null>(null);
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let model: monaco.editor.ITextModel | null = null;
 
-// Baseline the dirty check compares against: the last text written to disk
-// (initially the loaded content). Ctrl+S advances it on a successful save.
-let lastSaved = props.preview.text ?? "";
 const saveError = ref<string | null>(null);
 
 // `html: false` keeps embedded raw HTML/scripts inert — markdown-it escapes
@@ -87,9 +91,9 @@ async function createEditor() {
   await nextTick();
   if (!editorHost.value) return;
   model = monaco.editor.createModel(
-    props.preview.text ?? "",
+    fileTab.value?.draftText ?? props.preview.text ?? "",
     monacoLanguage(props.preview.language),
-    monaco.Uri.file(props.preview.canonicalPath),
+    monaco.Uri.parse(`inmemory://rhyme/${props.tabId}`),
   );
   // Only the `text` view mode reaches here (early return above), so the editor
   // is always editable; Markdown/PDF/image are separate read-only views.
@@ -115,9 +119,9 @@ async function createEditor() {
     editor.revealLineInCenter(props.preview.line);
   }
 
-  // Dirty = current text differs from the last-saved baseline.
+  // Keep drafts in the tab resource so switching panes does not discard edits.
   editor.onDidChangeModelContent(() => {
-    resources.setFileDirty(props.tabId, model?.getValue() !== lastSaved);
+    resources.updateFileDraft(props.tabId, model?.getValue() ?? "");
   });
 
   // Ctrl+S saves; binding it on the editor also suppresses the browser's own
@@ -125,22 +129,19 @@ async function createEditor() {
   editor.addAction({
     id: "winmux.saveFile",
     label: t("Save File"),
-    keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS],
     run: () => {
       void save();
     },
   });
+  editor.focus();
 }
 
 async function save() {
   if (!model) return;
-  const text = model.getValue();
+  resources.updateFileDraft(props.tabId, model.getValue());
   try {
-    await api.writeFile(props.preview.canonicalPath, text);
-    lastSaved = text;
+    await resources.saveFile(props.tabId);
     saveError.value = null;
-    // Adopts the saved text as the tab's stored content and clears dirty.
-    resources.updateFilePreviewText(props.tabId, text);
   } catch (e) {
     // Surface the failure and keep the dirty flag so the edit isn't lost.
     saveError.value = String(e);
@@ -150,6 +151,18 @@ async function save() {
 
 function openFind() {
   editor?.getAction("actions.find")?.run();
+}
+
+function onShortcut(ev: KeyboardEvent) {
+  if (ev.defaultPrevented || ev.isComposing || mode.value !== "text") return;
+  if (matchesEvent(bindingFor("editor.save"), ev)) {
+    ev.preventDefault(); ev.stopPropagation(); void save();
+  } else if (matchesEvent(bindingFor("editor.find"), ev)) {
+    ev.preventDefault(); ev.stopPropagation(); openFind();
+  } else if (ev.ctrlKey && !ev.altKey && !ev.shiftKey && ["s", "f"].includes(ev.key.toLowerCase())) {
+    // Suppress the old native shortcuts after reassignment or clearing.
+    ev.preventDefault(); ev.stopPropagation();
+  }
 }
 
 onMounted(createEditor);
@@ -162,10 +175,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="file-viewer">
+  <div class="file-viewer" @keydown.capture="onShortcut">
     <div class="toolbar">
-      <span class="path" :title="preview.canonicalPath">{{ preview.canonicalPath }}</span>
-      <button v-if="mode === 'text'" :title="t('Find (Ctrl+F)')" @click="openFind">{{ t("Find") }}</button>
+      <span class="path" :title="preview.canonicalPath || fileTab?.projectPath">{{ preview.canonicalPath || preview.name }}</span>
+      <button v-if="mode === 'text'" :disabled="fileTab?.saving" :title="`${t('Save')} (${formatKeybinding(bindingFor('editor.save'))})`" @click="save">{{ t("Save") }}</button>
+      <button v-if="mode === 'text'" :title="`${t('Find')} (${formatKeybinding(bindingFor('editor.find'))})`" @click="openFind">{{ t("Find") }}</button>
       <span v-if="saveError" class="save-error" :title="saveError">{{ t("Save failed") }}</span>
       <span class="meta">{{ preview.language }} · {{ preview.size.toLocaleString() }} {{ t("bytes") }}</span>
     </div>

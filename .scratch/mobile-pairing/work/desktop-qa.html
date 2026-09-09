@@ -1,0 +1,21 @@
+<!doctype html><html lang="ko"><meta charset="UTF-8"><title>Mobile settings QA</title>
+<style>body{background:#171717;color:#ddd;font-family:Segoe UI,sans-serif;margin:30px}#app{max-width:950px;margin:auto}</style>
+<div id="app"></div>
+<script>
+window.__qaCalls=[];
+let state={running:false,ip:null,port:null,url:null,invite:null,pending:[],devices:[]};
+window.__TAURI_INTERNALS__={invoke:async(command,args)=>{
+ window.__qaCalls.push({command,args});
+ if(command==='mobile_pairing_interfaces')return [{name:'Wi-Fi',ip:'192.168.1.10',isTailscale:false},{name:'Tailscale',ip:'100.80.90.10',isTailscale:true}];
+ if(command==='mobile_pairing_start'){state={running:true,ip:args.ip,port:args.port,url:`http://${args.ip}:${args.port}/`,invite:{url:`http://${args.ip}:${args.port}/#invite=qa`,expiresAt:Date.now()+120000,qrSvg:'<svg xmlns="http://www.w3.org/2000/svg" width="208" height="208"><rect width="208" height="208" fill="white"/><path d="M20 20h50v50H20zM138 20h50v50h-50zM20 138h50v50H20zM100 100h35v35h-35z" fill="black"/></svg>'},pending:[{requestId:'qa-request',name:'테스트 휴대폰',verification:'123456'}],devices:[]};}
+ if(command==='mobile_pairing_approve'){state.pending=[];if(args.approve)state.devices=[{deviceId:'qa-device',name:'테스트 휴대폰',connected:true}];}
+ if(command==='mobile_pairing_revoke')state.devices=[];
+ if(command==='mobile_pairing_stop')state={running:false,ip:null,port:null,url:null,invite:null,pending:[],devices:[]};
+ return structuredClone(state);
+}};
+</script>
+<script type="module">
+import { createApp } from 'vue';
+import MobilePairingSettings from '/src/components/MobilePairingSettings.vue';
+createApp(MobilePairingSettings).mount('#app');
+</script></html>

@@ -1,5 +1,6 @@
 import { t } from "./useI18n";
 import { reactive } from "vue";
+import { save as chooseSavePath } from "@tauri-apps/plugin-dialog";
 import { api, type FilePreview } from "../lib/tauri";
 import { nodeId } from "../lib/layout-types";
 import { useWorkspaces } from "./useWorkspaces";
@@ -18,6 +19,10 @@ export interface FileTab {
   preview: FilePreview;
   /** True while the editor holds unsaved changes; drives the tab dirty dot. */
   dirty?: boolean;
+  draftText?: string;
+  untitled?: boolean;
+  projectPath?: string;
+  saving?: boolean;
 }
 
 export interface BrowserTab {
@@ -115,6 +120,59 @@ export function useResources() {
     setFocusedLeaf(leafId);
   }
 
+  function openNewPage(): void {
+    const ws = activeWorkspace.value;
+    const leafId = targetLeafId();
+    if (!ws || !leafId) return;
+    const id = nodeId("resource-file");
+    state.tabs[id] = {
+      kind: "file", id, untitled: true, draftText: "",
+      projectPath: ws.settings.defaultCwd,
+      preview: {
+        canonicalPath: "", name: t("Untitled"), kind: "text",
+        language: "plaintext", mime: "text/plain", text: "", size: 0,
+      },
+    };
+    addTabToLeaf(ws.layout, leafId, id);
+    setFocusedLeaf(leafId);
+  }
+
+  function updateFileDraft(id: string, text: string): void {
+    const tab = state.tabs[id];
+    if (tab?.kind !== "file") return;
+    tab.draftText = text;
+    tab.dirty = text !== (tab.preview.text ?? "");
+  }
+
+  async function saveFile(id: string): Promise<boolean> {
+    const tab = state.tabs[id];
+    if (tab?.kind !== "file" || tab.saving) return false;
+    tab.saving = true;
+    try {
+      let path = tab.preview.canonicalPath;
+      if (tab.untitled) {
+        const root = tab.projectPath?.replace(/[\\/]+$/, "");
+        const chosen = await chooseSavePath({
+          title: t("Save File"),
+          defaultPath: root ? `${root}\\Untitled.txt` : "Untitled.txt",
+        });
+        if (!chosen) return false;
+        path = chosen;
+      }
+      const text = tab.draftText ?? tab.preview.text ?? "";
+      await api.writeFile(path, text);
+      tab.preview.canonicalPath = path;
+      tab.preview.name = path.split(/[\\/]/).pop() || path;
+      tab.preview.text = text;
+      tab.preview.size = new TextEncoder().encode(text).length;
+      tab.untitled = false;
+      tab.dirty = (tab.draftText ?? text) !== text;
+      return true;
+    } finally {
+      tab.saving = false;
+    }
+  }
+
   function closeResource(id: string): void {
     const ws = activeWorkspace.value;
     if (ws) {
@@ -151,6 +209,9 @@ export function useResources() {
     state,
     getById,
     openFile,
+    openNewPage,
+    updateFileDraft,
+    saveFile,
     openBrowser,
     closeResource,
     forgetResource,

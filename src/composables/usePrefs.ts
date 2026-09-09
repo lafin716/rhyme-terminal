@@ -1,4 +1,5 @@
 import { reactive } from "vue";
+import { normalizeSessionMenuOrder } from "../lib/session-menu";
 import { DEFAULT_LOCALE, normalizeLocale } from "../lib/i18n";
 import {
   loadPrefs,
@@ -17,6 +18,7 @@ import {
 } from "../lib/terminal-config";
 
 const prefs = reactive<Prefs>({
+  sessionMenuOrder: normalizeSessionMenuOrder(undefined),
   language: DEFAULT_LOCALE,
   showAccountProfile: true,
   skipKillSessionConfirm: false,
@@ -38,6 +40,7 @@ export function loadPrefsFromStorage(): void {
   const panels = panelsFromStored(stored);
   Object.assign(prefs, {
     ...stored,
+    sessionMenuOrder: normalizeSessionMenuOrder(stored.sessionMenuOrder),
     language: normalizeLocale(stored.language),
     showAccountProfile: typeof stored.showAccountProfile === "boolean" ? stored.showAccountProfile : true,
     defaultTerminal: normalizeTerminalConfig(stored.defaultTerminal),

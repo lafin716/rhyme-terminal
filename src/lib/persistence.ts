@@ -23,6 +23,7 @@ interface PersistedKeybindings {
 export type PaletteUiMode = "context" | "radial";
 
 export interface Prefs {
+  sessionMenuOrder?: string[];
   language: Locale;
   showAccountProfile: boolean;
   skipKillSessionConfirm: boolean;

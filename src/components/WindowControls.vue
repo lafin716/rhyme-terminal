@@ -8,6 +8,7 @@ import { panelRightIcon } from "../lib/offline-icons";
 import { useShellPanels } from "../composables/useShellPanels";
 import { t } from "../composables/useI18n";
 
+withDefaults(defineProps<{ hidePanelToggle?: boolean }>(), { hidePanelToggle: false });
 const { panels, toggleRight } = useShellPanels();
 const maximized = ref(false);
 let unlisten: UnlistenFn | undefined;
@@ -30,8 +31,8 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); });
 </script>
 
 <template>
-  <div class="window-controls">
-    <button class="panel-toggle" :class="{ active: panels.right.open }" :title="t('Toggle Right Panel (Explorer)')" :aria-label="t('Toggle Right Panel (Explorer)')" @click="toggleRight">
+  <div class="window-controls" :class="{ 'page-controls': hidePanelToggle }">
+    <button v-if="!hidePanelToggle" class="panel-toggle" :class="{ active: panels.right.open }" :title="t('Toggle Right Panel (Explorer)')" :aria-label="t('Toggle Right Panel (Explorer)')" @click="toggleRight">
       <Icon :icon="panelRightIcon" />
     </button>
     <button :title="t('Minimize')" :aria-label="t('Minimize')" @click="run('minimize')">
@@ -52,6 +53,7 @@ button { width: 46px; height: 100%; flex-shrink: 0; display: flex; align-items: 
 button:hover { background: #3a3a3a; color: #fff; }
 button:focus-visible { outline: 1px solid #4ec9b0; outline-offset: -2px; }
 .panel-toggle { width: 34px; font-size: 15px; }
+.window-controls.page-controls { width: 138px; }
 .panel-toggle.active { color: #4ec9b0; }
 .close-window:hover { background: #c42b1c; color: #fff; }
 svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1; }

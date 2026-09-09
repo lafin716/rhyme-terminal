@@ -2,8 +2,9 @@
 import { t } from "./composables/useI18n";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import FlowPanel from "./components/FlowPanel.vue";
+import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import FlowPage from "./components/FlowPage.vue";
+import { useFlowPage } from "./composables/useFlowPage";
 import SideBar from "./components/SideBar.vue";
 import ExplorerPanel from "./components/ExplorerPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
@@ -20,7 +21,7 @@ import { useWorkspaces, loadFromStorage, workspaceDefaultCwd } from "./composabl
 import { useFocus } from "./composables/useFocus";
 import { usePrefixKey } from "./composables/usePrefixKey";
 import { useKeybindings, loadKeybindingsFromStorage } from "./composables/useKeybindings";
-import { useGlobalShortcuts, registerAction, registerFocusSessionByIndex } from "./composables/useGlobalShortcuts";
+import { useGlobalShortcuts, registerAction, registerFocusSessionByIndex, dispatchAction } from "./composables/useGlobalShortcuts";
 import { useSettings } from "./composables/useSettings";
 import { useConfirm } from "./composables/useConfirm";
 import { usePrefs } from "./composables/usePrefs";
@@ -80,7 +81,10 @@ const { open: openQuickOpen } = useQuickOpen();
 const { panels, toggleLeft, toggleRight, resize, commit } = useShellPanels();
 const { prefs } = usePrefs();
 const { profiles } = useAccountProfiles();
-const flowOpen = ref(false);
+const { flowOpen, flowProjectId, closeFlow } = useFlowPage();
+const flowWorkspace = computed(() => wsState.workspaces.find(ws => ws.id === flowProjectId.value));
+const pageOpen = computed(() => settingsOpen.value || flowOpen.value);
+watch(settingsOpen, (open) => { if (open) closeFlow(); });
 useGlobalShortcuts();
 
 let unlistenSessionAgent: UnlistenFn | null = null;
@@ -236,11 +240,24 @@ async function promptRename() {
   if (name && name.trim()) await rename(s.id, name.trim());
 }
 
+async function closeResourceTab(id: string) {
+  const resource = resources.getById(id);
+  if (!resource) return;
+  if (resource.kind === "file" && resource.dirty) {
+    const discard = await confirm({
+      message: t('Discard changes to "{name}"?', { name: resource.preview.name }),
+      confirmLabel: t("Discard"),
+    });
+    if (!discard) return;
+  }
+  resources.closeResource(id);
+}
+
 async function killFocused() {
   const ws = activeWorkspace.value;
   const leaf = ws && focusedLeafId.value ? findLeafById(ws.layout, focusedLeafId.value) : null;
   if (leaf?.activeTabId && resources.getById(leaf.activeTabId)) {
-    resources.closeResource(leaf.activeTabId);
+    await closeResourceTab(leaf.activeTabId);
     return;
   }
   const s = focusedSession.value;
@@ -260,7 +277,7 @@ async function killFocusedNow() {
   const ws = activeWorkspace.value;
   const leaf = ws && focusedLeafId.value ? findLeafById(ws.layout, focusedLeafId.value) : null;
   if (leaf?.activeTabId && resources.getById(leaf.activeTabId)) {
-    resources.closeResource(leaf.activeTabId);
+    await closeResourceTab(leaf.activeTabId);
     return;
   }
   const s = focusedSession.value;
@@ -432,17 +449,16 @@ function focusSessionByIndex(i: number) {
 }
 
 registerFocusSessionByIndex(focusSessionByIndex);
+for (let i = 0; i < 10; i++) {
+  const id = `pane.selectTab${i}`;
+  ACTION_HANDLERS[id] = () => selectByIndexInLeaf(i);
+  registerAction(id, ACTION_HANDLERS[id]);
+}
 
 usePrefixKey(async (key) => {
-  // Numeric tab selection is hard-wired (not a configurable action).
-  if (/^[0-9]$/.test(key)) {
-    selectByIndexInLeaf(parseInt(key, 10));
-    return;
-  }
   for (const a of ACTIONS) {
     if (prefixFor(a.id as ActionId) === key) {
-      const h = ACTION_HANDLERS[a.id as ActionId];
-      if (h) await h();
+      dispatchAction(a.id as ActionId);
       return;
     }
   }
@@ -463,9 +479,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app" :style="{ '--titlebar-height': `${TITLEBAR_HEIGHT}px` }">
-    <MenuBar class="shell-menu" :style="{ width: panels.left.open ? `${panels.left.width}px` : '102px' }" />
-    <WindowControls />
-    <div class="main">
+    <div v-if="pageOpen" class="page-titlebar" data-tauri-drag-region>
+      {{ settingsOpen ? t('Settings') : 'Rhyme Flow' }}
+    </div>
+    <MenuBar class="shell-menu" :hide-actions="pageOpen" :style="{ width: pageOpen ? '34px' : panels.left.open ? `${panels.left.width}px` : '102px' }" />
+    <WindowControls :hide-panel-toggle="pageOpen" />
+    <div class="main" :inert="pageOpen">
       <div v-if="panels.left.open" class="region region-left" :style="leftRegionStyle">
         <SideBar />
       </div>
@@ -476,14 +495,9 @@ onBeforeUnmount(() => {
         @mousedown="startRegionResize('left', $event)"
       />
       <div class="content">
-        <nav class="work-mode" aria-label="작업 모드">
-          <button :aria-pressed="!flowOpen" @click="flowOpen = false">Terminal</button>
-          <button :aria-pressed="flowOpen" @click="flowOpen = true">Rhyme Flow</button>
-        </nav>
-        <div v-show="!flowOpen" class="terminal-surface">
+        <div class="terminal-surface">
           <SplitContainer v-if="activeWorkspace" :key="activeWorkspace.id" :node="activeWorkspace.layout" />
         </div>
-        <FlowPanel v-if="activeWorkspace" v-show="flowOpen" :active="flowOpen" :project="workspaceDefaultCwd(activeWorkspace) || ''" :project-id="activeWorkspace.id" />
       </div>
       <div
         v-if="panels.right.open"
@@ -497,6 +511,7 @@ onBeforeUnmount(() => {
     </div>
     <StatusBar />
     <QuickOpen />
+    <FlowPage v-if="flowWorkspace" :project="workspaceDefaultCwd(flowWorkspace) || ''" :project-id="flowWorkspace.id" :project-name="flowWorkspace.name" />
     <SettingsModal v-if="settingsOpen" />
     <ConfirmModal />
     <PalettePopover />
@@ -531,11 +546,7 @@ html, body, #app {
 </style>
 
 <style scoped>
-.work-mode { display: flex; gap: 4px; padding: 4px 8px; border-bottom: 1px solid #333; flex-shrink: 0; }
-.work-mode button { background: transparent; color: #aaa; border: 0; padding: 6px 12px; cursor: pointer; }
-.work-mode button[aria-pressed="true"] { background: #333; color: #fff; border-radius: 4px; }
 .terminal-surface { flex: 1; min-height: 0; display: flex; }
-.content :deep(.flow-panel) { flex: 1; height: auto; }
 .app {
   display: flex;
   flex-direction: column;
@@ -554,6 +565,7 @@ html, body, #app {
   padding-top: var(--titlebar-height);
 }
 .shell-menu { position: fixed; top: 0; left: 0; }
+.page-titlebar { position: fixed; inset: 0 0 auto; height: var(--titlebar-height); z-index: 40; display: flex; align-items: center; justify-content: center; background: #252525; color: #aaa; font-size: 12px; user-select: none; }
 .region-splitter {
   flex: 0 0 4px;
   background: #111;
@@ -566,7 +578,6 @@ html, body, #app {
 .content {
   display: flex;
   flex-direction: column;
-  padding-top: var(--titlebar-height);
   flex: 1;
   min-width: 0;
   min-height: 0;

@@ -1,0 +1,56 @@
+{
+  "before": [
+    "새 페이지 열기",
+    "Claude",
+    "Codex›",
+    "PSWindows PowerShell 기본값",
+    "P7PowerShell 7",
+    "C:\\명령 프롬프트",
+    "WSLWSL",
+    "GBGit Bash"
+  ],
+  "settingsOrder": [
+    "codex",
+    "page",
+    "claude",
+    "default",
+    "terminal:windows-powershell",
+    "terminal:powershell",
+    "terminal:cmd",
+    "terminal:wsl",
+    "terminal:git-bash"
+  ],
+  "after": [
+    "Codex›",
+    "새 페이지 열기",
+    "Claude",
+    "PSWindows PowerShell 기본값",
+    "P7PowerShell 7",
+    "C:\\명령 프롬프트",
+    "WSLWSL",
+    "GBGit Bash"
+  ],
+  "profile": true,
+  "profileClosed": true,
+  "reloaded": [
+    "Codex›",
+    "새 페이지 열기",
+    "Claude",
+    "PSWindows PowerShell 기본값",
+    "P7PowerShell 7",
+    "C:\\명령 프롬프트",
+    "WSLWSL",
+    "GBGit Bash"
+  ],
+  "reset": [
+    "새 페이지 열기",
+    "Claude",
+    "Codex›",
+    "PSWindows PowerShell 기본값",
+    "P7PowerShell 7",
+    "C:\\명령 프롬프트",
+    "WSLWSL",
+    "GBGit Bash"
+  ],
+  "errors": []
+}

@@ -1,0 +1,258 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><base href="../../"><title>Rhyme Terminal README</title><style>body{margin:40px auto;padding:0 32px;max-width:960px;font:16px/1.65 system-ui;color:#24292f}img{max-width:100%;height:auto}h1,h2{border-bottom:1px solid #d0d7de;padding-bottom:.3em}table{border-collapse:collapse;width:100%;margin:16px 0}td,th{padding:8px 12px;border:1px solid #d0d7de}tr:nth-child(2n){background:#f6f8fa}a{color:#0969da}pre{padding:16px;overflow:auto;background:#f6f8fa;border-radius:6px}code{font:13px/1.5 Consolas,monospace}summary{cursor:pointer}details{margin:16px 0}sub{font-size:12px}</style><body><div align="center">
+  <img src="src-tauri/icons/128x128.png" alt="Rhyme Terminal 로고" width="88" height="88">
+  <h1>Rhyme Terminal</h1>
+  <p><strong>터미널, AI 코딩 도구, 프로젝트 작업을 한 화면에.</strong></p>
+  <p>Windows용 터미널 멀티플렉서 · 프로젝트별 작업 공간 · 로컬 워크플로 자동화</p>
+  <p>
+    <img src="https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square" alt="플랫폼: Windows">
+    <img src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square" alt="Tauri 2">
+    <img src="https://img.shields.io/badge/Vue-3-42B883?style=flat-square" alt="Vue 3">
+    <img src="https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square" alt="Rust 2021">
+  </p>
+  <p>
+    <a href="#quick-start">빠른 시작</a> ·
+    <a href="#features">주요 기능</a> ·
+    <a href="docs/rhyme-flow.md">Rhyme Flow</a> ·
+    <a href="docs/mobile-pairing.md">모바일 연결</a> ·
+    <a href="https://github.com/lafin716/rhyme-terminal/issues">이슈 제보</a>
+  </p>
+</div>
+<p><img src="docs/images/terminal-workspace.png" alt="프로젝트 탐색기와 개발 서버, Claude Code·Codex 세션을 세 개의 패널에 배치한 Rhyme Terminal"></p>
+<p align="center"><sub>현재 프런트엔드를 예제 프로젝트·세션 데이터로 실행해 직접 캡처했습니다. 화면 속 CLI 대화와 출력은 데모이며 실제 에이전트 실행 결과가 아닙니다. <a href="docs/images/README.md">촬영 안내</a></sub></p>
+<p><strong>Rhyme Terminal</strong>은 여러 터미널을 프로젝트별로 묶고, 화면을 나눠 나란히 사용하는 Windows 데스크톱 앱입니다. 개발 서버 옆에 Claude Code와 Codex를 띄우고, 같은 작업 공간에서 파일을 열거나 반복 작업을 Rhyme Flow로 구성할 수 있습니다.</p>
+<p><a id="features"></a></p>
+<h2>작업에 필요한 도구를 가까이</h2>
+<table>
+<thead>
+<tr>
+<th>기능</th>
+<th>할 수 있는 일</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>분할 터미널</strong></td>
+<td>가로·세로·4분할, 최대 16개 패널. 탭을 끌어서 순서를 바꾸거나 다른 패널로 이동합니다.</td>
+</tr>
+<tr>
+<td><strong>프로젝트 작업 공간</strong></td>
+<td>프로젝트마다 기본 폴더·셸·레이아웃을 관리합니다. 좌측 세션 목록에서 바로 이동하고, 우클릭으로 이름을 바꾸거나 삭제합니다.</td>
+</tr>
+<tr>
+<td><strong>AI 제공자</strong></td>
+<td>Claude Code·Codex의 로그인 프로필과 기본 계정을 관리합니다. 세션별 프로필 태그로 계정을 구분하고, 하단에서 프로필별 사용량을 확인합니다.</td>
+</tr>
+<tr>
+<td><strong>파일과 웹 페이지</strong></td>
+<td>탐색기·빠른 열기·터미널 링크로 파일을 찾습니다. 텍스트 편집과 저장, Markdown·이미지 미리보기, 내장 브라우저 탭을 지원합니다.</td>
+</tr>
+<tr>
+<td><strong>키보드 중심 조작</strong></td>
+<td>tmux 스타일 <code>Ctrl+B</code> prefix, 사용자 지정 단축키, 터미널 확대·축소, 자주 쓰는 명령 팔레트를 제공합니다.</td>
+</tr>
+<tr>
+<td><strong>모바일 연결</strong></td>
+<td>Tailscale을 통해 휴대폰 브라우저를 페어링하고 PC 터미널의 출력을 보거나 입력을 보냅니다.</td>
+</tr>
+<tr>
+<td><strong>Rhyme Flow</strong></td>
+<td>명령·워커·조건·승인 노드를 연결합니다. 버전을 확정해 실행하고 단계별 결과와 실행 기록을 확인합니다.</td>
+</tr>
+</tbody>
+</table>
+<h3>익숙한 셸, 필요한 프로필</h3>
+<p>PowerShell, PowerShell 7, Command Prompt, WSL, Git Bash와 사용자 지정 셸을 사용할 수 있습니다. 프로젝트별로 기본 폴더와 셸을 지정하면 새 터미널이 해당 환경에서 시작합니다.</p>
+<p>설정의 <strong>AI 제공자</strong>에서 Claude Code·Codex 프로필을 추가하고 기본 프로필을 선택합니다. CLI는 별도로 설치하고 로그인해야 하며, 프로필마다 로그인 폴더를 분리해 여러 계정을 함께 사용할 수 있습니다.</p>
+<details>
+<summary><strong>AI 제공자 설정 화면 보기</strong></summary>
+<p><img src="docs/images/ai-providers.png" alt="Claude Code와 Codex의 예제 로그인 프로필 및 기본 계정을 설정하는 AI 제공자 페이지"></p>
+<p>설정·Rhyme Flow는 독립된 페이지로 열립니다. 상단에는 로고와 창 제어 버튼을 유지하며, 앱으로 돌아오면 기존 터미널 화면을 이어서 사용합니다.</p>
+</details>
+<h3>반복 작업은 Rhyme Flow로</h3>
+<p>프로젝트의 <strong>Rhyme Flow</strong> 버튼을 눌러 Flow 디자이너를 엽니다. 노드를 배치하고 입력·출력과 실행 권한을 정의한 뒤, 검증한 버전을 실행할 수 있습니다.</p>
+<p><img src="docs/images/rhyme-flow.png" alt="명령·승인·출력 노드를 연결한 Rhyme Flow 디자이너의 예제"></p>
+<ul>
+<li><strong>Flow 디자이너</strong> — 노드와 연결 편집, JSON 가져오기·내보내기, 버전 확정.</li>
+<li><strong>워커</strong> — 지침, 입출력 계약, 권한, 제한 시간을 정의하고 버전별로 관리.</li>
+<li><strong>프로젝트 채팅</strong> — 요구사항을 업무로 저장하고 후속 변경 사항을 다음 실행에 반영.</li>
+<li><strong>실행 기록</strong> — 단계별 입력·출력·오류, 승인 요청, 취소와 결과물 확인.</li>
+</ul>
+<p>Codex CLI를 통한 자연어 초안 수정도 지원합니다. 개발 패키지는 Worktree → 개발·검증·리뷰 → 승인 → 커밋 → Draft PR 흐름을 제공하며, 검증 명령과 커밋할 파일을 프로젝트에 맞게 설정해야 합니다. 외부 게시에는 실행 권한과 단계 승인이 필요합니다.</p>
+<p><a href="docs/rhyme-flow.md"><strong>Rhyme Flow 시작하기 →</strong></a></p>
+<h3>휴대폰에서도 터미널에 연결</h3>
+<p>PC 설정의 <strong>모바일 연결</strong>에서 Tailscale IP를 선택하고 서버를 시작합니다. 휴대폰으로 QR을 스캔한 뒤 PC에서 승인하면 세션을 선택해 출력 확인과 입력을 할 수 있습니다. 한글 입력창과 Enter·Tab·Esc·Ctrl+C 보조키를 제공합니다.</p>
+<p>모바일 화면은 브라우저에서 열립니다. 직접 IP 연결은 HTTP/WS를 사용하므로 Tailscale 경로를 전제로 하며, PC 앱과 모바일 서버가 실행 중이어야 합니다.</p>
+<p><a href="docs/mobile-pairing.md"><strong>페어링 및 연결 문제 해결 →</strong></a></p>
+<p><a id="quick-start"></a></p>
+<h2>빠른 시작</h2>
+<p>현재 저장소의 소스를 Windows에서 빌드하는 방법입니다.</p>
+<h3>준비</h3>
+<ul>
+<li>Windows 10/11</li>
+<li>Git, Node.js 22 이상, pnpm</li>
+<li>Rust의 MSVC 툴체인</li>
+<li>Microsoft C++ Build Tools의 <strong>C++를 사용한 데스크톱 개발</strong> 구성 요소와 Windows SDK</li>
+<li>Microsoft Edge WebView2 Runtime</li>
+</ul>
+<p>시스템 의존성 설치는 <a href="https://v2.tauri.app/start/prerequisites/#windows">Tauri의 Windows 준비 안내</a>를 참고하세요. Claude Code·Codex·WSL·Git Bash는 사용할 기능에 맞춰 별도로 설치합니다.</p>
+<h3>소스에서 실행</h3>
+<pre><code class="language-powershell">git clone https://github.com/lafin716/rhyme-terminal.git
+cd rhyme-terminal
+pnpm.cmd install
+pnpm.cmd tauri dev
+</code></pre>
+<p>pnpm이 없다면 먼저 <code>npm install -g pnpm</code>을 실행하세요. 개발 모드에서는 Vite 서버와 Tauri 앱이 함께 실행됩니다.</p>
+<h3>실행 파일 만들기</h3>
+<pre><code class="language-powershell">pnpm.cmd build:portable
+</code></pre>
+<p>기본 출력 경로는 <code>src-tauri/target/release/rhyme-terminal.exe</code>입니다. 현재 빌드 설정은 설치 프로그램 대신 실행 파일을 생성하며, 실행 환경에는 WebView2 Runtime이 필요합니다. <code>CARGO_TARGET_DIR</code>를 지정한 경우 출력 위치가 달라집니다.</p>
+<h2>처음 열었다면</h2>
+<ol>
+<li><strong>프로젝트 추가</strong> — 좌측 <code>+</code>로 작업 공간을 만들고, 설정 → 작업 공간에서 기본 폴더를 지정합니다.</li>
+<li><strong>터미널 시작</strong> — 프로젝트 옆 <code>+</code> 또는 <code>Ctrl+N</code>으로 세션을 만듭니다. 터미널 메뉴에서 셸과 AI CLI 프로필을 선택할 수 있습니다.</li>
+<li><strong>화면 분할</strong> — 탭을 패널 가장자리로 끌거나 <code>Ctrl+B</code> 다음 <code>%</code>를 눌러 좌우로 나눕니다.</li>
+<li><strong>파일 열기</strong> — <code>Ctrl+P</code>로 파일을 찾거나 터미널 출력의 파일 경로를 <code>Ctrl+클릭</code>합니다. URL은 내장 브라우저 탭으로 열립니다.</li>
+<li><strong>작업 이어가기</strong> — 창 닫기는 트레이로 숨기기입니다. 앱을 완전히 종료하려면 트레이 메뉴를 사용합니다.</li>
+</ol>
+<h2>자주 쓰는 조작</h2>
+<p>아래는 기본 설정입니다. 설정 → <strong>단축키</strong>에서 일반 단축키와 prefix 키를 변경할 수 있습니다. <code>Ctrl+B → %</code>는 두 키 조합을 순서대로 누른다는 뜻입니다.</p>
+<table>
+<thead>
+<tr>
+<th>동작</th>
+<th>기본 입력</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>새 터미널</td>
+<td><code>Ctrl+N</code> 또는 <code>Ctrl+B → c</code></td>
+</tr>
+<tr>
+<td>좌우 / 상하 분할</td>
+<td><code>Ctrl+B → %</code> / <code>Ctrl+B → &quot;</code></td>
+</tr>
+<tr>
+<td>해당 방향으로 탭 이동 또는 분할</td>
+<td><code>Ctrl+Alt+방향키</code></td>
+</tr>
+<tr>
+<td>현재 패널의 다음 / 이전 탭</td>
+<td><code>Ctrl+B → n</code> / <code>Ctrl+B → p</code></td>
+</tr>
+<tr>
+<td>세션 이름 변경</td>
+<td>세션 우클릭 → 이름 변경 또는 <code>Ctrl+B → ,</code></td>
+</tr>
+<tr>
+<td>왼쪽 / 오른쪽 패널 표시 전환</td>
+<td><code>Ctrl+Shift+B</code> / <code>Ctrl+Shift+E</code></td>
+</tr>
+<tr>
+<td>빠른 파일 열기</td>
+<td><code>Ctrl+P</code></td>
+</tr>
+<tr>
+<td>파일 저장</td>
+<td><code>Ctrl+S</code></td>
+</tr>
+<tr>
+<td>터미널 확대 / 축소</td>
+<td><code>Ctrl+Shift++</code> / <code>Ctrl+Shift+-</code> 또는 <code>Ctrl+Shift+휠</code></td>
+</tr>
+<tr>
+<td>설정</td>
+<td><code>Ctrl+,</code></td>
+</tr>
+</tbody>
+</table>
+<p>prefix의 <code>c</code>, <code>n</code>, <code>p</code>는 Shift 없이 누릅니다. <code>Ctrl+B → Shift+C</code>는 Claude 실행 동작입니다.</p>
+<p>터미널 영역에서 마우스 가운데 버튼을 누르면 명령 팔레트를 열 수 있습니다. 설정 → <strong>팔레트</strong>에서 자주 쓰는 명령과 자동 실행 여부를 관리합니다.</p>
+<h2>개발과 기여</h2>
+<pre><code class="language-powershell">pnpm.cmd test                                      # 프런트엔드 테스트
+pnpm.cmd build                                     # 모바일 자산 + 타입 검사 + 프런트엔드 빌드
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+</code></pre>
+<p><code>pnpm.cmd dev</code>는 프런트엔드 서버만 실행합니다. 실제 PTY·파일 시스템·모바일 연결을 함께 확인하려면 <code>pnpm.cmd tauri dev</code>를 사용하세요.</p>
+<table>
+<thead>
+<tr>
+<th>경로</th>
+<th>역할</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="src/components/"><code>src/components/</code></a></td>
+<td>Vue UI: 터미널, 탐색기, 설정, Flow 페이지</td>
+</tr>
+<tr>
+<td><a href="src/composables/"><code>src/composables/</code></a></td>
+<td>작업 공간·세션·설정 상태와 동작</td>
+</tr>
+<tr>
+<td><a href="src/lib/"><code>src/lib/</code></a></td>
+<td>단축키, 레이아웃 타입, Tauri 브리지, 공통 로직</td>
+</tr>
+<tr>
+<td><a href="src-tauri/src/pty/"><code>src-tauri/src/pty/</code></a> · <a href="src-tauri/src/ipc/"><code>ipc/</code></a></td>
+<td>PTY 세션과 Windows named-pipe 통신</td>
+</tr>
+<tr>
+<td><a href="src-tauri/src/flow/"><code>src-tauri/src/flow/</code></a></td>
+<td>Rhyme Flow 모델, 저장소, 실행 엔진</td>
+</tr>
+<tr>
+<td><a href="src/mobile/"><code>src/mobile/</code></a></td>
+<td>모바일 브라우저 UI</td>
+</tr>
+</tbody>
+</table>
+<p>버그를 발견했다면 <a href="https://github.com/lafin716/rhyme-terminal/issues">이슈</a>에 재현 단계와 Windows·셸 버전, 기대한 동작을 남겨 주세요. 변경 제안이나 PR에는 관련 화면과 검증 결과를 함께 적어 주세요.</p>
+<details>
+<summary><strong>CLI와 데이터 저장 위치</strong></summary>
+<p>GUI와 별도로 <code>winmuxctl</code> CLI와 <code>winmuxd</code> 데몬을 빌드할 수 있습니다. 내부 실행 파일명과 저장 키는 기존 <code>winmux</code> 식별자를 유지합니다.</p>
+<pre><code class="language-powershell">cargo build --manifest-path src-tauri/Cargo.toml --release --bin winmuxctl --bin winmuxd
+.\src-tauri\target\release\winmuxctl.exe ls
+.\src-tauri\target\release\winmuxctl.exe ping
+</code></pre>
+<p>데몬은 필요할 때 자동으로 시작합니다. GUI 실행 파일은 별도 <code>winmuxd.exe</code>가 없으면 자체 데몬 모드로 실행할 수 있습니다.</p>
+<table>
+<thead>
+<tr>
+<th>데이터</th>
+<th>위치</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>작업 공간·환경설정·단축키·팔레트</td>
+<td>앱 WebView의 localStorage, <code>winmux:{domain}:v1</code></td>
+</tr>
+<tr>
+<td>데몬 로그</td>
+<td><code>%LOCALAPPDATA%\winmux\logs\winmuxd.log</code></td>
+</tr>
+<tr>
+<td>Flow 정의·업무·실행 기록</td>
+<td>Tauri local-data 경로의 <code>flow/flow.sqlite3</code></td>
+</tr>
+</tbody>
+</table>
+<p>Flow 실행은 앱 프로세스가 살아 있는 동안 유지됩니다. 앱이 종료된 뒤 다시 시작하면 미완료 실행을 <code>interrupted</code>로 처리하며 자동 재실행하지 않습니다.</p>
+</details>
+<details>
+<summary><strong>실행이 잘되지 않을 때</strong></summary>
+<ul>
+<li><strong>빌드 실패</strong> — Rust MSVC 툴체인, C++ Build Tools, Windows SDK와 WebView2 설치를 확인합니다.</li>
+<li><strong>터미널 생성 실패</strong> — 설정 → 터미널의 프로그램 경로와 프로젝트 기본 폴더를 확인합니다. PowerShell 7은 <code>pwsh.exe</code>, Windows PowerShell은 <code>powershell.exe</code>입니다.</li>
+<li><strong>Git Bash 즉시 종료</strong> — Git Bash 프리셋을 다시 선택하고 실행 인수 <code>--login</code>, <code>-i</code>를 확인합니다.</li>
+<li><strong>WSL 실행 실패</strong> — 일반 PowerShell에서 <code>wsl.exe --status</code>와 <code>wsl.exe</code>가 동작하는지 확인합니다.</li>
+<li><strong>모바일 접속 실패</strong> — 선택한 IP·포트, Tailscale 연결, Windows 방화벽을 확인합니다. 서버 재시작 후에는 새 QR로 페어링합니다.</li>
+</ul>
+<p>자세한 연결 절차는 <a href="docs/mobile-pairing.md">모바일 문서</a>, Flow 설정과 실행 조건은 <a href="docs/rhyme-flow.md">Rhyme Flow 문서</a>를 참고하세요.</p>
+</details>
+<hr>
+<p>Tauri · Vue · xterm.js · Monaco Editor · Rust로 만듭니다. README 구성은 <a href="https://github.com/stablyai/orca">Orca</a>의 짧은 소개와 기능별 안내를 참고했습니다.</p>
+</body></html>

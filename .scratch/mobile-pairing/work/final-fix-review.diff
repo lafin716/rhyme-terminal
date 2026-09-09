@@ -1,0 +1,1672 @@
+﻿diff --git a/src-tauri/src/ipc/client.rs b/src-tauri/src/ipc/client.rs
+index 78c54ec..b0cef86 100644
+--- a/src-tauri/src/ipc/client.rs
++++ b/src-tauri/src/ipc/client.rs
+@@ -12,13 +12,34 @@ use tokio::time::sleep;
+ use super::protocol::{Event, Method, Request, ServerMsg};
+ use super::{pipe_name, read_frame, write_frame};
+ 
+-type Pending = Arc<AsyncMutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value>>>>>;
++struct Reply {
++    value: serde_json::Value,
++    events: broadcast::Receiver<Event>,
++}
++type Pending = Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<Result<Reply>>>>>;
++struct PendingGuard {
++    pending: Pending,
++    id: u64,
++}
++impl Drop for PendingGuard {
++    fn drop(&mut self) {
++        self.pending.lock().remove(&self.id);
++    }
++}
++struct ReaderTask(tokio::task::AbortHandle);
++impl Drop for ReaderTask {
++    fn drop(&mut self) {
++        self.0.abort();
++    }
++}
+ 
+ pub struct DaemonClient {
+     writer: AsyncMutex<tokio::io::WriteHalf<NamedPipeClient>>,
+     pending: Pending,
+     events: broadcast::Sender<Event>,
+     next_id: AtomicU64,
++    _reader: ReaderTask,
++    disconnected: tokio::sync::watch::Receiver<bool>,
+ }
+ 
+ impl DaemonClient {
+@@ -51,20 +72,27 @@ impl DaemonClient {
+         Self::from_pipe(client).await
+     }
+ 
++    pub async fn connect_mobile() -> Result<Arc<Self>> {
++        let client = ClientOptions::new().open(pipe_name())?;
++        Self::from_pipe_capacity(client, 64).await
++    }
++
+     async fn from_pipe(pipe: NamedPipeClient) -> Result<Arc<Self>> {
+-        let (read_half, write_half) = tokio::io::split(pipe);
+-        let (events_tx, _) = broadcast::channel(1024);
+-        let pending: Pending = Arc::new(AsyncMutex::new(HashMap::new()));
++        Self::from_pipe_capacity(pipe, 1024).await
++    }
+ 
+-        let client = Arc::new(Self {
+-            writer: AsyncMutex::new(write_half),
+-            pending: pending.clone(),
+-            events: events_tx.clone(),
+-            next_id: AtomicU64::new(1),
+-        });
++    pub(crate) async fn from_pipe_capacity(
++        pipe: NamedPipeClient,
++        capacity: usize,
++    ) -> Result<Arc<Self>> {
++        let (read_half, write_half) = tokio::io::split(pipe);
++        let (events_tx, _) = broadcast::channel(capacity);
++        let pending: Pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
++        let events_client = events_tx.clone();
+ 
++        let (disconnected_tx, disconnected) = tokio::sync::watch::channel(false);
+         let pending_bg = pending.clone();
+-        tokio::spawn(async move {
++        let reader_task = tokio::spawn(async move {
+             let mut reader = read_half;
+             loop {
+                 let bytes = match read_frame(&mut reader).await {
+@@ -77,12 +105,15 @@ impl DaemonClient {
+                 };
+                 match msg {
+                     ServerMsg::Response { id, result } => {
+-                        if let Some(tx) = pending_bg.lock().await.remove(&id) {
+-                            let _ = tx.send(Ok(result));
++                        if let Some(tx) = pending_bg.lock().remove(&id) {
++                            let _ = tx.send(Ok(Reply {
++                                value: result,
++                                events: events_tx.subscribe(),
++                            }));
+                         }
+                     }
+                     ServerMsg::Error { id, message } => {
+-                        if let Some(tx) = pending_bg.lock().await.remove(&id) {
++                        if let Some(tx) = pending_bg.lock().remove(&id) {
+                             let _ = tx.send(Err(anyhow!(message)));
+                         }
+                     }
+@@ -91,26 +122,49 @@ impl DaemonClient {
+                     }
+                 }
+             }
+-            let mut p = pending_bg.lock().await;
++            disconnected_tx.send_replace(true);
++            let mut p = pending_bg.lock();
+             for (_, tx) in p.drain() {
+                 let _ = tx.send(Err(anyhow!("daemon disconnected")));
+             }
+         });
+ 
+-        Ok(client)
++        Ok(Arc::new(Self {
++            writer: AsyncMutex::new(write_half),
++            pending,
++            events: events_client,
++            next_id: AtomicU64::new(1),
++            _reader: ReaderTask(reader_task.abort_handle()),
++            disconnected,
++        }))
+     }
+ 
+     pub async fn request_raw(&self, method: Method) -> Result<serde_json::Value> {
++        self.request_with_events(method)
++            .await
++            .map(|(value, _)| value)
++    }
++
++    /// Subscribe in the pipe reader at the response boundary, before subsequent live events.
++    pub async fn request_with_events(
++        &self,
++        method: Method,
++    ) -> Result<(serde_json::Value, broadcast::Receiver<Event>)> {
+         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+         let req = Request { id, method };
+         let (tx, rx) = oneshot::channel();
+-        self.pending.lock().await.insert(id, tx);
++        self.pending.lock().insert(id, tx);
++        let _guard = PendingGuard {
++            pending: self.pending.clone(),
++            id,
++        };
+         let bytes = serde_json::to_vec(&req)?;
+         {
+             let mut w = self.writer.lock().await;
+             write_frame(&mut *w, &bytes).await?;
+         }
+-        rx.await.map_err(|_| anyhow!("response channel closed"))?
++        let reply = rx.await.map_err(|_| anyhow!("response channel closed"))??;
++        Ok((reply.value, reply.events))
+     }
+ 
+     pub async fn request<T: DeserializeOwned>(&self, method: Method) -> Result<T> {
+@@ -118,6 +172,14 @@ impl DaemonClient {
+         Ok(serde_json::from_value(value)?)
+     }
+ 
++    pub async fn disconnected(&self) {
++        let mut rx = self.disconnected.clone();
++        let closed = *rx.borrow();
++        if !closed {
++            let _ = rx.changed().await;
++        }
++    }
++
+     pub fn events(&self) -> broadcast::Receiver<Event> {
+         self.events.subscribe()
+     }
+@@ -183,3 +245,83 @@ fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
+         standalone_daemon.display()
+     )
+ }
++
++#[cfg(test)]
++mod mobile_lifetime_tests {
++    use super::*;
++    use tokio::net::windows::named_pipe::ServerOptions;
++    async fn pair() -> (
++        Arc<DaemonClient>,
++        tokio::net::windows::named_pipe::NamedPipeServer,
++    ) {
++        let name = format!(r"\\.\pipe\winmux-test-{}", uuid::Uuid::new_v4());
++        let server = ServerOptions::new()
++            .first_pipe_instance(true)
++            .create(&name)
++            .unwrap();
++        let pipe = ClientOptions::new().open(&name).unwrap();
++        server.connect().await.unwrap();
++        (DaemonClient::from_pipe(pipe).await.unwrap(), server)
++    }
++    #[tokio::test]
++    async fn response_receiver_excludes_old_output_and_preserves_immediate_new_output() {
++        let (client, mut server) = pair().await;
++        let server_task = tokio::spawn(async move {
++            let request: Request =
++                serde_json::from_slice(&read_frame(&mut server).await.unwrap()).unwrap();
++            for message in [
++                ServerMsg::Event(Event::PtyOutput {
++                    id: uuid::Uuid::nil(),
++                    data: "b2xk".into(),
++                }),
++                ServerMsg::Response {
++                    id: request.id,
++                    result: serde_json::json!({"scrollback":"b2xk"}),
++                },
++                ServerMsg::Event(Event::PtyOutput {
++                    id: uuid::Uuid::nil(),
++                    data: "bmV3".into(),
++                }),
++            ] {
++                write_frame(&mut server, &serde_json::to_vec(&message).unwrap())
++                    .await
++                    .unwrap();
++            }
++        });
++        let (value, mut events) = client
++            .request_with_events(Method::AttachSessionAtomic {
++                id: uuid::Uuid::nil(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(value["scrollback"], "b2xk");
++        match tokio::time::timeout(Duration::from_secs(2), events.recv())
++            .await
++            .unwrap()
++            .unwrap()
++        {
++            Event::PtyOutput { data, .. } => assert_eq!(data, "bmV3"),
++            _ => panic!("wrong event"),
++        }
++        assert!(events.try_recv().is_err());
++        server_task.await.unwrap();
++    }
++    #[tokio::test]
++    async fn cancelling_request_removes_pending_and_dropping_client_closes_pipe() {
++        let (client, mut server) = pair().await;
++        let pending = client.pending.clone();
++        let request = client.request_raw(Method::Ping);
++        assert!(tokio::time::timeout(Duration::from_millis(30), request)
++            .await
++            .is_err());
++        assert!(pending.lock().is_empty());
++        let _ = read_frame(&mut server).await.unwrap();
++        drop(client);
++        assert!(
++            tokio::time::timeout(Duration::from_secs(2), read_frame(&mut server))
++                .await
++                .unwrap()
++                .is_err()
++        );
++    }
++}
+CURRENT FILE: src-tauri/src/mobile_pairing/gateway.rs
+use super::*;
+use crate::ipc::{
+    client::DaemonClient,
+    protocol::{Event, Method},
+};
+use axum::{
+    body::Body,
+    extract::{
+        ws::{Message, WebSocket},
+        State, WebSocketUpgrade,
+    },
+    http::{HeaderMap, Request, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
+use base64::Engine;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+use tower::ServiceExt;
+
+include!(concat!(env!("OUT_DIR"), "/mobile_assets.rs"));
+type ConnectDaemon = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<Arc<DaemonClient>>> + Send>,
+        > + Send
+        + Sync,
+>;
+const MESSAGE_LIMIT: usize = 24 * 1024;
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+#[derive(Clone)]
+struct Gateway {
+    address: SocketAddr,
+    pairings: Arc<Mutex<Pairings>>,
+    stop: watch::Receiver<bool>,
+    slots: Arc<Semaphore>,
+    attempts: Arc<Mutex<(Instant, u32)>>,
+    connect_daemon: ConnectDaemon,
+}
+pub(super) async fn serve(
+    listener: tokio::net::TcpListener,
+    address: SocketAddr,
+    pairings: Arc<Mutex<Pairings>>,
+    stop: watch::Receiver<bool>,
+) {
+    serve_with_connector(
+        listener,
+        address,
+        pairings,
+        stop,
+        Arc::new(|| Box::pin(DaemonClient::connect_mobile())),
+    )
+    .await;
+}
+async fn serve_with_connector(
+    listener: tokio::net::TcpListener,
+    address: SocketAddr,
+    pairings: Arc<Mutex<Pairings>>,
+    mut stop: watch::Receiver<bool>,
+    connect_daemon: ConnectDaemon,
+) {
+    let state = Gateway {
+        address,
+        pairings: pairings.clone(),
+        stop: stop.clone(),
+        slots: Arc::new(Semaphore::new(16)),
+        attempts: Arc::new(Mutex::new((Instant::now(), 0))),
+        connect_daemon,
+    };
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .fallback(get(asset))
+        .with_state(state);
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _=stop.changed()=>break,
+            Some(_)=tasks.join_next(), if !tasks.is_empty()=>{},
+            accepted=listener.accept()=>{
+                let Ok((stream,_))=accepted else {break};
+                if tasks.len()>=32 { drop(stream); continue; }
+                let router=app.clone();
+                tasks.spawn(async move {
+                    let service=hyper::service::service_fn(move |request:Request<hyper::body::Incoming>| { let app=router.clone(); async move { app.oneshot(request.map(Body::new)).await } });
+                    let mut builder=hyper::server::conn::http1::Builder::new();
+                    builder.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(5)).max_buf_size(16*1024).keep_alive(true);
+                    let connection=builder.serve_connection(hyper_util::rt::TokioIo::new(stream),service).with_upgrades();
+                    let _=tokio::time::timeout(Duration::from_secs(10),connection).await;
+                });
+            }
+        }
+    }
+    pairings.lock().clear();
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+fn headers_ok(state: &Gateway, headers: &HeaderMap, ws: bool) -> bool {
+    !headers.contains_key("transfer-encoding")
+        && headers.get("content-length").is_none_or(|v| v == "0")
+        && headers.get("origin").is_none_or(|v| v.to_str().is_ok())
+        && headers.get_all("host").iter().count() == 1
+        && headers.get_all("origin").iter().count() <= 1
+        && valid_headers(
+            state.address,
+            headers.get("host").and_then(|v| v.to_str().ok()),
+            headers.get("origin").and_then(|v| v.to_str().ok()),
+            ws,
+        )
+}
+async fn asset(State(state): State<Gateway>, headers: HeaderMap, uri: Uri) -> Response {
+    if !headers_ok(&state, &headers, false) || uri.query().is_some() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let path = if uri.path() == "/" {
+        "mobile.html"
+    } else {
+        uri.path().trim_start_matches('/')
+    };
+    let Some((_, bytes)) = MOBILE_ASSETS.iter().find(|(p, _)| *p == path) else {
+        return if path == "mobile.html" {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "모바일 화면이 빌드되지 않았습니다. pnpm build 후 앱을 다시 빌드하세요.",
+            )
+                .into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        };
+    };
+    let mime = if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "text/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else {
+        "application/octet-stream"
+    };
+    ([("content-type",mime),("cache-control","no-store"),("x-content-type-options","nosniff"),("referrer-policy","no-referrer"),("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")],*bytes).into_response()
+}
+async fn upgrade(
+    State(state): State<Gateway>,
+    headers: HeaderMap,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !headers_ok(&state, &headers, true) || uri.query().is_some() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    {
+        let mut rate = state.attempts.lock();
+        if rate.0.elapsed() >= Duration::from_secs(60) {
+            *rate = (Instant::now(), 0);
+        }
+        if rate.1 >= 30 {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        rate.1 += 1;
+    }
+    let Ok(permit) = state.slots.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    ws.max_message_size(MESSAGE_LIMIT)
+        .max_frame_size(MESSAGE_LIMIT)
+        .read_buffer_size(4096)
+        .write_buffer_size(0)
+        .max_write_buffer_size(2 * 1024 * 1024)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            socket_session(socket, state).await;
+        })
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum Hello {
+    Pair { invite: String, name: String },
+    Auth { token: String },
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum Command {
+    List {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+    },
+    Attach {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+        id: Uuid,
+    },
+    Detach {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+        id: Uuid,
+    },
+    Input {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+        id: Uuid,
+        data: String,
+    },
+}
+async fn send(socket: &mut WebSocket, value: Value) -> Result<(), String> {
+    tokio::time::timeout(
+        SEND_TIMEOUT,
+        socket.send(Message::Text(value.to_string().into())),
+    )
+    .await
+    .map_err(|_| "수신 속도가 느려 연결을 종료합니다.".to_string())?
+    .map_err(|_| "연결이 종료되었습니다.".into())
+}
+async fn read_json<T: serde::de::DeserializeOwned>(socket: &mut WebSocket) -> Result<T, String> {
+    match socket.recv().await {
+        Some(Ok(Message::Text(text))) => {
+            serde_json::from_str(&text).map_err(|_| "잘못된 요청입니다.".into())
+        }
+        _ => Err("연결이 종료되었거나 잘못된 메시지입니다.".into()),
+    }
+}
+struct Registration {
+    pairings: Arc<Mutex<Pairings>>,
+    token: String,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let Some(d) = self.pairings.lock().devices.get_mut(&self.token) {
+            d.connections = d.connections.saturating_sub(1);
+        }
+    }
+}
+struct PendingGuard {
+    pairings: Arc<Mutex<Pairings>>,
+    id: String,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pairings.lock().pending.remove(&self.id);
+    }
+}
+async fn authenticate(
+    socket: &mut WebSocket,
+    state: &Gateway,
+) -> Result<(String, String, watch::Receiver<bool>, Registration), String> {
+    let hello = tokio::time::timeout(Duration::from_secs(10), read_json::<Hello>(socket))
+        .await
+        .map_err(|_| "인증 시간이 초과되었습니다.".to_string())??;
+    let token = match hello {
+        Hello::Auth { token } => token,
+        Hello::Pair { invite, name } => {
+            let (pending, mut result, expires) = {
+                let mut pairings = state.pairings.lock();
+                let pending = pairings.pair(&invite, &name, now_ms())?;
+                let p = &pairings.pending[&pending.request_id];
+                (pending, p.result.subscribe(), p.expires)
+            };
+            let _guard = PendingGuard {
+                pairings: state.pairings.clone(),
+                id: pending.request_id,
+            };
+            send(
+                socket,
+                json!({"type":"pending","verification":pending.verification}),
+            )
+            .await?;
+            let waiting = async {
+                loop {
+                    if let Some(result) = result.borrow().clone() {
+                        return result;
+                    }
+                    tokio::select! {
+                        changed=result.changed()=>if changed.is_err() {return Err("승인 요청이 종료되었습니다.".into());},
+                        _=socket.recv()=>return Err("승인 대기 중 연결이 종료되었거나 요청을 보냈습니다.".into()),
+                    }
+                }
+            };
+            tokio::time::timeout(
+                Duration::from_millis(expires.saturating_sub(now_ms())),
+                waiting,
+            )
+            .await
+            .map_err(|_| "승인 시간이 만료되었습니다.".to_string())??
+        }
+    };
+    let (id, cancel) = {
+        let mut p = state.pairings.lock();
+        let d = p
+            .devices
+            .get_mut(&token)
+            .ok_or("기기 인증에 실패했습니다. PC에서 다시 페어링하세요.")?;
+        if d.connections >= 4 {
+            return Err("이 기기의 동시 연결 수를 초과했습니다.".into());
+        }
+        d.connections += 1;
+        (d.device_id.clone(), d.cancel.subscribe())
+    };
+    let registration = Registration {
+        pairings: state.pairings.clone(),
+        token: token.clone(),
+    };
+    Ok((token, id, cancel, registration))
+}
+async fn socket_session(mut socket: WebSocket, state: Gateway) {
+    let mut stop = state.stop.clone();
+    let auth = tokio::select! {biased; _=stop.changed()=>return,auth=authenticate(&mut socket,&state)=>auth};
+    let (token, id, mut cancel, _registration) = match auth {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = send(&mut socket, json!({"type":"error","message":message})).await;
+            return;
+        }
+    };
+    if *cancel.borrow() {
+        return;
+    }
+    let work = async {
+        send(
+            &mut socket,
+            json!({"type":"authenticated","token":token,"deviceId":id}),
+        )
+        .await?;
+        let daemon = (state.connect_daemon)()
+            .await
+            .map_err(|_| "터미널 서버에 연결할 수 없습니다.".to_string())?;
+        let mut events = daemon.events();
+        let mut attached = None;
+        let mut rate = (Instant::now(), 0u32);
+        loop {
+            tokio::select! {
+                _=daemon.disconnected()=>return Err("터미널 서버 연결이 종료되었습니다.".into()),
+                command=read_json::<Command>(&mut socket)=>{
+                    if rate.0.elapsed()>=Duration::from_secs(1) {rate=(Instant::now(),0);}
+                    rate.1+=1; if rate.1>60 {return Err("요청이 너무 많습니다.".into());}
+                    let command=command?;
+                    let (request_id,method,next)=match command {
+                        Command::List {request_id}=>(request_id,Method::ListSessions,attached),
+                        Command::Attach {request_id,id}=>{
+                            // A fresh receiver is installed before issuing atomic attach. The daemon sends its snapshot before live events.
+
+                            (request_id,Method::AttachSessionAtomic {id},Some(id))
+                        },
+                        Command::Detach {request_id,id} if attached==Some(id)=>(request_id,Method::DetachSession {id},None),
+                        Command::Input {request_id,id,data} if attached==Some(id)=>{
+                            if base64::engine::general_purpose::STANDARD.decode(&data).map_or(true,|bytes|bytes.len()>16*1024 || std::str::from_utf8(&bytes).is_err()) {
+                                send(&mut socket,json!({"type":"error","requestId":request_id,"message":"입력은 16KB 이하의 UTF-8이어야 합니다."})).await?; continue;
+                            }
+                            (request_id,Method::WriteSession {id,data},attached)
+                        },
+                        Command::Input {request_id,..}|Command::Detach {request_id,..}=>{send(&mut socket,json!({"type":"error","requestId":request_id,"message":"연결된 터미널이 아닙니다."})).await?;continue;}
+                    };
+                    let attaching=matches!(method,Method::AttachSessionAtomic {..});
+                    match tokio::time::timeout(Duration::from_secs(10),daemon.request_with_events(method)).await {
+                        Ok(Ok((data,receiver)))=>{if attaching {events=receiver;} attached=next;send(&mut socket,json!({"type":"result","requestId":request_id,"data":data})).await?;},
+                        Ok(Err(error))=>{if attaching {attached=None;} send(&mut socket,json!({"type":"error","requestId":request_id,"message":format!("터미널 요청 실패: {error}. 연결 실패 시 daemon 업데이트가 필요할 수 있습니다.")})).await?;},
+                        Err(_)=>return Err(if attaching {"연결 응답 시간이 초과되었습니다. daemon을 업데이트한 후 다시 시작하세요.".into()} else {"터미널 응답 시간이 초과되었습니다. 입력은 자동 재전송하지 않습니다.".into()}),
+                    }
+                },
+                event=events.recv()=>{
+                    let event=event.map_err(|_|"출력이 지연되었거나 터미널 연결이 종료되었습니다. 다시 연결하세요.".to_string())?;
+                    let allowed=match &event {
+                        Event::PtyOutput {id,..}|Event::PtyExit {id,..}=>attached==Some(*id),
+                        Event::SessionAdded {..}|Event::SessionRemoved {..}|Event::SessionRenamed {..}=>true,
+                        _=>false,
+                    };
+                    if !allowed {continue;}
+                    send(&mut socket,json!({"type":"event","data":event})).await?;
+                }
+            }
+        }
+    };
+    let result: Result<(), String> = tokio::select! {biased; _=stop.changed()=>Err("모바일 연결 서버가 중지되었습니다.".into()),_=cancel.changed()=>Err("기기 연결이 해제되었습니다.".into()),result=work=>result};
+    if let Err(message) = result {
+        let _ = send(&mut socket, json!({"type":"error","message":message})).await;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Message as ClientMessage},
+    };
+    async fn running() -> (
+        SocketAddr,
+        Arc<Mutex<Pairings>>,
+        watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let pairings = Arc::new(Mutex::new(Pairings::default()));
+        let (stop, rx) = watch::channel(false);
+        let task = tokio::spawn(serve(listener, address, pairings.clone(), rx));
+        (address, pairings, stop, task)
+    }
+    async fn socket(
+        address: SocketAddr,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse().unwrap());
+        connect_async(request).await.unwrap().0
+    }
+    async fn response(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Value {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+    #[tokio::test]
+    async fn http_host_origin_asset_and_unknown_path_policy() {
+        let (address, _, stop, task) = running().await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let root = client.get(base_url(address)).send().await.unwrap();
+        assert_eq!(
+            root.status().as_u16(),
+            if MOBILE_ASSETS.iter().any(|(path, _)| *path == "mobile.html") {
+                200
+            } else {
+                503
+            }
+        );
+        assert_eq!(
+            client
+                .get(base_url(address))
+                .header("host", "evil.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            client
+                .get(base_url(address))
+                .header("origin", "http://evil.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            client
+                .get(format!("{}missing.js", base_url(address)))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        assert_eq!(
+            client
+                .get(format!("{}?invite=secret", base_url(address)))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn websocket_requires_exact_origin_and_rejects_session_access_before_auth() {
+        let (address, _, stop, task) = running().await;
+        let request = format!("ws://{address}/ws").into_client_request().unwrap();
+        assert!(connect_async(request).await.is_err());
+        let mut ws = socket(address).await;
+        ws.send(ClientMessage::Text(
+            json!({"type":"list","requestId":1}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let value = response(&mut ws).await;
+        assert_eq!(value["type"], "error");
+        assert!(value.get("data").is_none());
+        let mut ws = socket(address).await;
+        ws.send(ClientMessage::Text(
+            json!({"type":"auth","token":"wrong"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response(&mut ws).await["type"], "error");
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn pending_pairing_is_single_use_and_removed_when_socket_closes() {
+        let (address, pairings, stop, task) = running().await;
+        let invite = pairings.lock().invite(now_ms());
+        let mut first = socket(address).await;
+        first
+            .send(ClientMessage::Text(
+                json!({"type":"pair","invite":invite,"name":"테스트 기기"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let pending = response(&mut first).await;
+        assert_eq!(pending["type"], "pending");
+        assert_eq!(pending["verification"].as_str().unwrap().len(), 6);
+        assert_eq!(pairings.lock().pending.len(), 1);
+        let mut second = socket(address).await;
+        second
+            .send(ClientMessage::Text(
+                json!({"type":"pair","invite":invite,"name":"second"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response(&mut second).await["type"], "error");
+        first.close(None).await.unwrap();
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pairings.lock().pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(pairings.lock().devices.is_empty());
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn rejection_reaches_waiting_socket_and_server_stop_closes_pending_socket() {
+        let (address, pairings, stop, task) = running().await;
+        for reject in [true, false] {
+            let invite = pairings.lock().invite(now_ms());
+            let mut ws = socket(address).await;
+            ws.send(ClientMessage::Text(
+                json!({"type":"pair","invite":invite,"name":"phone"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(response(&mut ws).await["type"], "pending");
+            if reject {
+                let id = pairings.lock().pending.keys().next().unwrap().clone();
+                pairings.lock().approve(&id, false, now_ms()).unwrap();
+            } else {
+                stop.send_replace(true);
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap();
+            if reject {
+                assert_eq!(
+                    serde_json::from_str::<Value>(frame.unwrap().unwrap().to_text().unwrap())
+                        .unwrap()["type"],
+                    "error"
+                );
+            }
+        }
+        task.await.unwrap();
+        assert!(pairings.lock().pending.is_empty());
+    }
+    #[test]
+    fn protocol_whitelist_disallows_resize_kill_create_and_extra_fields() {
+        for value in [
+            json!({"type":"resize","requestId":1,"cols":20}),
+            json!({"type":"kill","requestId":1}),
+            json!({"type":"create","requestId":1}),
+            json!({"type":"list","requestId":1,"method":"kill_server"}),
+        ] {
+            assert!(serde_json::from_value::<Command>(value).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod positive_integration {
+    use super::*;
+    use crate::ipc::{
+        protocol::{Request as PipeRequest, ServerMsg},
+        read_frame, write_frame,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Message as WireMessage},
+    };
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    #[derive(Default)]
+    struct Observations {
+        opened: AtomicUsize,
+        active: AtomicUsize,
+        methods: Mutex<Vec<String>>,
+        input: Mutex<Vec<Vec<u8>>>,
+    }
+    struct Active(Arc<Observations>);
+    impl Drop for Active {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    fn fixture_connector(observed: Arc<Observations>, session: Uuid) -> ConnectDaemon {
+        Arc::new(move || {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let name = format!(r"\\.\pipe\winmux-mobile-integration-{}", Uuid::new_v4());
+                let mut server = ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&name)?;
+                let pipe = ClientOptions::new().open(&name)?;
+                server.connect().await?;
+                observed.opened.fetch_add(1, Ordering::SeqCst);
+                observed.active.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let _active = Active(observed.clone());
+                    let info = json!({"id":session,"name":"w1.integration","shell":"fixture","cwd":null,"cols":120,"rows":30,"agent":"terminal"});
+                    while let Ok(frame) = read_frame(&mut server).await {
+                        let request: PipeRequest = serde_json::from_slice(&frame).unwrap();
+                        let (label, data, live) = match request.method {
+                            Method::ListSessions => ("list", json!([info.clone()]), false),
+                            Method::AttachSessionAtomic { id } if id == session => (
+                                "attach",
+                                json!({"info":info,"scrollback":"c25hcHNob3Q="}),
+                                true,
+                            ),
+                            Method::WriteSession { id, data } if id == session => {
+                                observed.input.lock().push(
+                                    base64::engine::general_purpose::STANDARD
+                                        .decode(data)
+                                        .unwrap(),
+                                );
+                                ("input", Value::Null, false)
+                            }
+                            Method::DetachSession { id } if id == session => {
+                                ("detach", Value::Null, false)
+                            }
+                            _ => ("FORBIDDEN", Value::Null, false),
+                        };
+                        observed.methods.lock().push(label.into());
+                        let result = ServerMsg::Response {
+                            id: request.id,
+                            result: data,
+                        };
+                        if write_frame(&mut server, &serde_json::to_vec(&result).unwrap())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if live {
+                            let event = ServerMsg::Event(Event::PtyOutput {
+                                id: session,
+                                data: "bGl2ZQ==".into(),
+                            });
+                            if write_frame(&mut server, &serde_json::to_vec(&event).unwrap())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                });
+                DaemonClient::from_pipe_capacity(pipe, 64).await
+            })
+        })
+    }
+    async fn connect(address: SocketAddr) -> Socket {
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse().unwrap());
+        connect_async(request).await.unwrap().0
+    }
+    async fn send(socket: &mut Socket, value: Value) {
+        socket
+            .send(WireMessage::Text(value.to_string().into()))
+            .await
+            .unwrap();
+    }
+    async fn receive(socket: &mut Socket) -> Value {
+        let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+    async fn wait_active(observed: &Observations, count: usize) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while observed.active.load(Ordering::SeqCst) != count {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    async fn pair(address: SocketAddr, pairings: &Mutex<Pairings>) -> (Socket, Value) {
+        let invite = pairings.lock().invite(now_ms());
+        let mut socket = connect(address).await;
+        send(
+            &mut socket,
+            json!({"type":"pair","invite":invite,"name":"테스트 휴대폰"}),
+        )
+        .await;
+        let pending = receive(&mut socket).await;
+        assert_eq!(pending["type"], "pending");
+        let request = pairings
+            .lock()
+            .pending
+            .values()
+            .next()
+            .unwrap()
+            .view
+            .clone();
+        assert_eq!(pending["verification"], request.verification);
+        pairings
+            .lock()
+            .approve(&request.request_id, true, now_ms())
+            .unwrap();
+        let authenticated = receive(&mut socket).await;
+        assert_eq!(authenticated["type"], "authenticated");
+        (socket, authenticated)
+    }
+    #[tokio::test]
+    async fn approved_websocket_lists_attaches_inputs_reauthenticates_and_revokes_on_isolated_pipes(
+    ) {
+        let session = Uuid::new_v4();
+        let observed = Arc::new(Observations::default());
+        let pairings = Arc::new(Mutex::new(Pairings::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, rx) = watch::channel(false);
+        let server = tokio::spawn(serve_with_connector(
+            listener,
+            address,
+            pairings.clone(),
+            rx,
+            fixture_connector(observed.clone(), session),
+        ));
+        let (mut socket, credentials) = pair(address, &pairings).await;
+        wait_active(&observed, 1).await;
+        send(&mut socket, json!({"type":"list","requestId":1})).await;
+        let result = receive(&mut socket).await;
+        assert_eq!(result["requestId"], 1);
+        assert_eq!(result["data"][0]["id"], session.to_string());
+        send(
+            &mut socket,
+            json!({"type":"attach","requestId":2,"id":session}),
+        )
+        .await;
+        let snapshot = receive(&mut socket).await;
+        assert_eq!(snapshot["type"], "result");
+        assert_eq!(snapshot["data"]["scrollback"], "c25hcHNob3Q=");
+        assert_eq!(snapshot["data"]["info"]["cols"], 120);
+        assert_eq!(snapshot["data"]["info"]["rows"], 30);
+        let live = receive(&mut socket).await;
+        assert_eq!(live["type"], "event");
+        assert_eq!(live["data"]["data"], "bGl2ZQ==");
+        let bytes = "한글 입력\r\t\u{1b}\u{3}".as_bytes();
+        send(&mut socket,json!({"type":"input","requestId":3,"id":session,"data":base64::engine::general_purpose::STANDARD.encode(bytes)})).await;
+        assert_eq!(
+            receive(&mut socket).await,
+            json!({"type":"result","requestId":3,"data":null})
+        );
+        assert_eq!(*observed.input.lock(), vec![bytes.to_vec()]);
+        socket.close(None).await.unwrap();
+        drop(socket);
+        wait_active(&observed, 0).await;
+        let mut resumed = connect(address).await;
+        send(
+            &mut resumed,
+            json!({"type":"auth","token":credentials["token"]}),
+        )
+        .await;
+        assert_eq!(receive(&mut resumed).await, credentials);
+        wait_active(&observed, 1).await;
+        assert_eq!(observed.opened.load(Ordering::SeqCst), 2);
+        send(
+            &mut resumed,
+            json!({"type":"input","requestId":4,"id":session,"data":"eA=="}),
+        )
+        .await;
+        assert_eq!(receive(&mut resumed).await["type"], "error"); // Re-auth does not implicitly attach or replay input.
+        send(
+            &mut resumed,
+            json!({"type":"attach","requestId":5,"id":session}),
+        )
+        .await;
+        assert_eq!(receive(&mut resumed).await["type"], "result");
+        assert_eq!(receive(&mut resumed).await["type"], "event");
+        pairings
+            .lock()
+            .revoke(credentials["deviceId"].as_str().unwrap())
+            .unwrap();
+        let _ = resumed
+            .send(WireMessage::Text(
+                json!({"type":"input","requestId":6,"id":session,"data":"eA=="})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        // Sending after revocation may race the TCP close and produce a reset rather than the best-effort error frame.
+        match tokio::time::timeout(Duration::from_secs(3), resumed.next())
+            .await
+            .unwrap()
+        {
+            Some(Ok(WireMessage::Text(text))) => assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap()["type"],
+                "error"
+            ),
+            Some(Ok(WireMessage::Close(_))) | Some(Err(_)) | None => {}
+            other => panic!("unexpected post-revocation payload: {other:?}"),
+        }
+        wait_active(&observed, 0).await;
+        let mut denied = connect(address).await;
+        send(
+            &mut denied,
+            json!({"type":"auth","token":credentials["token"]}),
+        )
+        .await;
+        assert_eq!(receive(&mut denied).await["type"], "error");
+        assert_eq!(observed.opened.load(Ordering::SeqCst), 2);
+        let (mut stopped, _) = pair(address, &pairings).await;
+        wait_active(&observed, 1).await;
+        stop.send_replace(true);
+        assert_eq!(receive(&mut stopped).await["type"], "error");
+        wait_active(&observed, 0).await;
+        server.await.unwrap();
+        assert!(pairings.lock().devices.is_empty());
+        assert_eq!(
+            *observed.methods.lock(),
+            vec!["list", "attach", "input", "attach"]
+        );
+        assert_eq!(*observed.input.lock(), vec![bytes.to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn built_mobile_html_and_script_styles_are_served_with_correct_mime() {
+        if !MOBILE_ASSETS.iter().any(|(path, _)| *path == "mobile.html") {
+            return;
+        } // Direct Rust builds intentionally support explicit 503 fallback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, rx) = watch::channel(false);
+        let server = tokio::spawn(serve(
+            listener,
+            address,
+            Arc::new(Mutex::new(Pairings::default())),
+            rx,
+        ));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(base_url(address)).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/html; charset=utf-8"
+        );
+        let html = response.text().await.unwrap();
+        assert!(html.contains("assets/"));
+        for extension in [".js", ".css"] {
+            let (path, expected) = MOBILE_ASSETS
+                .iter()
+                .find(|(path, _)| path.ends_with(extension))
+                .unwrap();
+            let response = client
+                .get(format!("{}{path}", base_url(address)))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                response.headers()["content-type"],
+                if extension == ".js" {
+                    "text/javascript; charset=utf-8"
+                } else {
+                    "text/css; charset=utf-8"
+                }
+            );
+            assert_eq!(response.bytes().await.unwrap().as_ref(), *expected);
+        }
+        stop.send_replace(true);
+        server.await.unwrap();
+    }
+}
+CURRENT FILE: src/mobile/client.ts
+import { decodeBase64, encodeUtf8 } from "./encoding";
+import type { AttachResult, ClientState, SessionInfo } from "./types";
+
+const TOKEN_KEY = "winmux:mobile-device-token:v1";
+const REQUEST_TIMEOUT_MS = 10_000;
+const MAX_INPUT_BYTES = 16 * 1024;
+const MAX_BUFFERED_OUTPUT_BYTES = 1024 * 1024;
+const RECONNECT_DELAYS = [500, 1_000, 2_000, 4_000, 8_000] as const;
+
+export interface SocketLike {
+  readonly readyState: number;
+  send(data: string): void;
+  close(): void;
+  onopen: ((event: any) => any) | null;
+  onmessage: ((event: any) => any) | null;
+  onclose: ((event: any) => any) | null;
+  onerror: ((event: any) => any) | null;
+}
+
+interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+interface PendingRequest {
+  generation: number;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface ServerMessage {
+  type: "pending" | "authenticated" | "result" | "error" | "event";
+  verification?: string;
+  token?: string;
+  requestId?: number;
+  message?: string;
+  data?: unknown;
+}
+
+export interface MobileClientOptions {
+  url: string;
+  invite: string | null;
+  deviceName: string;
+  storage: StorageLike;
+  createSocket: (url: string) => SocketLike;
+  onState: (state: ClientState) => void;
+  onOutput: (data: Uint8Array) => void;
+  onAttach: (result: AttachResult, isCurrent: () => boolean) => void | Promise<void>;
+  setTimer?: typeof setTimeout;
+  clearTimer?: typeof clearTimeout;
+}
+
+export class MobileClient {
+  private socket: SocketLike | null = null;
+  private generation = 0;
+  private nextRequestId = 1;
+  private requests = new Map<number, PendingRequest>();
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private listRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private stopped = false;
+  private authenticated = false;
+  private invite: string | null;
+  private desiredSessionId: string | null = null;
+  private applyingSnapshot = false;
+  private bufferedOutput: Uint8Array[] = [];
+  private bufferedOutputBytes = 0;
+  private snapshotSequence = 0;
+  private state: ClientState = {
+    phase: "disconnected", verification: null, error: null, sessions: [], attached: null,
+  };
+  private readonly setTimer: typeof setTimeout;
+  private readonly clearTimer: typeof clearTimeout;
+
+  constructor(private readonly options: MobileClientOptions) {
+    this.invite = options.invite;
+    this.setTimer = options.setTimer ?? ((handler, timeout, ...args) => globalThis.setTimeout(handler, timeout, ...args));
+    this.clearTimer = options.clearTimer ?? (timer => globalThis.clearTimeout(timer));
+  }
+
+  connect(): void {
+    this.stopped = false;
+    if (this.invite) this.options.storage.removeItem(TOKEN_KEY);
+    this.open(false);
+  }
+
+  disconnect(): void {
+    this.stopped = true;
+    this.generation += 1;
+    this.authenticated = false;
+    this.applyingSnapshot = false;
+    this.bufferedOutput = [];
+    this.bufferedOutputBytes = 0;
+    this.snapshotSequence += 1;
+    if (this.reconnectTimer) this.clearTimer(this.reconnectTimer);
+    if (this.listRefreshTimer) this.clearTimer(this.listRefreshTimer);
+    this.reconnectTimer = null;
+    this.listRefreshTimer = null;
+    this.rejectRequests("연결이 종료되었습니다.");
+    this.socket?.close();
+    this.socket = null;
+    this.update({ phase: "disconnected", attached: null });
+  }
+
+  async refreshSessions(): Promise<void> {
+    const sessions = await this.request<SessionInfo[]>({ type: "list" });
+    this.update({ sessions });
+  }
+
+  async attach(id: string): Promise<AttachResult> {
+    const generation = this.generation;
+    const previous = this.state.attached?.id;
+    this.desiredSessionId = id;
+    if (previous && previous !== id) {
+      await this.request({ type: "detach", id: previous });
+      if (this.desiredSessionId !== id) throw new Error("다른 터미널로 전환되었습니다.");
+    }
+    const result = await this.request<AttachResult>({ type: "attach", id });
+    if (this.generation === generation && this.desiredSessionId === id) {
+      await this.applyAttach(result);
+      if (this.generation === generation && this.desiredSessionId === id) this.update({ attached: result.info });
+    }
+    return result;
+  }
+
+  async sendInput(value: string): Promise<void> {
+    if (!this.authenticated || !this.state.attached) throw new Error("터미널이 연결되어 있지 않습니다.");
+    const { bytes, base64 } = encodeUtf8(value);
+    if (bytes.length === 0) return;
+    if (bytes.length > MAX_INPUT_BYTES) throw new Error("입력은 UTF-8 기준 16KB 이하여야 합니다.");
+    await this.request({ type: "input", id: this.state.attached.id, data: base64 });
+  }
+
+  private open(reconnecting: boolean): void {
+    const generation = ++this.generation;
+    this.authenticated = false;
+    this.update({ phase: reconnecting ? "reconnecting" : "connecting", error: null, attached: null });
+    const socket = this.options.createSocket(this.options.url);
+    this.socket = socket;
+    socket.onopen = () => {
+      if (!this.isCurrent(socket, generation)) return;
+      const token = this.options.storage.getItem(TOKEN_KEY);
+      if (this.invite) socket.send(JSON.stringify({ type: "pair", invite: this.invite, name: [...this.options.deviceName].slice(0, 64).join("") }));
+      else if (token) socket.send(JSON.stringify({ type: "auth", token }));
+      else {
+        this.update({ phase: "error", error: "초대 링크가 없거나 이 탭의 기기 인증이 만료되었습니다." });
+        socket.close();
+      }
+    };
+    socket.onmessage = event => {
+      if (!this.isCurrent(socket, generation) || typeof event.data !== "string") return;
+      this.handleMessage(event.data, generation);
+    };
+    socket.onerror = () => {
+      if (this.isCurrent(socket, generation)) this.update({ error: "모바일 연결에 실패했습니다." });
+    };
+    socket.onclose = () => {
+      if (!this.isCurrent(socket, generation)) return;
+      this.socket = null;
+      this.authenticated = false;
+      this.rejectRequests("연결이 끊겼습니다.", generation);
+      this.update({ attached: null });
+      if (!this.stopped && this.options.storage.getItem(TOKEN_KEY)) this.scheduleReconnect();
+      else if (!this.stopped && this.state.phase !== "error") this.update({ phase: "disconnected" });
+    };
+  }
+
+  private handleMessage(raw: string, generation: number): void {
+    let message: ServerMessage;
+    try { message = JSON.parse(raw) as ServerMessage; }
+    catch { this.failSocket("서버가 올바르지 않은 메시지를 보냈습니다."); return; }
+    if (message.type === "pending" && message.verification) {
+      this.invite = null;
+      this.update({ phase: "pending", verification: message.verification, error: null });
+      return;
+    }
+    if (message.type === "authenticated" && message.token) {
+      this.options.storage.setItem(TOKEN_KEY, message.token);
+      this.invite = null;
+      this.authenticated = true;
+      this.reconnectAttempt = 0;
+      this.update({ phase: "authenticated", verification: null, error: null });
+      void this.restoreAfterAuthentication(generation);
+      return;
+    }
+    if ((message.type === "result" || message.type === "error") && typeof message.requestId === "number") {
+      const pending = this.requests.get(message.requestId);
+      if (!pending || pending.generation !== generation) return;
+      this.requests.delete(message.requestId);
+      this.clearTimer(pending.timer);
+      if (message.type === "error") pending.reject(new Error(message.message ?? "요청에 실패했습니다."));
+      else pending.resolve(message.data);
+      return;
+    }
+    if (message.type === "event") this.handleEvent(message.data);
+    else if (message.type === "error") {
+      if (/인증|기기|token/i.test(message.message ?? "")) this.options.storage.removeItem(TOKEN_KEY);
+      this.update({ phase: "error", error: message.message ?? "연결이 종료되었습니다." });
+      this.socket?.close();
+    }
+  }
+
+  private handleEvent(data: unknown): void {
+    if (!data || typeof data !== "object") return;
+    const event = data as { event?: string; id?: string; data?: string };
+    const acceptsOutput = event.id === this.state.attached?.id
+      || (this.applyingSnapshot && event.id === this.desiredSessionId);
+    if (event.event === "pty_output" && acceptsOutput && event.data) {
+      try {
+        const output = decodeBase64(event.data);
+        if (this.applyingSnapshot) {
+          this.bufferedOutputBytes += output.byteLength;
+          if (this.bufferedOutputBytes > MAX_BUFFERED_OUTPUT_BYTES) {
+            this.failSocket("터미널 출력이 너무 빨라 다시 동기화합니다.");
+            return;
+          }
+          this.bufferedOutput.push(output);
+        }
+        else this.options.onOutput(output);
+      }
+      catch { this.failSocket("터미널 출력 데이터가 손상되었습니다."); }
+    } else if (["session_added", "session_removed", "session_renamed"].includes(event.event ?? "")) {
+      if (this.listRefreshTimer) return;
+      this.listRefreshTimer = this.setTimer(() => {
+        this.listRefreshTimer = null;
+        void this.refreshSessions().catch(error => this.update({ error: this.errorMessage(error) }));
+      }, 100);
+    } else if (event.event === "pty_exit" && acceptsOutput) {
+      this.desiredSessionId = null;
+      this.snapshotSequence += 1;
+      this.applyingSnapshot = false;
+      this.bufferedOutput = [];
+      this.bufferedOutputBytes = 0;
+      this.update({ attached: null });
+    }
+  }
+
+  private async restoreAfterAuthentication(generation: number): Promise<void> {
+    try {
+      await this.refreshSessions();
+      if (generation !== this.generation || !this.desiredSessionId) return;
+      const result = await this.request<AttachResult>({ type: "attach", id: this.desiredSessionId });
+      if (generation === this.generation && this.desiredSessionId === result.info.id) {
+        await this.applyAttach(result);
+        if (generation === this.generation && this.desiredSessionId === result.info.id) this.update({ attached: result.info });
+      }
+    } catch (error) {
+      if (generation === this.generation) this.update({ error: this.errorMessage(error) });
+    }
+  }
+
+  private request<T = unknown>(command: Record<string, unknown>): Promise<T> {
+    const socket = this.socket;
+    const generation = this.generation;
+    if (!socket || socket.readyState !== 1 || !this.authenticated) return Promise.reject(new Error("연결되어 있지 않습니다."));
+    const requestId = this.nextRequestId++;
+    return new Promise<T>((resolve, reject) => {
+      const timer = this.setTimer(() => {
+        this.requests.delete(requestId);
+        reject(new Error("요청 응답 시간이 초과되었습니다."));
+        this.failSocket("요청 응답 시간이 초과되어 다시 연결합니다.");
+      }, REQUEST_TIMEOUT_MS);
+      this.requests.set(requestId, { generation, resolve: value => resolve(value as T), reject, timer });
+      try { socket.send(JSON.stringify({ ...command, requestId })); }
+      catch (error) {
+        this.requests.delete(requestId);
+        this.clearTimer(timer);
+        reject(error instanceof Error ? error : new Error("요청 전송에 실패했습니다."));
+      }
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectAttempt >= RECONNECT_DELAYS.length) {
+      this.update({ phase: "error", error: "재연결에 실패했습니다. 페이지를 새로 고쳐 주세요." });
+      return;
+    }
+    const delay = RECONNECT_DELAYS[this.reconnectAttempt++];
+    this.update({ phase: "reconnecting" });
+    this.reconnectTimer = this.setTimer(() => { this.reconnectTimer = null; this.open(true); }, delay);
+  }
+
+  private async applyAttach(result: AttachResult): Promise<void> {
+    const generation = this.generation;
+    const sequence = ++this.snapshotSequence;
+    const isCurrent = () => generation === this.generation
+      && sequence === this.snapshotSequence
+      && result.info.id === this.desiredSessionId;
+    this.applyingSnapshot = true;
+    this.bufferedOutput = [];
+    this.bufferedOutputBytes = 0;
+    try {
+      await this.options.onAttach(result, isCurrent);
+      if (isCurrent()) for (const output of this.bufferedOutput) this.options.onOutput(output);
+    } finally {
+      if (sequence === this.snapshotSequence) {
+        this.bufferedOutput = [];
+        this.bufferedOutputBytes = 0;
+        this.applyingSnapshot = false;
+      }
+    }
+  }
+
+  private rejectRequests(message: string, generation?: number): void {
+    for (const [id, pending] of this.requests) {
+      if (generation !== undefined && pending.generation !== generation) continue;
+      this.clearTimer(pending.timer);
+      pending.reject(new Error(message));
+      this.requests.delete(id);
+    }
+  }
+
+  private failSocket(message: string): void {
+    this.update({ phase: "error", error: message });
+    this.socket?.close();
+  }
+
+  private isCurrent(socket: SocketLike, generation: number): boolean {
+    return this.socket === socket && this.generation === generation;
+  }
+
+  private update(patch: Partial<ClientState>): void {
+    this.state = { ...this.state, ...patch };
+    this.options.onState({ ...this.state, sessions: [...this.state.sessions] });
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : "요청에 실패했습니다.";
+  }
+}
+
+export { MAX_INPUT_BYTES, TOKEN_KEY };
+CURRENT FILE: src/mobile/client.test.ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { MobileClient, MAX_INPUT_BYTES, TOKEN_KEY, type SocketLike } from "./client";
+import { takeInvitation } from "./invitation";
+import type { AttachResult, ClientState } from "./types";
+
+class FakeSocket implements SocketLike {
+  readyState = 0;
+  sent: string[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  send(data: string) { this.sent.push(data); }
+  close() { this.readyState = 3; this.onclose?.(); }
+  open() { this.readyState = 1; this.onopen?.(); }
+  receive(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
+  drop() { this.readyState = 3; this.onclose?.(); }
+}
+
+function setup(invite: string | null = null, onAttach?: (result: AttachResult, isCurrent: () => boolean) => Promise<void>) {
+  const values = new Map<string, string>();
+  const sockets: FakeSocket[] = [];
+  const states: ClientState[] = [];
+  const attachments: AttachResult[] = [];
+  const output = vi.fn();
+  const client = new MobileClient({
+    url: "ws://127.0.0.1:43123/ws",
+    invite,
+    deviceName: "테스트 기기",
+    storage: {
+      getItem: key => values.get(key) ?? null,
+      setItem: (key, value) => { values.set(key, value); },
+      removeItem: key => { values.delete(key); },
+    },
+    createSocket: () => { const socket = new FakeSocket(); sockets.push(socket); return socket; },
+    onState: state => states.push(state),
+    onOutput: output,
+    onAttach: onAttach ?? (result => { attachments.push(result); }),
+  });
+  return { client, sockets, states, values, attachments, output };
+}
+
+function authenticate(context: ReturnType<typeof setup>, token = "device-token") {
+  context.client.connect();
+  const socket = context.sockets[0];
+  socket.open();
+  socket.receive({ type: "authenticated", token, deviceId: "device" });
+  const list = JSON.parse(socket.sent[socket.sent.length - 1]);
+  socket.receive({ type: "result", requestId: list.requestId, data: [] });
+  return socket;
+}
+
+afterEach(() => vi.useRealTimers());
+
+describe("mobile invitation", () => {
+  it("extracts the invite and removes the entire fragment from browser history", () => {
+    const replace = vi.fn();
+    expect(takeInvitation({ hash: "#invite=secret", pathname: "/", search: "" }, replace)).toBe("secret");
+    expect(replace).toHaveBeenCalledWith("/");
+  });
+});
+
+describe("MobileClient", () => {
+  it("prefers a new invite over a stale tab token and exposes pending verification", () => {
+    const context = setup("new-invite");
+    context.values.set(TOKEN_KEY, "old-token");
+    context.client.connect();
+    context.sockets[0].open();
+    expect(JSON.parse(context.sockets[0].sent[0])).toEqual({ type: "pair", invite: "new-invite", name: "테스트 기기" });
+    expect(context.values.has(TOKEN_KEY)).toBe(false);
+    context.sockets[0].receive({ type: "pending", verification: "123456" });
+    expect(context.states[context.states.length - 1]).toMatchObject({ phase: "pending", verification: "123456" });
+  });
+
+  it("stores authentication, lists sessions, attaches with snapshot, and switches by detaching first", async () => {
+    const context = setup();
+    context.values.set(TOKEN_KEY, "saved");
+    const socket = authenticate(context, "renewed");
+    await Promise.resolve();
+    expect(context.values.get(TOKEN_KEY)).toBe("renewed");
+    const first = context.client.attach("one");
+    const attachOne = JSON.parse(socket.sent[socket.sent.length - 1]);
+    const firstResult = { info: { id: "one", name: "one", shell: "pwsh", cwd: null, cols: 120, rows: 30 }, scrollback: "" };
+    socket.receive({ type: "result", requestId: attachOne.requestId, data: firstResult });
+    await first;
+    expect(context.attachments).toEqual([firstResult]);
+    const second = context.client.attach("two");
+    const detach = JSON.parse(socket.sent[socket.sent.length - 1]);
+    expect(detach).toMatchObject({ type: "detach", id: "one" });
+    socket.receive({ type: "result", requestId: detach.requestId, data: null });
+    await Promise.resolve();
+    const attachTwo = JSON.parse(socket.sent[socket.sent.length - 1]);
+    expect(attachTwo).toMatchObject({ type: "attach", id: "two" });
+    const secondResult = { ...firstResult, info: { ...firstResult.info, id: "two", name: "two" } };
+    socket.receive({ type: "result", requestId: attachTwo.requestId, data: secondResult });
+    await second;
+  });
+
+  it("rejects oversized UTF-8 input before sending", async () => {
+    const context = setup();
+    context.values.set(TOKEN_KEY, "saved");
+    const socket = authenticate(context);
+    await Promise.resolve();
+    const attached = context.client.attach("one");
+    const request = JSON.parse(socket.sent[socket.sent.length - 1]);
+    socket.receive({ type: "result", requestId: request.requestId, data: { info: { id: "one", name: "one", shell: "pwsh", cwd: null, cols: 80, rows: 24 }, scrollback: "" } });
+    await attached;
+    const count = socket.sent.length;
+    await expect(context.client.sendInput("가".repeat(Math.ceil(MAX_INPUT_BYTES / 3) + 1))).rejects.toThrow("16KB");
+    expect(socket.sent).toHaveLength(count);
+  });
+
+  it("does not replay uncertain input and ignores callbacks from a stale socket", async () => {
+    vi.useFakeTimers();
+    const context = setup();
+    context.values.set(TOKEN_KEY, "saved");
+    const first = authenticate(context);
+    await Promise.resolve();
+    const attaching = context.client.attach("one");
+    const attachRequest = JSON.parse(first.sent[first.sent.length - 1]);
+    first.receive({ type: "result", requestId: attachRequest.requestId, data: { info: { id: "one", name: "one", shell: "pwsh", cwd: null, cols: 80, rows: 24 }, scrollback: "" } });
+    await attaching;
+    const input = context.client.sendInput("echo once\r");
+    const sentInput = JSON.parse(first.sent[first.sent.length - 1]);
+    first.drop();
+    await expect(input).rejects.toThrow("연결이 끊겼습니다");
+    await vi.advanceTimersByTimeAsync(500);
+    const second = context.sockets[1];
+    second.open();
+    expect(second.sent).toHaveLength(1);
+    expect(JSON.parse(second.sent[0])).toEqual({ type: "auth", token: "device-token" });
+    first.receive({ type: "result", requestId: sentInput.requestId, data: null });
+    expect(context.states[context.states.length - 1]?.phase).toBe("reconnecting");
+  });
+});
+
+it.each([false, true])("does not revive a terminated session while asynchronous snapshot applies (reconnect=%s)", async reconnect => {
+  vi.useFakeTimers();
+  let pause = !reconnect;
+  let release!: () => void;
+  let current: () => boolean = () => true;
+  const context = setup(null, async (_result, isCurrent) => {
+    current = isCurrent;
+    if (pause) await new Promise<void>(resolve => { release = resolve; });
+  });
+  context.values.set(TOKEN_KEY, "saved");
+  let socket = authenticate(context);
+  await Promise.resolve();
+  const result = { info: { id: "one", name: "one", shell: "pwsh", cwd: null, cols: 80, rows: 24 }, scrollback: "" };
+  const attaching = context.client.attach("one");
+  const initial = JSON.parse(socket.sent[socket.sent.length - 1]);
+  socket.receive({ type: "result", requestId: initial.requestId, data: result });
+  await Promise.resolve();
+  if (reconnect) {
+    await attaching;
+    pause = true;
+    socket.drop();
+    await vi.advanceTimersByTimeAsync(500);
+    socket = context.sockets[1]; socket.open();
+    socket.receive({ type: "authenticated", token: "device-token", deviceId: "device" });
+    const list = JSON.parse(socket.sent[socket.sent.length - 1]);
+    socket.receive({ type: "result", requestId: list.requestId, data: [result.info] });
+    await vi.advanceTimersByTimeAsync(0);
+    const request = JSON.parse(socket.sent[socket.sent.length - 1]);
+    expect(request.type).toBe("attach");
+    socket.receive({ type: "result", requestId: request.requestId, data: result });
+    await Promise.resolve();
+  }
+  socket.receive({ type: "event", data: { event: "pty_output", id: "one", data: "eA==" } });
+  socket.receive({ type: "event", data: { event: "pty_exit", id: "one", status: 0 } });
+  expect(current()).toBe(false);
+  release(); await attaching;
+  await Promise.resolve(); await Promise.resolve();
+  expect(context.states[context.states.length - 1].attached).toBeNull();
+  expect(context.output).not.toHaveBeenCalled();
+  const count = socket.sent.length;
+  await expect(context.client.sendInput("echo stale\r")).rejects.toThrow();
+  expect(socket.sent).toHaveLength(count);
+  context.client.disconnect();
+});

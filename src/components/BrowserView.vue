@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../lib/tauri";
 import type { BrowserTab } from "../composables/useResources";
 import { useResources } from "../composables/useResources";
+import { useFlowPage } from "../composables/useFlowPage";
 import { useSettings } from "../composables/useSettings";
 import { confirmState } from "../composables/useConfirm";
 import { useDragState } from "../composables/useDragState";
@@ -18,6 +19,7 @@ const viewport = ref<HTMLDivElement | null>(null);
 const address = ref(props.tab.url);
 const error = ref("");
 const { settingsOpen } = useSettings();
+const { flowOpen } = useFlowPage();
 const drag = useDragState();
 let child: Webview | null = null;
 let observer: ResizeObserver | null = null;
@@ -50,13 +52,13 @@ async function createChild() {
     y: rect.top,
     width: Math.max(1, rect.width),
     height: Math.max(1, rect.height),
-    focus: props.active,
+    focus: props.active && !flowOpen.value,
     dragDropEnabled: false,
   });
   child.once("tauri://error", (event) => {
     error.value = String(event.payload);
   });
-  if (props.active) {
+  if (props.active && !flowOpen.value && !settingsOpen.value && !confirmState.open && !drag.state.active) {
     await syncBounds();
     await child.show().catch(() => {});
   } else {
@@ -77,10 +79,10 @@ async function navigate() {
 }
 
 watch(
-  [() => props.active, settingsOpen, () => confirmState.open, () => drag.state.active],
-  async ([active, settings, confirming, dragging]) => {
+  [() => props.active, settingsOpen, flowOpen, () => confirmState.open, () => drag.state.active],
+  async ([active, settings, flow, confirming, dragging]) => {
     if (!child) return;
-    if (active && !settings && !confirming && !dragging) {
+    if (active && !settings && !flow && !confirming && !dragging) {
       await nextTick();
       await syncBounds();
       await child.show().catch(() => {});

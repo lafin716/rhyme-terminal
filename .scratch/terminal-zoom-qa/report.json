@@ -1,0 +1,137 @@
+{
+  "before": {
+    "x": null,
+    "y": null,
+    "background": null,
+    "pointerEvents": null,
+    "scale": 1,
+    "writes": 0,
+    "resizes": [
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      }
+    ]
+  },
+  "plus": {
+    "text": "110%",
+    "x": 720,
+    "y": 500,
+    "background": "rgba(30, 30, 30, 0.78)",
+    "pointerEvents": "none",
+    "scale": 1,
+    "writes": 0,
+    "resizes": [
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      },
+      {
+        "id": "qa-session",
+        "cols": 150,
+        "rows": 58
+      }
+    ]
+  },
+  "minus": {
+    "text": "100%",
+    "x": 720,
+    "y": 500,
+    "background": "rgba(30, 30, 30, 0.78)",
+    "pointerEvents": "none",
+    "scale": 1,
+    "writes": 0,
+    "resizes": [
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      },
+      {
+        "id": "qa-session",
+        "cols": 150,
+        "rows": 58
+      },
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      }
+    ]
+  },
+  "wheel": {
+    "text": "110%",
+    "x": 720,
+    "y": 500,
+    "background": "rgba(30, 30, 30, 0.78)",
+    "pointerEvents": "none",
+    "scale": 1,
+    "writes": 0,
+    "resizes": [
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      },
+      {
+        "id": "qa-session",
+        "cols": 150,
+        "rows": 58
+      },
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      },
+      {
+        "id": "qa-session",
+        "cols": 150,
+        "rows": 58
+      }
+    ]
+  },
+  "small": {
+    "text": "120%",
+    "x": 400,
+    "y": 300,
+    "background": "rgba(30, 30, 30, 0.78)",
+    "pointerEvents": "none",
+    "scale": 1,
+    "writes": 0,
+    "resizes": [
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      },
+      {
+        "id": "qa-session",
+        "cols": 150,
+        "rows": 58
+      },
+      {
+        "id": "qa-session",
+        "cols": 172,
+        "rows": 62
+      },
+      {
+        "id": "qa-session",
+        "cols": 150,
+        "rows": 58
+      },
+      {
+        "id": "qa-session",
+        "cols": 70,
+        "rows": 33
+      },
+      {
+        "id": "qa-session",
+        "cols": 62,
+        "rows": 30
+      }
+    ]
+  },
+  "errors": []
+}

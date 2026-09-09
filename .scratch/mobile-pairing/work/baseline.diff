@@ -1,0 +1,1185 @@
+﻿diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index ca4937c..a0c1d6c 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -36,6 +36,7 @@ tauri-plugin-opener = "2"
+ tauri-plugin-dialog = "2"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
++reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+ portable-pty = "0.8"
+ uuid = { version = "1", features = ["v4", "serde"] }
+ parking_lot = "0.12"
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index acffd52..971014f 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -3,6 +3,8 @@ pub mod daemon;
+ pub mod ipc;
+ pub mod pty;
+ pub mod tray;
++pub mod usage;
++pub mod usage_bridge;
+ 
+ use std::sync::Arc;
+ use tauri::{Emitter, Manager, WindowEvent};
+@@ -117,6 +119,7 @@ pub fn run() {
+             commands::resolve_account_dir,
+             commands::set_account_token,
+             commands::get_account_token,
++            usage::get_account_usage,
+             commands::read_file_preview,
+             commands::write_file,
+             commands::read_directory,
+diff --git a/src/components/SettingsModal.vue b/src/components/SettingsModal.vue
+index 92e06c8..9b9f054 100644
+--- a/src/components/SettingsModal.vue
++++ b/src/components/SettingsModal.vue
+@@ -1,4 +1,8 @@
+ <script setup lang="ts">
++import AccountEnvEditor from "./AccountEnvEditor.vue";
++import { Icon } from "@iconify/vue";
++import { sessionAgentIcon } from "../lib/session-agent-icon";
++import { t } from "../composables/useI18n";
+ import { open } from "@tauri-apps/plugin-dialog";
+ import { revealItemInDir } from "@tauri-apps/plugin-opener";
+ import { homeDir } from "@tauri-apps/api/path";
+@@ -11,6 +15,7 @@ import { useSessions } from "../composables/useSessions";
+ import { useConfirm } from "../composables/useConfirm";
+ import {
+   addAccountProfile,
++  setAccountProfileEnv,
+   renameAccountProfile,
+   removeAccountProfile,
+   resolveProfileEnv,
+@@ -45,6 +50,7 @@ import {
+   type TerminalPreset,
+ } from "../lib/terminal-config";
+ import type { PaletteUiMode } from "../lib/persistence";
++import { normalizeLocale } from "../lib/i18n";
+ 
+ const { closeSettings } = useSettings();
+ const { actions, bindingFor, prefixFor, setBinding, resetBinding, resetAll, isOverridden } =
+@@ -55,8 +61,8 @@ const { prefs, setPref } = usePrefs();
+ const { create: createSession } = useSessions();
+ const { confirm } = useConfirm();
+ 
+-type Category = "terminal" | "accounts" | "workspaces" | "keybindings" | "palette";
+-const activeCategory = ref<Category>("terminal");
++type Category = "language" | "terminal" | "accounts" | "workspaces" | "keybindings" | "palette";
++const activeCategory = ref<Category>("language");
+ 
+ const newProfileLabel = reactive<Record<CliAgentKind, string>>({ claude: "", codex: "" });
+ // Only meaningful for "claude" — Codex keeps the single-flow "add profile" UI.
+@@ -69,10 +75,10 @@ const newProfileToken = reactive<Record<CliAgentKind, string>>({ claude: "", cod
+ async function handleAddProfile(agent: CliAgentKind) {
+   const label = newProfileLabel[agent].trim();
+   if (!label) return;
+-  const method = agent === "claude" ? newProfileAuthMethod.claude : "oauth";
++  const method = newProfileAuthMethod[agent];
+   const token = newProfileToken.claude.trim();
+   if (agent === "claude" && method === "setup-token" && !token) {
+-    alert("Paste the token printed by `claude setup-token` first.");
++    alert(t("Paste the token printed by `claude setup-token` first."));
+     return;
+   }
+   try {
+@@ -86,12 +92,12 @@ async function handleAddProfile(agent: CliAgentKind) {
+         removeAccountProfile(profile.id);
+         throw error;
+       }
+-    } else if (agent === "claude") {
++    } else if (agent === "claude" && method === "oauth") {
+       await openOAuthLoginWindow(profile);
+     }
+   } catch (error) {
+     const message = error instanceof Error ? error.message : String(error);
+-    alert(`Failed to create account profile:\n${message}`);
++    alert(t("Failed to create account profile: {message}", { message }));
+   }
+ }
+ 
+@@ -100,14 +106,13 @@ async function handleOpenFolder(profile: AccountProfile) {
+     await revealItemInDir(profile.configDir);
+   } catch (error) {
+     const message = error instanceof Error ? error.message : String(error);
+-    alert(`Failed to open folder:\n${message}`);
++    alert(t("Failed to open folder: {message}", { message }));
+   }
+ }
+ 
+ async function handleRemoveProfile(profile: AccountProfile) {
+   const ok = await confirm({
+-    message: `Remove "${profile.label}"? Its saved login stays on disk and comes back if you `
+-      + "re-add a profile pointed at the same folder.",
++    message: t('Remove "{name}"? Its saved login stays on disk and comes back if you re-add a profile pointed at the same folder.', { name: profile.label }),
+   });
+   if (ok) removeAccountProfile(profile.id);
+ }
+@@ -180,7 +185,7 @@ async function chooseTerminalProgram() {
+   const selected = await open({
+     directory: false,
+     multiple: false,
+-    title: "Select terminal program",
++    title: t("Select terminal program"),
+     filters: [{ name: "Programs", extensions: ["exe", "cmd", "bat", "com"] }],
+   });
+   if (typeof selected !== "string") return;
+@@ -204,7 +209,7 @@ function removeGlobalArg(index: number) {
+ }
+ 
+ function addPaletteRow() {
+-  addPaletteItem({ label: "New item", command: "", autoRun: false });
++  addPaletteItem({ label: t("New item"), command: "", autoRun: false });
+ }
+ 
+ function updateDefaultCwd(id: string, value: string) {
+@@ -219,7 +224,7 @@ async function chooseDefaultCwd(id: string) {
+   const selected = await open({
+     directory: true,
+     multiple: false,
+-    title: "Select default folder",
++    title: t("Select default folder"),
+   });
+   if (typeof selected === "string") {
+     updateWorkspaceSettings(id, { defaultCwd: selected });
+@@ -294,9 +299,9 @@ function hasConflict(id: ActionId): boolean {
+ }
+ 
+ function displayBinding(id: ActionId): string {
+-  if (capturingId.value === id) return "Press a key... (Esc to cancel)";
++  if (capturingId.value === id) return t("Press a key... (Esc to cancel)");
+   const b = bindingFor(id);
+-  return formatKeybinding(b, prefixFor(id));
++  return t(formatKeybinding(b, prefixFor(id)));
+ }
+ 
+ function isUnbound(b: Keybinding): boolean {
+@@ -327,111 +332,144 @@ void sameBinding;
+           <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="15" height="15" rx="2"/><path d="M10 2.5v15M2.5 11h7.5"/></svg>
+         </div>
+         <div class="title-block">
+-          <div class="title">Settings</div>
+-          <div class="subtitle">winmux configuration</div>
++          <div class="title">{{ t("Settings") }}</div>
++          <div class="subtitle">{{ t("winmux configuration") }}</div>
+         </div>
+       </div>
+       <div class="topbar-right">
+         <span class="esc-hint">Esc</span>
+-        <button class="close" @click="closeSettings">&times;</button>
++        <button class="close" :aria-label="t('Close')" @click="closeSettings">&times;</button>
+       </div>
+     </header>
+ 
+     <div class="body">
+       <aside class="nav">
+-        <div
++        <button
++          type="button"
++          :class="['nav-item', 'language-nav', { active: activeCategory === 'language' }]"
++          @click="activeCategory = 'language'"
++        >
++          <div class="nav-icon" aria-hidden="true">文</div>
++          <div class="nav-text">
++            <div class="nav-label">{{ t('Language') }}</div>
++            <div class="nav-desc">{{ t('App display language') }}</div>
++          </div>
++        </button>
++        <button type="button"
+           :class="['nav-item', { active: activeCategory === 'terminal' }]"
+           @click="activeCategory = 'terminal'"
+         >
+           <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M6.5 8l3 2.2-3 2.2"/><path d="M11 12.4h3"/></svg></div>
+           <div class="nav-text">
+-            <div class="nav-label">Terminal</div>
+-            <div class="nav-desc">Shell &amp; workspace overrides</div>
++            <div class="nav-label">{{ t("Terminal") }}</div>
++            <div class="nav-desc">{{ t("Shell & workspace overrides") }}</div>
+           </div>
+-        </div>
+-        <div
++        </button>
++        <button type="button"
+           :class="['nav-item', { active: activeCategory === 'accounts' }]"
+           @click="activeCategory = 'accounts'"
+         >
+           <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="7.2" r="3"/><path d="M4.2 16.5c0-3.2 2.6-5.2 5.8-5.2s5.8 2 5.8 5.2"/></svg></div>
+           <div class="nav-text">
+-            <div class="nav-label">Accounts</div>
+-            <div class="nav-desc">Multi-account CLI logins</div>
++            <div class="nav-label">{{ t("Accounts") }}</div>
++            <div class="nav-desc">{{ t("Multi-account CLI logins") }}</div>
+           </div>
+-        </div>
+-        <div
++        </button>
++        <button type="button"
+           :class="['nav-item', { active: activeCategory === 'workspaces' }]"
+           @click="activeCategory = 'workspaces'"
+         >
+           <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.8c0-.7.6-1.3 1.3-1.3H8l1.6 2h6.6c.7 0 1.3.6 1.3 1.3v6.9c0 .7-.6 1.3-1.3 1.3H3.8c-.7 0-1.3-.6-1.3-1.3z"/></svg></div>
+           <div class="nav-text">
+-            <div class="nav-label">Workspaces</div>
+-            <div class="nav-desc">Per-workspace default folder</div>
++            <div class="nav-label">{{ t("Workspaces") }}</div>
++            <div class="nav-desc">{{ t("Per-workspace default folder") }}</div>
+           </div>
+-        </div>
+-        <div
++        </button>
++        <button type="button"
+           :class="['nav-item', { active: activeCategory === 'keybindings' }]"
+           @click="activeCategory = 'keybindings'"
+         >
+           <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="5.5" width="15.6" height="10" rx="1.8"/><path d="M5.8 12h8.4"/><circle cx="5.6" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="8.4" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="11.2" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="14" cy="8.6" r="0.35" fill="currentColor" stroke="none"/></svg></div>
+           <div class="nav-text">
+-            <div class="nav-label">Keybindings</div>
+-            <div class="nav-desc">Shortcuts &amp; prefix keys</div>
++            <div class="nav-label">{{ t("Keybindings") }}</div>
++            <div class="nav-desc">{{ t("Shortcuts & prefix keys") }}</div>
+           </div>
+-        </div>
+-        <div
++        </button>
++        <button type="button"
+           :class="['nav-item', { active: activeCategory === 'palette' }]"
+           @click="activeCategory = 'palette'"
+         >
+           <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="9.5" height="9.5" rx="2"/><rect x="7" y="7" width="9.5" height="9.5" rx="2"/></svg></div>
+           <div class="nav-text">
+-            <div class="nav-label">Palette</div>
+-            <div class="nav-desc">Quick command menu</div>
++            <div class="nav-label">{{ t("Palette") }}</div>
++            <div class="nav-desc">{{ t("Quick command menu") }}</div>
+           </div>
+-        </div>
++        </button>
+       </aside>
+ 
+       <main class="content">
+         <div class="content-inner">
+-          <template v-if="activeCategory === 'terminal'">
++          <template v-if="activeCategory === 'language'">
+             <div class="panel-header">
+               <div>
+-                <div class="panel-title">Terminal</div>
+-                <div class="panel-hint">
+-                  Choose the program used by new terminals. Existing sessions are not restarted.
+-                </div>
++                <div class="panel-title">{{ t('Language') }}</div>
++                <div class="panel-hint">{{ t('Choose the display language. Changes apply immediately and are saved automatically.') }}</div>
++              </div>
++            </div>
++            <div class="card">
++              <div class="field-grid">
++                <label for="app-language">{{ t('App display language') }}</label>
++                <select
++                  id="app-language"
++                  class="input"
++                  :value="prefs.language"
++                  @change="setPref('language', normalizeLocale(($event.target as HTMLSelectElement).value))"
++                >
++                  <option value="ko" lang="ko">한국어</option>
++                  <option value="en" lang="en">English</option>
++                </select>
++              </div>
++            </div>
++          </template>
++          <template v-else-if="activeCategory === 'terminal'">
++            <div class="panel-header">
++              <div>
++                <div class="panel-title">{{ t("Terminal") }}</div>
++                <div class="panel-hint">{{ t("Choose the program used by new terminals. Existing sessions are not restarted.") }}</div>
+               </div>
+             </div>
+ 
+             <div class="card">
+-              <div class="card-title">Global default</div>
++              <div class="card-title">{{ t("Global default") }}</div>
+               <div class="field-grid">
+-                <label>Preset</label>
++                <label for="terminal-preset">{{ t("Preset") }}</label>
+                 <select
++                  id="terminal-preset"
+                   class="input"
+                   :value="prefs.defaultTerminal.preset"
+                   @change="applyGlobalPreset(($event.target as HTMLSelectElement).value)"
+                 >
+                   <option v-for="preset in TERMINAL_PRESETS" :key="preset.id" :value="preset.id">
+-                    {{ preset.label }}
++                    {{ t(preset.label) }}
+                   </option>
+                 </select>
+ 
+-                <label>Program</label>
++                <label for="terminal-program">{{ t("Program") }}</label>
+                 <div class="inline-row">
+                   <input
++                    id="terminal-program"
+                     class="input mono"
+                     :value="prefs.defaultTerminal.program"
+-                    placeholder="powershell.exe or C:\path\shell.exe"
++                    :placeholder="t('powershell.exe or C:\\path\\shell.exe')"
+                     @input="updateGlobalTerminal({
+                       preset: 'custom',
+                       program: ($event.target as HTMLInputElement).value,
+                     })"
+                   />
+-                  <button class="btn" @click="chooseTerminalProgram()">Browse</button>
++                  <button class="btn" @click="chooseTerminalProgram()">{{ t("Browse") }}</button>
+                 </div>
+ 
+-                <label>Arguments</label>
++                <label>{{ t("Arguments") }}</label>
+                 <div class="arg-list">
+                   <div
+                     v-for="(_, index) in prefs.defaultTerminal.args"
+@@ -440,21 +478,28 @@ void sameBinding;
+                   >
+                     <input
+                       class="input mono"
++                      :aria-label="t('Arguments') + ' ' + (index + 1)"
+                       :value="prefs.defaultTerminal.args[index]"
+-                      placeholder="One argument per row"
++                      :placeholder="t('One argument per row')"
+                       @input="updateGlobalArg(index, ($event.target as HTMLInputElement).value)"
+                     />
+-                    <button class="btn" @click="removeGlobalArg(index)">Remove</button>
++                    <button class="btn" @click="removeGlobalArg(index)">{{ t("Remove") }}</button>
+                   </div>
+                   <button class="btn add-arg" @click="addGlobalArg">
+-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>
+-                    Add argument
+-                  </button>
++                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>{{ t("Add argument") }}</button>
+                 </div>
+               </div>
+             </div>
+ 
+-            <div class="section-title">Workspace overrides</div>
++            <div class="card">
++              <label class="inline-row">
++                <input type="checkbox" class="checkbox" :checked="prefs.showAccountProfile"
++                  @change="setPref('showAccountProfile', ($event.target as HTMLInputElement).checked)" />
++                <span>{{ t("Show account profile") }}</span>
++              </label>
++              <div class="panel-hint">{{ t("Show profile tags in the session list and tabs.") }}</div>
++            </div>
++            <div class="section-title">{{ t("Workspace overrides") }}</div>
+             <div class="grid-3">
+               <div v-for="ws in workspaceState.workspaces" :key="ws.id" class="card">
+                 <div class="ov-card-head">
+@@ -468,10 +513,10 @@ void sameBinding;
+                     )"
+                   />
+                   <span class="name">{{ ws.name }}</span>
+-                  <span v-if="ws.id === activeWorkspace?.id" class="tag active-tag">Active</span>
++                  <span v-if="ws.id === activeWorkspace?.id" class="tag active-tag">{{ t("Active") }}</span>
+                 </div>
+                 <div v-if="ws.settings?.terminal" class="field-grid compact">
+-                  <label>Preset</label>
++                  <label>{{ t("Preset") }}</label>
+                   <select
+                     class="input"
+                     :value="ws.settings.terminal.preset"
+@@ -485,10 +530,10 @@ void sameBinding;
+                       :key="preset.id"
+                       :value="preset.id"
+                     >
+-                      {{ preset.label }}
++                      {{ t(preset.label) }}
+                     </option>
+                   </select>
+-                  <label>Program</label>
++                  <label>{{ t("Program") }}</label>
+                   <input
+                     class="input mono"
+                     :value="ws.settings.terminal.program"
+@@ -498,7 +543,7 @@ void sameBinding;
+                     })"
+                   />
+                 </div>
+-                <div v-else class="note">Uses global default</div>
++                <div v-else class="note">{{ t("Uses global default") }}</div>
+               </div>
+             </div>
+           </template>
+@@ -506,123 +551,115 @@ void sameBinding;
+           <template v-else-if="activeCategory === 'accounts'">
+             <div class="panel-header">
+               <div>
+-                <div class="panel-title">Accounts</div>
+-                <div class="panel-hint">
+-                  Each profile keeps an isolated login for that CLI, so you can stay signed in to
+-                  more than one account at once. "New session" opens a terminal already pointed at
+-                  that profile and runs the CLI for you. Pick a default with the radio button —
+-                  new terminals use it automatically. "System" is the CLI's own login (e.g. from
+-                  running <code>claude login</code> in a plain terminal) and stays the default
+-                  until you add a profile of your own.
+-                </div>
++                <div class="panel-title">{{ t("Accounts") }}</div>
++                <div class="panel-hint"> {{ t("Each profile keeps an isolated login for that CLI, so you can stay signed in to more than one account at once. \"New session\" opens a terminal already pointed at that profile and runs the CLI for you. Pick a default with the radio button — new terminals use it automatically. \"System\" is the CLI's own login (e.g. from running") }} <code>claude login</code>{{ t("in a plain terminal) and stays the default until you add a profile of your own.") }}</div>
+               </div>
+             </div>
+ 
+-            <div class="grid-2">
++            <div class="accounts-grid">
+               <div v-for="agentDef in CLI_AGENTS" :key="agentDef.id" class="card">
+                 <div class="card-title-left">
+                   <div :class="['agent-badge', agentDef.id]">
+-                    <svg
+-                      v-if="agentDef.id === 'claude'"
+-                      viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+-                    ><path d="M3 5.5C3 4.4 3.9 3.5 5 3.5h10c1.1 0 2 .9 2 2v6c0 1.1-.9 2-2 2H9l-3.5 3v-3H5c-1.1 0-2-.9-2-2z"/><path d="M8.2 7.3L6.4 9.5l1.8 2.2M11.8 7.3l1.8 2.2-1.8 2.2"/></svg>
+-                    <svg
+-                      v-else
+-                      viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+-                    ><path d="M7.2 3.8c-1.3 0-1.9.8-1.9 1.9v2.1c0 .9-.4 1.4-1.3 1.7v.5c.9.3 1.3.8 1.3 1.7v2.1c0 1.1.6 1.9 1.9 1.9M12.8 3.8c1.3 0 1.9.8 1.9 1.9v2.1c0 .9.4 1.4 1.3 1.7v.5c-.9.3-1.3.8-1.3 1.7v2.1c0 1.1-.6 1.9-1.9 1.9"/></svg>
++                    <Icon :icon="sessionAgentIcon(agentDef.id)" aria-hidden="true" />
+                   </div>
+                   <span class="name">{{ agentDef.label }}</span>
+                 </div>
+ 
+                 <div class="table table-accounts">
+                   <div class="table-row head">
+-                    <div>Default</div><div>Profile</div><div>Login folder</div><div></div>
++                    <div>{{ t("Default") }}</div><div>{{ t("Profile") }}</div><div>{{ t("Login folder") }}</div><div></div>
+                   </div>
+                   <div class="table-row body">
+-                    <input
++                    <label class="default-choice"><input
+                       type="radio"
+                       class="radio"
++                      :aria-label="t('Default')"
+                       :name="`${agentDef.id}-default`"
+                       :checked="prefs.defaultProfileId[agentDef.id] === null"
+                       @change="setPref(
+                         'defaultProfileId',
+                         { ...prefs.defaultProfileId, [agentDef.id]: null },
+                       )"
+-                    />
+-                    <div class="profile-name">System<span class="tag muted-tag">Built-in</span></div>
+-                    <div class="path-cell" :title="systemConfigDir(agentDef.id)">
++                    /><span>{{ t('Default') }}</span></label>
++                    <div class="profile-name">{{ t("System") }}<span class="tag muted-tag">{{ t("Built-in") }}</span></div>
++                    <div class="path-cell" :data-label="t('Login folder')" :title="systemConfigDir(agentDef.id)">
+                       {{ systemConfigDir(agentDef.id) }}
+                     </div>
+                     <div class="row-actions">
+-                      <button class="btn small" @click="handleLaunchSystemSession(agentDef.command)">
+-                        New session
+-                      </button>
++                      <button class="btn small" @click="handleLaunchSystemSession(agentDef.command)">{{ t("New session") }}</button>
+                     </div>
++                    <AccountEnvEditor :agent="agentDef.id" :model-value="prefs.systemAccountEnv?.[agentDef.id]" :reserved="['CLAUDE_CONFIG_DIR', 'CODEX_HOME']" @save="setPref('systemAccountEnv', { ...prefs.systemAccountEnv, [agentDef.id]: $event })" />
+                   </div>
+                   <div v-for="p in profilesForAgent(agentDef.id)" :key="p.id" class="table-row body">
+-                    <input
++                    <label class="default-choice"><input
+                       type="radio"
+                       class="radio"
++                      :aria-label="t('Default')"
+                       :name="`${agentDef.id}-default`"
+                       :checked="prefs.defaultProfileId[agentDef.id] === p.id"
+                       @change="setPref(
+                         'defaultProfileId',
+                         { ...prefs.defaultProfileId, [agentDef.id]: p.id },
+                       )"
+-                    />
++                    /><span>{{ t('Default') }}</span></label>
+                     <div class="profile-name">
+                       <input
+                         class="input"
++                        :aria-label="t('Profile')"
+                         :value="p.label"
+                         maxlength="40"
+                         @input="renameAccountProfile(p.id, ($event.target as HTMLInputElement).value)"
+                       />
+-                      <span v-if="p.authMethod === 'setup-token'" class="tag muted-tag">Token</span>
++                      <span v-if="p.authMethod === 'setup-token'" class="tag muted-tag">{{ t("Token") }}</span>
+                     </div>
+-                    <div class="path-cell" :title="p.configDir">{{ p.configDir }}</div>
++                    <div class="path-cell" :data-label="t('Login folder')" :title="p.configDir">{{ p.configDir }}</div>
+                     <div class="row-actions">
+-                      <button class="btn small" @click="handleLaunchProfile(p)">New session</button>
+-                      <button class="btn small" @click="handleOpenFolder(p)">Open folder</button>
+-                      <button class="btn small" @click="handleRemoveProfile(p)">Remove</button>
++                      <button class="btn small" @click="handleLaunchProfile(p)">{{ t("New session") }}</button>
++                      <button class="btn small" @click="handleOpenFolder(p)">{{ t("Open folder") }}</button>
++                      <button class="btn small" @click="handleRemoveProfile(p)">{{ t("Remove") }}</button>
+                     </div>
++                    <AccountEnvEditor :agent="p.agent" :model-value="p.env" :reserved="p.authMethod === 'setup-token' ? ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CLAUDE_CODE_OAUTH_TOKEN'] : ['CLAUDE_CONFIG_DIR', 'CODEX_HOME']" @save="setAccountProfileEnv(p.id, $event)" />
+                   </div>
+                 </div>
+ 
++                <div class="section-title profile-add-title">{{ t('Add profile') }}</div>
++                <label class="field-label" :for="agentDef.id + '-profile-name'">{{ t('Profile') }}</label>
+                 <div class="add-row">
+                   <input
+                     class="input"
+                     v-model="newProfileLabel[agentDef.id]"
+-                    placeholder="e.g. Personal, Work"
++                    :id="agentDef.id + '-profile-name'"
++                    maxlength="40"
++                    :placeholder="t('e.g. Personal, Work')"
+                     @keydown.enter="
+                       agentDef.id !== 'claude' || newProfileAuthMethod.claude !== 'setup-token'
+                         ? handleAddProfile(agentDef.id)
+                         : null
+                     "
+                   />
+-                  <button class="btn" @click="handleAddProfile(agentDef.id)">
+-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>
+-                    Add profile
+-                  </button>
++                  <button class="btn" :disabled="!newProfileLabel[agentDef.id].trim()" @click="handleAddProfile(agentDef.id)">
++                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>{{ t("Add profile") }}</button>
+                 </div>
+-                <template v-if="agentDef.id === 'claude'">
++                <div class="profile-auth-options">
+                   <label class="field-grid auth-method-field">
+-                    <span>Auth method</span>
+-                    <select class="input" v-model="newProfileAuthMethod.claude">
+-                      <option value="oauth">OAuth (default) — opens a login terminal</option>
+-                      <option value="setup-token">Setup token — paste an existing token</option>
++                    <span>{{ t("Auth method") }}</span>
++                    <select class="input" v-model="newProfileAuthMethod[agentDef.id]">
++                      <option value="oauth"> {{ t("OAuth (default) — opens a login terminal") }} </option>
++                      <option value="environment">{{ t("Environment variables") }}</option>
++                      <option v-if="agentDef.id === 'claude'" value="setup-token"> {{ t("Setup token — paste an existing token") }} </option>
+                     </select>
+                   </label>
+-                  <label v-if="newProfileAuthMethod.claude === 'setup-token'" class="field-grid auth-method-field">
+-                    <span>Token</span>
++                  <label v-if="agentDef.id === 'claude' && newProfileAuthMethod.claude === 'setup-token'" class="field-grid auth-method-field">
++                    <span>{{ t("Token") }}</span>
+                     <input
+                       class="input mono"
+                       type="password"
+                       v-model="newProfileToken.claude"
+-                      placeholder="Output of `claude setup-token`"
++                      :placeholder="t('Output of `claude setup-token`')"
+                       @keydown.enter="handleAddProfile('claude')"
+                     />
+                   </label>
+-                </template>
++                </div>
+               </div>
+             </div>
+           </template>
+@@ -630,61 +667,52 @@ void sameBinding;
+           <template v-else-if="activeCategory === 'workspaces'">
+             <div class="panel-header">
+               <div>
+-                <div class="panel-title">Workspaces</div>
+-                <div class="panel-hint">
+-                  Set a default folder per workspace. New terminals and splits start in that folder.
+-                </div>
++                <div class="panel-title">{{ t("Workspaces") }}</div>
++                <div class="panel-hint">{{ t("Set a default folder per workspace. New terminals and splits start in that folder.") }}</div>
+               </div>
+             </div>
+             <div class="table table-workspaces">
+-              <div class="table-row head"><div>Workspace</div><div>Default folder</div><div></div></div>
++              <div class="table-row head"><div>{{ t("Workspace") }}</div><div>{{ t("Default folder") }}</div><div></div></div>
+               <div v-for="ws in workspaceState.workspaces" :key="ws.id" class="table-row body">
+                 <div class="ws-name">
+                   <span class="ws-badge">{{ ws.icon || ws.name.slice(0, 1).toUpperCase() }}</span>
+                   <span class="ws-name-text">{{ ws.name }}</span>
+-                  <span v-if="ws.id === activeWorkspace?.id" class="tag active-tag">Active</span>
++                  <span v-if="ws.id === activeWorkspace?.id" class="tag active-tag">{{ t("Active") }}</span>
+                 </div>
+-                <input
++                <label class="table-field"><span class="mobile-field-label">{{ t('Default folder') }}</span><input
+                   class="input mono"
++                  :aria-label="t('Default folder') + ': ' + ws.name"
+                   :value="ws.settings?.defaultCwd ?? ''"
+-                  placeholder="e.g. C:\playground\project"
++                  :placeholder="t('e.g. C:\\playground\\project')"
+                   @input="updateDefaultCwd(ws.id, ($event.target as HTMLInputElement).value)"
+-                />
++                /></label>
+                 <div class="row-actions">
+-                  <button class="btn" @click="chooseDefaultCwd(ws.id)">Browse</button>
+-                  <button class="btn" @click="clearDefaultCwd(ws.id)">Clear</button>
++                  <button class="btn" @click="chooseDefaultCwd(ws.id)">{{ t("Browse") }}</button>
++                  <button class="btn" @click="clearDefaultCwd(ws.id)">{{ t("Clear") }}</button>
+                 </div>
+               </div>
+             </div>
+-            <div class="note">
+-              Empty means winmux uses the shell/daemon default directory.
+-            </div>
++            <div class="note">{{ t("Empty means winmux uses the shell/daemon default directory.") }}</div>
+           </template>
+ 
+           <template v-else-if="activeCategory === 'keybindings'">
+             <div class="panel-header">
+               <div>
+-                <div class="panel-title">Keybindings</div>
+-                <div class="panel-hint">
+-                  Click on a key cell to record a new shortcut. Prefix shortcuts (Ctrl+B …) are fixed in this version.
+-                </div>
++                <div class="panel-title">{{ t("Keybindings") }}</div>
++                <div class="panel-hint"> {{ t("Click on a key cell to record a new shortcut. Prefix shortcuts (Ctrl+B …) are fixed in this version.") }} </div>
+               </div>
+               <div class="panel-actions">
+                 <button class="btn" @click="resetAll">
+-                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
+-                  Reset all
+-                </button>
++                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>{{ t("Reset all") }}</button>
+               </div>
+             </div>
+ 
+-            <div v-if="conflicts.size > 0" class="warn">
+-              ⚠ Conflicting shortcuts detected. Only one action will be triggered per keystroke.
+-            </div>
++            <div v-if="conflicts.size > 0" class="warn"> {{ t("⚠ Conflicting shortcuts detected. Only one action will be triggered per keystroke.") }} </div>
+ 
+             <div class="grid-3">
+               <div class="kb-card">
+                 <div class="kb-card-title">
+-                  <span class="kb-card-name">Session</span>
++                  <span class="kb-card-name">{{ t("Session") }}</span>
+                   <span class="kb-count">{{ actionsByCategory.session.length }}</span>
+                 </div>
+                 <div
+@@ -692,23 +720,23 @@ void sameBinding;
+                   :key="a.id"
+                   :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
+                 >
+-                  <span class="kb-label">{{ a.label }}</span>
+-                  <span
++                  <span class="kb-label">{{ t(a.label) }}</span>
++                  <button type="button"
+                     :class="['key-cell', {
+                       capturing: capturingId === a.id,
+                       unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
+                     }]"
+-                    title="Click to record • Right-click to clear"
++                    :title="t('Click to record • Right-click to clear')"
+                     @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
+                     @contextmenu.prevent="clearBinding(a.id as ActionId)"
+                   >
+                     {{ displayBinding(a.id as ActionId) }}
+-                  </span>
++                  </button>
+                   <button
+                     class="btn icon-only"
+                     :disabled="!isOverridden(a.id as ActionId)"
+                     @click="resetBinding(a.id as ActionId)"
+-                    title="Reset to default"
++                    :title="t('Reset to default')"
+                   >
+                     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
+                   </button>
+@@ -717,7 +745,7 @@ void sameBinding;
+ 
+               <div class="kb-card">
+                 <div class="kb-card-title">
+-                  <span class="kb-card-name">Pane</span>
++                  <span class="kb-card-name">{{ t("Pane") }}</span>
+                   <span class="kb-count">{{ actionsByCategory.pane.length }}</span>
+                 </div>
+                 <div
+@@ -725,23 +753,23 @@ void sameBinding;
+                   :key="a.id"
+                   :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
+                 >
+-                  <span class="kb-label">{{ a.label }}</span>
+-                  <span
++                  <span class="kb-label">{{ t(a.label) }}</span>
++                  <button type="button"
+                     :class="['key-cell', {
+                       capturing: capturingId === a.id,
+                       unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
+                     }]"
+-                    title="Click to record • Right-click to clear"
++                    :title="t('Click to record • Right-click to clear')"
+                     @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
+                     @contextmenu.prevent="clearBinding(a.id as ActionId)"
+                   >
+                     {{ displayBinding(a.id as ActionId) }}
+-                  </span>
++                  </button>
+                   <button
+                     class="btn icon-only"
+                     :disabled="!isOverridden(a.id as ActionId)"
+                     @click="resetBinding(a.id as ActionId)"
+-                    title="Reset to default"
++                    :title="t('Reset to default')"
+                   >
+                     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
+                   </button>
+@@ -751,7 +779,7 @@ void sameBinding;
+               <div class="col-stack">
+                 <div class="kb-card">
+                   <div class="kb-card-title">
+-                    <span class="kb-card-name">Window</span>
++                    <span class="kb-card-name">{{ t("Window") }}</span>
+                     <span class="kb-count">{{ actionsByCategory.window.length }}</span>
+                   </div>
+                   <div
+@@ -759,23 +787,23 @@ void sameBinding;
+                     :key="a.id"
+                     :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
+                   >
+-                    <span class="kb-label">{{ a.label }}</span>
+-                    <span
++                    <span class="kb-label">{{ t(a.label) }}</span>
++                    <button type="button"
+                       :class="['key-cell', {
+                         capturing: capturingId === a.id,
+                         unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
+                       }]"
+-                      title="Click to record • Right-click to clear"
++                      :title="t('Click to record • Right-click to clear')"
+                       @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
+                       @contextmenu.prevent="clearBinding(a.id as ActionId)"
+                     >
+                       {{ displayBinding(a.id as ActionId) }}
+-                    </span>
++                    </button>
+                     <button
+                       class="btn icon-only"
+                       :disabled="!isOverridden(a.id as ActionId)"
+                       @click="resetBinding(a.id as ActionId)"
+-                      title="Reset to default"
++                      :title="t('Reset to default')"
+                     >
+                       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
+                     </button>
+@@ -783,7 +811,7 @@ void sameBinding;
+                 </div>
+                 <div class="kb-card">
+                   <div class="kb-card-title">
+-                    <span class="kb-card-name">Settings</span>
++                    <span class="kb-card-name">{{ t("Settings") }}</span>
+                     <span class="kb-count">{{ actionsByCategory.settings.length }}</span>
+                   </div>
+                   <div
+@@ -791,23 +819,23 @@ void sameBinding;
+                     :key="a.id"
+                     :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
+                   >
+-                    <span class="kb-label">{{ a.label }}</span>
+-                    <span
++                    <span class="kb-label">{{ t(a.label) }}</span>
++                    <button type="button"
+                       :class="['key-cell', {
+                         capturing: capturingId === a.id,
+                         unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
+                       }]"
+-                      title="Click to record • Right-click to clear"
++                      :title="t('Click to record • Right-click to clear')"
+                       @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
+                       @contextmenu.prevent="clearBinding(a.id as ActionId)"
+                     >
+                       {{ displayBinding(a.id as ActionId) }}
+-                    </span>
++                    </button>
+                     <button
+                       class="btn icon-only"
+                       :disabled="!isOverridden(a.id as ActionId)"
+                       @click="resetBinding(a.id as ActionId)"
+-                      title="Reset to default"
++                      :title="t('Reset to default')"
+                     >
+                       <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
+                     </button>
+@@ -820,21 +848,17 @@ void sameBinding;
+           <template v-else-if="activeCategory === 'palette'">
+             <div class="panel-header">
+               <div>
+-                <div class="panel-title">Palette</div>
+-                <div class="panel-hint">
+-                  Middle-click inside a terminal to open the palette. "Auto-run" appends Enter; otherwise the command is pasted at the prompt.
+-                </div>
++                <div class="panel-title">{{ t("Palette") }}</div>
++                <div class="panel-hint">{{ t("Middle-click inside a terminal to open the palette. \"Auto-run\" appends Enter; otherwise the command is pasted at the prompt.") }}</div>
+               </div>
+               <div class="panel-actions">
+                 <button class="btn" @click="addPaletteRow">
+-                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>
+-                  Add item
+-                </button>
++                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M10 4.5v11M4.5 10h11"/></svg>{{ t("Add item") }}</button>
+               </div>
+             </div>
+ 
+             <div class="card">
+-              <div class="card-title">Display style</div>
++              <div class="card-title">{{ t("Display style") }}</div>
+               <div class="style-tiles">
+                 <button
+                   type="button"
+@@ -844,8 +868,8 @@ void sameBinding;
+                   <div class="style-tile-preview">
+                     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M5 6h10M5 10h10M5 14h6"/></svg>
+                   </div>
+-                  <div class="style-tile-label"><span class="style-tile-name">Context menu</span></div>
+-                  <div class="style-tile-desc">Compact list at the click position.</div>
++                  <div class="style-tile-label"><span class="style-tile-name">{{ t("Context menu") }}</span></div>
++                  <div class="style-tile-desc">{{ t("Compact list at the click position.") }}</div>
+                 </button>
+                 <button
+                   type="button"
+@@ -855,44 +879,45 @@ void sameBinding;
+                   <div class="style-tile-preview">
+                     <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="2.2"/><circle cx="10" cy="3.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.6" cy="7" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.6" cy="13" r="1.3" fill="currentColor" stroke="none"/><circle cx="10" cy="16.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="4.4" cy="13" r="1.3" fill="currentColor" stroke="none"/><circle cx="4.4" cy="7" r="1.3" fill="currentColor" stroke="none"/></svg>
+                   </div>
+-                  <div class="style-tile-label"><span class="style-tile-name">Radial menu</span></div>
+-                  <div class="style-tile-desc">Original circular layout.</div>
++                  <div class="style-tile-label"><span class="style-tile-name">{{ t("Radial menu") }}</span></div>
++                  <div class="style-tile-desc">{{ t("Original circular layout.") }}</div>
+                 </button>
+               </div>
+             </div>
+ 
+             <div class="table table-palette">
+               <div class="table-row head">
+-                <div>Label</div>
+-                <div>Command</div>
+-                <div>Auto-run</div>
++                <div>{{ t("Label") }}</div>
++                <div>{{ t("Command") }}</div>
++                <div>{{ t("Auto-run") }}</div>
+                 <div></div>
+               </div>
+               <div v-for="it in paletteItems" :key="it.id" class="table-row body">
+-                <input
++                <label class="table-field"><span class="mobile-field-label">{{ t('Label') }}</span><input
+                   class="input"
++                  :aria-label="t('Label')"
+                   :value="it.label"
+                   maxlength="40"
+                   @input="updatePaletteItem(it.id, { label: ($event.target as HTMLInputElement).value })"
+-                />
+-                <input
++                /></label>
++                <label class="table-field"><span class="mobile-field-label">{{ t('Command') }}</span><input
+                   class="input mono"
++                  :aria-label="t('Command')"
+                   :value="it.command"
+                   @input="updatePaletteItem(it.id, { command: ($event.target as HTMLInputElement).value })"
+-                />
+-                <input
++                /></label>
++                <label class="checkbox-field"><input
+                   type="checkbox"
+                   class="checkbox"
++                  :aria-label="t('Auto-run')"
+                   :checked="it.autoRun"
+                   @change="updatePaletteItem(it.id, { autoRun: ($event.target as HTMLInputElement).checked })"
+-                />
++                /><span class="mobile-field-label">{{ t('Auto-run') }}</span></label>
+                 <div class="row-actions">
+-                  <button class="btn small" @click="removePaletteItem(it.id)">Remove</button>
++                  <button class="btn small" @click="removePaletteItem(it.id)">{{ t("Remove") }}</button>
+                 </div>
+               </div>
+-              <div v-if="paletteItems.length === 0" class="empty">
+-                No custom items yet. Click <b>+ Add item</b> to create one.
+-              </div>
++              <div v-if="paletteItems.length === 0" class="empty">{{ t("No custom items yet. Click") }} <b>{{ t("+ Add item") }}</b> {{ t("to create one.") }}</div>
+             </div>
+           </template>
+         </div>
+@@ -902,14 +927,17 @@ void sameBinding;
+ </template>
+ 
+ <style scoped>
++.settings-shell, .settings-shell * { box-sizing: border-box; }
++.settings-shell :is(button, input, select, .key-cell):focus-visible { outline: 2px solid #4ec9b0; outline-offset: 2px; }
+ .settings-shell {
+   position: fixed;
+   inset: 0;
+   z-index: 1000;
+   background: #1e1e1e;
+   color: #d4d4d4;
+-  font-family: "Inter", "Segoe UI", sans-serif;
++  font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+   font-size: 14px;
++  line-height: 1.5;
+   display: flex;
+   flex-direction: column;
+ }
+@@ -967,8 +995,8 @@ void sameBinding;
+ /* Body: nav + content */
+ .body { flex: 1; display: flex; min-height: 0; }
+ .nav {
+-  width: 280px;
+-  flex: 0 0 280px;
++  width: 224px;
++  flex: 0 0 224px;
+   background: #1b1b1b;
+   border-right: 1px solid #111111;
+   padding: 20px 12px;
+@@ -978,6 +1006,12 @@ void sameBinding;
+   overflow-y: auto;
+ }
+ .nav-item {
++  width: 100%;
++  background: transparent;
++  color: inherit;
++  border: 0;
++  text-align: left;
++  font: inherit;
+   display: flex;
+   align-items: center;
+   gap: 12px;
+@@ -991,17 +1025,18 @@ void sameBinding;
+ .nav-item .nav-icon svg { width: 100%; height: 100%; }
+ .nav-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+ .nav-label { font-size: 13.5px; font-weight: 500; color: #aaaaaa; }
+-.nav-desc { font-size: 11px; color: #666666; }
++.nav-desc { font-size: 12px; color: #999999; }
+ .nav-item.active { background: #202020; border-left-color: #4ec9b0; }
+ .nav-item.active .nav-icon { color: #4ec9b0; }
+ .nav-item.active .nav-label { color: #4ec9b0; }
+ 
+-.content { flex: 1; min-width: 0; overflow: auto; }
+-.content-inner { padding: 40px 48px 56px; display: flex; flex-direction: column; gap: 24px; }
++.content { flex: 1; min-width: 0; overflow: auto; container-type: inline-size; container-name: settings-content; }
++.content-inner { padding: 32px; width: 100%; max-width: 1680px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
+ 
+-.panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
++.panel-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; }
++.panel-header > div:first-child { flex: 1 1 280px; min-width: 0; }
+ .panel-title { font-size: 20px; font-weight: 600; color: #e6e6e6; margin-bottom: 6px; }
+-.panel-hint { font-size: 13px; color: #888888; max-width: 640px; line-height: 1.5; }
++.panel-hint { font-size: 13px; color: #aaaaaa; max-width: 80ch; line-height: 1.7; overflow-wrap: anywhere; }
+ .panel-hint code {
+   font-family: Consolas, "Cascadia Mono", monospace;
+   font-size: 0.92em;
+@@ -1016,6 +1051,9 @@ void sameBinding;
+ .btn {
+   display: inline-flex;
+   align-items: center;
++  justify-content: center;
++  min-height: 38px;
++  flex-shrink: 0;
+   gap: 6px;
+   background: #202020;
+   color: #d4d4d4;
+@@ -1029,13 +1067,13 @@ void sameBinding;
+ .btn:hover:not(:disabled) { background: #2a2a2a; }
+ .btn:disabled { color: #555555; cursor: not-allowed; }
+ .btn svg { width: 14px; height: 14px; }
+-.btn.small { padding: 6px 11px; font-size: 12.5px; }
+-.btn.icon-only { padding: 6px; }
++.btn.small { padding: 7px 12px; font-size: 13px; }
++.btn.icon-only { padding: 8px; min-width: 34px; }
+ .btn.icon-only svg { width: 13px; height: 13px; }
+ .btn.add-arg { align-self: flex-start; }
+ 
+ /* Cards */
+-.card { background: #202020; border: 1px solid #2b2b2b; border-radius: 10px; padding: 22px 24px; }
++.card { min-width: 0; background: #202020; border: 1px solid #2b2b2b; border-radius: 10px; padding: 24px; }
+ .card-title { font-size: 14.5px; font-weight: 600; color: #e6e6e6; margin-bottom: 16px; }
+ .card-title-left { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+ .card-title-left .name { font-size: 14.5px; font-weight: 600; color: #e6e6e6; }
+@@ -1048,21 +1086,25 @@ void sameBinding;
+ }
+ 
+ /* Grids */
+-.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+-.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start; }
++.accounts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr)); gap: 24px; align-items: start; }
++.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 20px; align-items: start; }
+ .col-stack { display: flex; flex-direction: column; gap: 20px; }
+ 
+ /* Field grid (Terminal + Accounts auth-method fields) */
+-.field-grid { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px 16px; align-items: center; }
+-.field-grid.compact { grid-template-columns: 68px minmax(0, 1fr); gap: 8px 10px; }
+-.field-grid.auth-method-field { grid-template-columns: 110px minmax(0, 1fr); margin-top: 4px; }
++.field-grid { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 18px 20px; align-items: start; }
++.field-grid > * { min-width: 0; }
++.field-grid > label { padding-top: 9px; }
++.field-grid.compact { grid-template-columns: minmax(0, 1fr); gap: 8px; }
++.field-grid.compact > label { padding-top: 4px; }
++.field-grid.auth-method-field { grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 18px; }
+ .field-grid label,
+-.field-grid > span { font-size: 12.5px; color: #aaaaaa; }
++.field-grid > span, .field-label { font-size: 13px; color: #bbbbbb; }
+ 
+ .input, select.input {
+   width: 100%;
+   min-width: 0;
+-  padding: 8px 10px;
++  min-height: 40px;
++  padding: 9px 12px;
+   color: #e6e6e6;
+   background: #252525;
+   border: 1px solid #333333;
+@@ -1070,14 +1112,14 @@ void sameBinding;
+   font: inherit;
+   font-size: 13px;
+ }
+-.field-grid.compact .input { font-size: 12.5px; padding: 6px 9px; }
++.field-grid.compact .input { font-size: 13px; }
+ .input.mono { font-family: Consolas, "Cascadia Mono", monospace; }
+ .input:focus, select.input:focus { outline: none; border-color: #4ec9b0; }
+ 
+-.inline-row { display: flex; gap: 8px; }
++.inline-row { display: flex; gap: 10px; min-width: 0; }
+ .inline-row .input { flex: 1; }
+ .arg-list { display: flex; flex-direction: column; gap: 8px; }
+-.arg-row { display: flex; gap: 8px; }
++.arg-row { display: flex; gap: 10px; min-width: 0; }
+ .arg-row .input { flex: 1; }
+ 
+ .tag {
+@@ -1095,8 +1137,8 @@ void sameBinding;
+ .checkbox { accent-color: #4ec9b0; width: 16px; height: 16px; }
+ .radio { accent-color: #4ec9b0; width: 15px; height: 15px; cursor: pointer; }
+ 
+-.ov-card-head { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+-.ov-card-head .name { font-size: 13.5px; font-weight: 600; color: #e6e6e6; }
++.ov-card-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 14px; }
++.ov-card-head .name { min-width: 0; overflow-wrap: anywhere; font-size: 13.5px; font-weight: 600; color: #e6e6e6; }
+ 
+ .note { font-size: 12.5px; color: #888888; }
+ .empty { padding: 24px 6px; color: #777777; font-size: 13px; text-align: center; }
+@@ -1123,28 +1165,37 @@ void sameBinding;
+ .table-row.body { background: #202020; }
+ .row-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+ 
+-.table-accounts .table-row { grid-template-columns: 40px 92px minmax(0, 1fr) auto; gap: 14px; padding: 12px 16px; }
+-.table-accounts .table-row.head { padding: 10px 16px; }
+-.profile-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; color: #e6e6e6; font-weight: 500; }
++.table-accounts .table-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name default" "path path" "actions actions" "env env"; gap: 16px; padding: 18px; }
++.table-accounts .table-row.head { display: none; }
++.table-accounts .default-choice { grid-area: default; }
++.default-choice { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; color: #bbbbbb; }
++.table-accounts .profile-name { grid-area: name; }
++.table-accounts .path-cell { grid-area: path; }
++.table-accounts .row-actions { grid-area: actions; justify-content: flex-start; }
++.profile-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; font-size: 14px; color: #e6e6e6; font-weight: 500; }
++.profile-name .input { flex: 1 1 180px; }
+ .path-cell {
+   color: #aaaaaa;
+   font-family: Consolas, "Cascadia Mono", monospace;
+-  font-size: 12px;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
++  font-size: 13px;
++  min-width: 0;
++  overflow-wrap: anywhere;
++  user-select: text;
+ }
+-.add-row { display: flex; gap: 8px; margin-top: 14px; }
+-.add-row .input { flex: 1; }
++.path-cell::before { content: attr(data-label); display: block; margin-bottom: 4px; font: 12px/1.5 "Segoe UI", "Malgun Gothic", sans-serif; color: #999999; }
++.profile-add-title { margin: 24px 0 14px; }
++.add-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
++.add-row .input { flex: 1 1 220px; }
+ 
+ .agent-badge { width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+-.agent-badge svg { width: 18px; height: 18px; }
+-.agent-badge.claude { background: rgba(78, 201, 176, 0.12); color: #4ec9b0; }
+-.agent-badge.codex { background: rgba(209, 154, 102, 0.14); color: #d19a66; }
++.agent-badge :deep(svg) { width: 23px; height: 23px; }
++.agent-badge.claude { background: rgba(217, 119, 87, 0.12); color: #d97757; }
++.agent-badge.codex { background: #292929; color: #e6e6e6; }
++.agent-badge.codex :deep(svg) { width: 30px; height: 30px; }
+ 
+-.table-workspaces .table-row { grid-template-columns: 240px 1fr auto; gap: 20px; padding: 16px 20px; }
++.table-workspaces .table-row { grid-template-columns: minmax(140px, 0.7fr) minmax(200px, 1.4fr) auto; gap: 16px; padding: 16px 20px; }
+ .table-workspaces .table-row.head { padding: 12px 20px; }
+-.ws-name { display: flex; align-items: center; gap: 12px; min-width: 0; }
++.ws-name { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+ .ws-badge {
+   width: 30px;
+   height: 30px;
+@@ -1158,29 +1209,31 @@ void sameBinding;
+   font-size: 13px;
+   font-weight: 700;
+ }
+-.ws-name-text { font-size: 13.5px; color: #e6e6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.ws-name-text { min-width: 0; font-size: 13.5px; color: #e6e6e6; overflow-wrap: anywhere; }
+ 
+-.table-palette .table-row { grid-template-columns: 1fr 1.6fr 90px auto; gap: 18px; padding: 13px 18px; }
++.table-palette .table-row { grid-template-columns: minmax(140px, 1fr) minmax(200px, 1.6fr) 90px auto; gap: 16px; padding: 16px 18px; }
+ .table-palette .table-row.head { padding: 11px 18px; }
+ 
+ /* Keybindings */
+-.kb-card { background: #202020; border: 1px solid #2b2b2b; border-radius: 10px; padding: 18px 20px; }
++.kb-card { min-width: 0; container-type: inline-size; container-name: keybinding-card; background: #202020; border: 1px solid #2b2b2b; border-radius: 10px; padding: 18px 20px; }
+ .kb-card-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+ .kb-card-name { font-size: 13px; font-weight: 600; color: #e6e6e6; text-transform: uppercase; letter-spacing: 0.05em; }
+ .kb-count { font-size: 10.5px; color: #777777; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 20px; padding: 1px 8px; }
+-.kb-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid #2a2a2a; }
++.kb-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, 170px) 34px; gap: 10px; align-items: center; padding: 12px 0; border-bottom: 1px solid #2a2a2a; }
+ .kb-row:last-child { border-bottom: none; }
+ .kb-row.conflict { background: rgba(220, 80, 80, 0.07); }
+-.kb-label { font-size: 12.5px; color: #d4d4d4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.kb-label { font-size: 13px; color: #d4d4d4; overflow-wrap: anywhere; }
+ .key-cell {
+   font-family: Consolas, "Cascadia Mono", monospace;
+-  font-size: 11px;
++  font-size: 12px;
+   background: #252525;
+   border: 1px solid #333333;
+   padding: 5px 8px;
+   border-radius: 5px;
+   color: #aaaaaa;
+-  white-space: nowrap;
++  white-space: normal;
++  overflow-wrap: anywhere;
++  min-width: 0;
+   cursor: pointer;
+ }
+ .key-cell:hover { background: #2a2a2a; }
+@@ -1218,4 +1271,48 @@ void sameBinding;
+ .style-tile-label { display: flex; align-items: center; justify-content: space-between; }
+ .style-tile-name { font-size: 13px; font-weight: 600; color: #e6e6e6; }
+ .style-tile-desc { font-size: 11.5px; color: #777777; }
++
++.table-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
++.checkbox-field { display: flex; align-items: center; gap: 8px; }
++.mobile-field-label { display: none; font-size: 13px; color: #bbbbbb; }
++
++@container settings-content (max-width: 820px) {
++  .table-workspaces .table-row.head,
++  .table-palette .table-row.head { display: none; }
++  .table-workspaces .table-row,
++  .table-palette .table-row { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 20px; }
++  .mobile-field-label { display: inline; }
++  .table-workspaces .row-actions,
++  .table-palette .row-actions { justify-content: flex-start; }
++}
++
++@container settings-content (max-width: 600px) {
++  .content-inner { padding: 24px 20px; }
++  .field-grid { grid-template-columns: minmax(0, 1fr); gap: 8px; }
++  .field-grid > label { padding-top: 8px; }
++  .card, .kb-card { padding: 18px; }
++}
++
++@container settings-content (max-width: 420px) {
++  .content-inner { padding: 20px 12px; }
++  .card { padding: 16px; }
++  .inline-row, .arg-row { flex-wrap: wrap; }
++  .inline-row .input, .arg-row .input { flex-basis: 100%; }
++  .style-tiles { grid-template-columns: minmax(0, 1fr); }
++  .table-accounts .table-row { padding: 14px; }
++}
++
++@container keybinding-card (max-width: 380px) {
++  .kb-row { grid-template-columns: minmax(0, 1fr) 34px; gap: 8px; }
++  .kb-label { grid-column: 1 / -1; }
++}
++
++@media (max-width: 760px) {
++  .topbar { flex-basis: 64px; padding: 0 16px; }
++  .body { flex-direction: column; }
++  .nav { width: 100%; flex: 0 0 auto; flex-direction: row; padding: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid #333333; }
++  .nav-item { width: auto; flex-shrink: 0; padding: 10px 12px; gap: 8px; }
++  .nav-desc { display: none; }
++  .content { min-height: 0; }
++}
+ </style>

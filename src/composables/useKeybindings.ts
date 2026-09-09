@@ -36,8 +36,17 @@ export function useKeybindings() {
   }
 
   function prefixFor(id: ActionId): string | null {
-    // Prefix mapping is not user-customizable in this iteration.
+    const key = `${id}:prefix`;
+    if (key in state.overrides) return state.overrides[key]?.key ?? null;
     return getAction(id)?.defaultPrefix ?? null;
+  }
+
+  function setPrefix(id: ActionId, key: string | null) {
+    state.overrides[`${id}:prefix`] = key ? { key } : null;
+  }
+
+  function resetPrefix(id: ActionId) {
+    delete state.overrides[`${id}:prefix`];
   }
 
   function setBinding(id: ActionId, b: Keybinding) {
@@ -61,6 +70,8 @@ export function useKeybindings() {
     actions: ACTIONS,
     bindingFor,
     prefixFor,
+    setPrefix,
+    resetPrefix,
     setBinding,
     resetBinding,
     resetAll,

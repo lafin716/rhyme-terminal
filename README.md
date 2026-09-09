@@ -1,631 +1,203 @@
-# rhyme-terminal
+<div align="center">
+  <img src="src-tauri/icons/128x128.png" alt="Rhyme Terminal 로고" width="88" height="88">
+  <h1>Rhyme Terminal</h1>
+  <p><strong>터미널, AI 코딩 도구, 프로젝트 작업을 한 화면에.</strong></p>
+  <p>Windows용 터미널 멀티플렉서 · 프로젝트별 작업 공간 · 로컬 워크플로 자동화</p>
+  <p>
+    <img src="https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square" alt="플랫폼: Windows">
+    <img src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square" alt="Tauri 2">
+    <img src="https://img.shields.io/badge/Vue-3-42B883?style=flat-square" alt="Vue 3">
+    <img src="https://img.shields.io/badge/Rust-2021-DEA584?style=flat-square" alt="Rust 2021">
+  </p>
+  <p>
+    <a href="#quick-start">빠른 시작</a> ·
+    <a href="#features">주요 기능</a> ·
+    <a href="docs/rhyme-flow.md">Rhyme Flow</a> ·
+    <a href="docs/mobile-pairing.md">모바일 연결</a> ·
+    <a href="https://github.com/lafin716/rhyme-terminal/issues">이슈 제보</a>
+  </p>
+</div>
 
-Rhyme Flow: [로컬 자동화 사용법과 검증 안내](docs/rhyme-flow.md)
+![프로젝트 탐색기와 개발 서버, Claude Code·Codex 세션을 세 개의 패널에 배치한 Rhyme Terminal](docs/images/terminal-workspace.png)
 
-Windows에서 여러 터미널 세션을 한 창 안에 나눠 쓰기 위한 터미널 멀티플렉서입니다.  
-Tauri v2 + Vue 3 + xterm.js로 만들어졌고, 백그라운드 daemon(`winmuxd`)이 PTY 세션을 관리합니다.
+<p align="center"><sub>현재 프런트엔드를 예제 프로젝트·세션 데이터로 실행해 직접 캡처했습니다. 화면 속 CLI 대화와 출력은 데모이며 실제 에이전트 실행 결과가 아닙니다. <a href="docs/images/README.md">촬영 안내</a></sub></p>
 
-> tmux처럼 빠르게 터미널을 만들고, pane을 나누고, 탭을 옮기고, 작업 공간별로 터미널 환경을 분리하는 데 초점을 둔 Windows 데스크톱 앱입니다.
+**Rhyme Terminal**은 여러 터미널을 프로젝트별로 묶고, 화면을 나눠 나란히 사용하는 Windows 데스크톱 앱입니다. 개발 서버 옆에 Claude Code와 Codex를 띄우고, 같은 작업 공간에서 파일을 열거나 반복 작업을 Rhyme Flow로 구성할 수 있습니다.
 
----
+<a id="features"></a>
 
-## 주요 기능
+## 작업에 필요한 도구를 가까이
 
-- **여러 터미널 세션 관리**
-  - PowerShell, PowerShell 7, Command Prompt, WSL, Git Bash, custom shell 지원
-  - 세션 탭 rename, 닫기, 휠클릭 닫기, 우클릭 메뉴 지원
-- **Pane 분할**
-  - 가로/세로 split
-  - 방향키 기반 split-or-move
-  - 4분할 quadrant split
-  - 최대 16개 pane 제한
-- **Workspace**
-  - 작업 공간별 layout, 기본 폴더, 터미널 preset 설정
-  - 사이드바 compact / expanded / minimal 모드
-- **드래그 앤 드롭 탭 이동**
-  - 탭 순서 변경
-  - 다른 pane으로 이동
-  - pane edge에 drop해서 split 생성
-- **파일/URL 링크 열기**
-  - 터미널 출력의 URL Ctrl+클릭으로 내장 브라우저 열기
-  - `ls`, `ll`, 빌드 로그 등에 나온 파일 경로 Ctrl+클릭으로 파일 미리보기
-  - 텍스트 파일은 Monaco 기반 viewer, 이미지는 image preview
-- **Command Palette**
-  - 터미널에서 마우스 middle-click으로 palette 열기
-  - 자주 쓰는 명령을 paste 또는 auto-run
-  - context menu / radial menu 표시 방식 선택
-- **tmux 스타일 prefix key**
-  - `Ctrl+B` 후 키 입력으로 세션/분할/rename 등 실행
-  - 일부 단축키는 Settings에서 변경 가능
-- **System tray**
-  - 창 닫기 시 앱 종료가 아니라 tray로 숨김
+| 기능 | 할 수 있는 일 |
+| --- | --- |
+| **분할 터미널** | 가로·세로·4분할, 최대 16개 패널. 탭을 끌어서 순서를 바꾸거나 다른 패널로 이동합니다. |
+| **프로젝트 작업 공간** | 프로젝트마다 기본 폴더·셸·레이아웃을 관리합니다. 좌측 세션 목록에서 바로 이동하고, 우클릭으로 이름을 바꾸거나 삭제합니다. |
+| **AI 제공자** | Claude Code·Codex의 로그인 프로필과 기본 계정을 관리합니다. 세션별 프로필 태그로 계정을 구분하고, 하단에서 프로필별 사용량을 확인합니다. |
+| **파일과 웹 페이지** | 탐색기·빠른 열기·터미널 링크로 파일을 찾습니다. 텍스트 편집과 저장, Markdown·이미지 미리보기, 내장 브라우저 탭을 지원합니다. |
+| **키보드 중심 조작** | tmux 스타일 `Ctrl+B` prefix, 사용자 지정 단축키, 터미널 확대·축소, 자주 쓰는 명령 팔레트를 제공합니다. |
+| **모바일 연결** | Tailscale을 통해 휴대폰 브라우저를 페어링하고 PC 터미널의 출력을 보거나 입력을 보냅니다. |
+| **Rhyme Flow** | 명령·워커·조건·승인 노드를 연결합니다. 버전을 확정해 실행하고 단계별 결과와 실행 기록을 확인합니다. |
 
----
+### 익숙한 셸, 필요한 프로필
 
-## 스크린샷
+PowerShell, PowerShell 7, Command Prompt, WSL, Git Bash와 사용자 지정 셸을 사용할 수 있습니다. 프로젝트별로 기본 폴더와 셸을 지정하면 새 터미널이 해당 환경에서 시작합니다.
 
-아직 실제 스크린샷 파일은 포함하지 않았습니다. 아래 영역에 직접 이미지를 넣으면 됩니다.
+설정의 **AI 제공자**에서 Claude Code·Codex 프로필을 추가하고 기본 프로필을 선택합니다. CLI는 별도로 설치하고 로그인해야 하며, 프로필마다 로그인 폴더를 분리해 여러 계정을 함께 사용할 수 있습니다.
 
-### 메인 화면
+<details>
+<summary><strong>AI 제공자 설정 화면 보기</strong></summary>
 
-> **이미지 넣을 위치**  
-> 추천 파일명: `docs/images/main-window.png`  
-> 촬영 설명: 왼쪽 workspace 사이드바, 상단 메뉴, 여러 터미널 탭, 하단 status bar가 보이도록 캡처하세요.
+![Claude Code와 Codex의 예제 로그인 프로필 및 기본 계정을 설정하는 AI 제공자 페이지](docs/images/ai-providers.png)
 
-<!--
-예시:
-![winmux main window](docs/images/main-window.png)
--->
+설정·Rhyme Flow는 독립된 페이지로 열립니다. 상단에는 로고와 창 제어 버튼을 유지하며, 앱으로 돌아오면 기존 터미널 화면을 이어서 사용합니다.
 
-### Pane 분할과 탭 이동
+</details>
 
-> **이미지 넣을 위치**  
-> 추천 파일명: `docs/images/split-panes.png`  
-> 촬영 설명: 2~4개 pane으로 분할된 화면과 각 pane의 탭을 함께 보여주세요.
+### 반복 작업은 Rhyme Flow로
 
-<!--
-![split panes](docs/images/split-panes.png)
--->
+프로젝트의 **Rhyme Flow** 버튼을 눌러 Flow 디자이너를 엽니다. 노드를 배치하고 입력·출력과 실행 권한을 정의한 뒤, 검증한 버전을 실행할 수 있습니다.
 
-### Settings
+![명령·승인·출력 노드를 연결한 Rhyme Flow 디자이너의 예제](docs/images/rhyme-flow.png)
 
-> **이미지 넣을 위치**  
-> 추천 파일명: `docs/images/settings.png`  
-> 촬영 설명: Terminal preset, Workspace default folder, Keybindings, Palette 설정 중 하나를 보여주세요.
+- **Flow 디자이너** — 노드와 연결 편집, JSON 가져오기·내보내기, 버전 확정.
+- **워커** — 지침, 입출력 계약, 권한, 제한 시간을 정의하고 버전별로 관리.
+- **프로젝트 채팅** — 요구사항을 업무로 저장하고 후속 변경 사항을 다음 실행에 반영.
+- **실행 기록** — 단계별 입력·출력·오류, 승인 요청, 취소와 결과물 확인.
 
-<!--
-![settings](docs/images/settings.png)
--->
+Codex CLI를 통한 자연어 초안 수정도 지원합니다. 개발 패키지는 Worktree → 개발·검증·리뷰 → 승인 → 커밋 → Draft PR 흐름을 제공하며, 검증 명령과 커밋할 파일을 프로젝트에 맞게 설정해야 합니다. 외부 게시에는 실행 권한과 단계 승인이 필요합니다.
 
-### 파일 미리보기 / 브라우저 탭
+[**Rhyme Flow 시작하기 →**](docs/rhyme-flow.md)
 
-> **이미지 넣을 위치**  
-> 추천 파일명: `docs/images/resource-tabs.png`  
-> 촬영 설명: 터미널에서 파일 또는 URL을 열어 file viewer/browser tab이 같이 보이는 장면을 캡처하세요.
+### 휴대폰에서도 터미널에 연결
 
-<!--
-![resource tabs](docs/images/resource-tabs.png)
--->
+PC 설정의 **모바일 연결**에서 Tailscale IP를 선택하고 서버를 시작합니다. 휴대폰으로 QR을 스캔한 뒤 PC에서 승인하면 세션을 선택해 출력 확인과 입력을 할 수 있습니다. 한글 입력창과 Enter·Tab·Esc·Ctrl+C 보조키를 제공합니다.
 
----
+모바일 화면은 브라우저에서 열립니다. 직접 IP 연결은 HTTP/WS를 사용하므로 Tailscale 경로를 전제로 하며, PC 앱과 모바일 서버가 실행 중이어야 합니다.
+
+[**페어링 및 연결 문제 해결 →**](docs/mobile-pairing.md)
+
+<a id="quick-start"></a>
 
 ## 빠른 시작
 
-### 1. 사전 준비
+현재 저장소의 소스를 Windows에서 빌드하는 방법입니다.
 
-Windows 환경을 기준으로 합니다.
+### 준비
 
 - Windows 10/11
-- [Rust](https://www.rust-lang.org/tools/install)
-- [Node.js](https://nodejs.org/)
-- [pnpm](https://pnpm.io/)
+- Git, Node.js 22 이상, pnpm
+- Rust의 MSVC 툴체인
+- Microsoft C++ Build Tools의 **C++를 사용한 데스크톱 개발** 구성 요소와 Windows SDK
 - Microsoft Edge WebView2 Runtime
-  - 최신 Windows 10/11에는 보통 기본 설치되어 있습니다.
 
-pnpm이 없다면:
+시스템 의존성 설치는 [Tauri의 Windows 준비 안내](https://v2.tauri.app/start/prerequisites/#windows)를 참고하세요. Claude Code·Codex·WSL·Git Bash는 사용할 기능에 맞춰 별도로 설치합니다.
 
-```powershell
-npm install -g pnpm
-```
-
-### 2. 의존성 설치
+### 소스에서 실행
 
 ```powershell
-pnpm install
+git clone https://github.com/lafin716/rhyme-terminal.git
+cd rhyme-terminal
+pnpm.cmd install
+pnpm.cmd tauri dev
 ```
 
-### 3. 개발 모드 실행
+pnpm이 없다면 먼저 `npm install -g pnpm`을 실행하세요. 개발 모드에서는 Vite 서버와 Tauri 앱이 함께 실행됩니다.
+
+### 실행 파일 만들기
 
 ```powershell
-pnpm tauri dev
+pnpm.cmd build:portable
 ```
 
-Vite dev server는 `http://localhost:3000`에서 실행되고, Tauri 앱이 이 dev server를 사용합니다.
+기본 출력 경로는 `src-tauri/target/release/rhyme-terminal.exe`입니다. 현재 빌드 설정은 설치 프로그램 대신 실행 파일을 생성하며, 실행 환경에는 WebView2 Runtime이 필요합니다. `CARGO_TARGET_DIR`를 지정한 경우 출력 위치가 달라집니다.
 
-### 4. 프론트엔드 빌드 확인
+## 처음 열었다면
+
+1. **프로젝트 추가** — 좌측 `+`로 작업 공간을 만들고, 설정 → 작업 공간에서 기본 폴더를 지정합니다.
+2. **터미널 시작** — 프로젝트 옆 `+` 또는 `Ctrl+N`으로 세션을 만듭니다. 터미널 메뉴에서 셸과 AI CLI 프로필을 선택할 수 있습니다.
+3. **화면 분할** — 탭을 패널 가장자리로 끌거나 `Ctrl+B` 다음 `%`를 눌러 좌우로 나눕니다.
+4. **파일 열기** — `Ctrl+P`로 파일을 찾거나 터미널 출력의 파일 경로를 `Ctrl+클릭`합니다. URL은 내장 브라우저 탭으로 열립니다.
+5. **작업 이어가기** — 창 닫기는 트레이로 숨기기입니다. 앱을 완전히 종료하려면 트레이 메뉴를 사용합니다.
+
+## 자주 쓰는 조작
+
+아래는 기본 설정입니다. 설정 → **단축키**에서 일반 단축키와 prefix 키를 변경할 수 있습니다. `Ctrl+B → %`는 두 키 조합을 순서대로 누른다는 뜻입니다.
+
+| 동작 | 기본 입력 |
+| --- | --- |
+| 새 터미널 | `Ctrl+N` 또는 `Ctrl+B → c` |
+| 좌우 / 상하 분할 | `Ctrl+B → %` / `Ctrl+B → "` |
+| 해당 방향으로 탭 이동 또는 분할 | `Ctrl+Alt+방향키` |
+| 현재 패널의 다음 / 이전 탭 | `Ctrl+B → n` / `Ctrl+B → p` |
+| 세션 이름 변경 | 세션 우클릭 → 이름 변경 또는 `Ctrl+B → ,` |
+| 왼쪽 / 오른쪽 패널 표시 전환 | `Ctrl+Shift+B` / `Ctrl+Shift+E` |
+| 빠른 파일 열기 | `Ctrl+P` |
+| 파일 저장 | `Ctrl+S` |
+| 터미널 확대 / 축소 | `Ctrl+Shift++` / `Ctrl+Shift+-` 또는 `Ctrl+Shift+휠` |
+| 설정 | `Ctrl+,` |
+
+prefix의 `c`, `n`, `p`는 Shift 없이 누릅니다. `Ctrl+B → Shift+C`는 Claude 실행 동작입니다.
+
+터미널 영역에서 마우스 가운데 버튼을 누르면 명령 팔레트를 열 수 있습니다. 설정 → **팔레트**에서 자주 쓰는 명령과 자동 실행 여부를 관리합니다.
+
+## 개발과 기여
 
 ```powershell
-pnpm build
+pnpm.cmd test                                      # 프런트엔드 테스트
+pnpm.cmd build                                     # 모바일 자산 + 타입 검사 + 프런트엔드 빌드
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
-### 5. Portable Windows exe 빌드
+`pnpm.cmd dev`는 프런트엔드 서버만 실행합니다. 실제 PTY·파일 시스템·모바일 연결을 함께 확인하려면 `pnpm.cmd tauri dev`를 사용하세요.
+
+| 경로 | 역할 |
+| --- | --- |
+| [`src/components/`](src/components/) | Vue UI: 터미널, 탐색기, 설정, Flow 페이지 |
+| [`src/composables/`](src/composables/) | 작업 공간·세션·설정 상태와 동작 |
+| [`src/lib/`](src/lib/) | 단축키, 레이아웃 타입, Tauri 브리지, 공통 로직 |
+| [`src-tauri/src/pty/`](src-tauri/src/pty/) · [`ipc/`](src-tauri/src/ipc/) | PTY 세션과 Windows named-pipe 통신 |
+| [`src-tauri/src/flow/`](src-tauri/src/flow/) | Rhyme Flow 모델, 저장소, 실행 엔진 |
+| [`src/mobile/`](src/mobile/) | 모바일 브라우저 UI |
+
+버그를 발견했다면 [이슈](https://github.com/lafin716/rhyme-terminal/issues)에 재현 단계와 Windows·셸 버전, 기대한 동작을 남겨 주세요. 변경 제안이나 PR에는 관련 화면과 검증 결과를 함께 적어 주세요.
+
+<details>
+<summary><strong>CLI와 데이터 저장 위치</strong></summary>
+
+GUI와 별도로 `winmuxctl` CLI와 `winmuxd` 데몬을 빌드할 수 있습니다. 내부 실행 파일명과 저장 키는 기존 `winmux` 식별자를 유지합니다.
 
 ```powershell
-pnpm build:portable
-```
-
-생성 위치:
-
-```text
-src-tauri/target/release/rhyme-terminal.exe
-```
-
-이 빌드는 installer 없이 실행할 수 있는 portable GUI exe를 만듭니다.
-
----
-
-## 기본 사용법
-
-### 새 터미널 만들기
-
-- `+` 버튼 클릭
-- 또는 단축키:
-
-```text
-Ctrl+N
-```
-
-`+` 옆의 드롭다운 버튼을 누르면 PowerShell, PowerShell 7, Command Prompt, WSL, Git Bash 등 다른 터미널 preset으로 새 세션을 만들 수 있습니다.
-
-### 터미널 탭 조작
-
-| 동작 | 방법 |
-|---|---|
-| 탭 선택 | 탭 클릭 |
-| 탭 이름 변경 | 탭 더블클릭 또는 우클릭 → Rename |
-| 현재 탭 닫기 | 닫기 버튼, 우클릭 → Close Current Tab, 또는 휠클릭 |
-| 다른 탭 닫기 | 우클릭 → Close Other Tabs |
-| 모든 탭 닫기 | 우클릭 → Close All Tabs |
-| 탭 순서 변경 | 탭을 좌우로 드래그 |
-| 다른 pane으로 이동 | 탭을 다른 pane 중앙으로 드래그 |
-| split하면서 이동 | 탭을 다른 pane의 위/아래/왼쪽/오른쪽 edge로 드래그 |
-
-터미널 세션을 닫을 때는 확인창이 뜹니다. 확인창에서 “다시 묻지 않기”를 선택하면 이후에는 바로 닫힙니다.
-
-### Pane 분할
-
-기본 prefix key는 `Ctrl+B`입니다.
-
-```text
-Ctrl+B %
-```
-
-가로 방향으로 pane을 나눕니다.
-
-```text
-Ctrl+B "
-```
-
-세로 방향으로 pane을 나눕니다.
-
-또는 `Ctrl+Alt+방향키`를 사용할 수 있습니다.
-
-- 해당 방향에 이웃 pane이 있으면 현재 탭을 그 pane으로 이동
-- 이웃 pane이 없으면 해당 방향으로 새 pane 생성
-
-예:
-
-```text
-Ctrl+Alt+Right
-```
-
-오른쪽 pane이 있으면 현재 탭을 오른쪽 pane으로 이동하고, 없으면 오른쪽에 새 pane을 만듭니다.
-
-### Workspace 사용
-
-왼쪽 사이드바에서 workspace를 전환합니다.
-
-- workspace 클릭: 전환
-- workspace 더블클릭: 이름 변경
-- workspace 우클릭: rename/delete 메뉴
-- `+` 버튼: 새 workspace 생성
-- `Ctrl+Shift+B`: 사이드바 표시 모드 순환
-
-Settings에서 workspace별 기본 폴더를 지정할 수 있습니다.  
-예를 들어 `frontend`, `backend`, `infra` workspace를 만들고 각각 다른 default folder를 지정하면 새 터미널이 해당 위치에서 시작합니다.
-
-### 파일 열기 예시
-
-터미널에서 파일 목록이나 빌드 로그에 나온 파일 경로를 Ctrl+클릭하면 파일 미리보기가 열립니다.
-
-예:
-
-```powershell
-ls
-```
-
-출력된 `package.json`, `src/App.vue` 같은 파일명에 마우스를 올리면 링크처럼 표시되고, Ctrl+클릭하면 viewer tab으로 열립니다.
-
-빌드 에러 로그 예:
-
-```text
-src/components/Terminal.vue:120:15
-```
-
-이런 형식도 파일 경로와 line/column 정보로 처리됩니다.
-
-### URL 열기 예시
-
-터미널 출력의 URL을 Ctrl+클릭하면 내장 browser tab으로 열립니다.
-
-```powershell
-echo https://github.com
-```
-
-### Palette 사용 예시
-
-터미널 영역에서 마우스 middle-click을 누르면 command palette가 열립니다.
-
-예를 들어 Settings → Palette에서 아래 항목을 추가할 수 있습니다.
-
-| Label | Command | Auto-run |
-|---|---|---|
-| Git status | `git status` | 켬 |
-| PNPM build | `pnpm build` | 켬 |
-| Clear | `clear` | 켬 |
-| Docker ps | `docker ps` | 켬 |
-
-Auto-run이 켜져 있으면 명령이 입력된 뒤 Enter까지 자동으로 전송됩니다.  
-꺼져 있으면 프롬프트에 붙여넣기만 됩니다.
-
----
-
-## 기본 단축키
-
-| Action | 기본 단축키 | Prefix |
-|---|---:|---:|
-| New Terminal | `Ctrl+N` | `Ctrl+B c` |
-| Close Focused Session | `Ctrl+W` | - |
-| Kill Focused Session | - | `Ctrl+B &` |
-| Rename Session | - | `Ctrl+B ,` |
-| Next Tab in Pane | - | `Ctrl+B n` |
-| Previous Tab in Pane | - | `Ctrl+B p` |
-| Split Horizontally | - | `Ctrl+B %` |
-| Split Vertically | - | `Ctrl+B "` |
-| Hide Window | - | `Ctrl+B d` |
-| Open Settings | `Ctrl+,` | - |
-| Focus Previous Session | `Ctrl+Shift+{` | - |
-| Focus Next Session | `Ctrl+Shift+}` | - |
-| Split or Move Left | `Ctrl+Alt+Left` | - |
-| Split or Move Right | `Ctrl+Alt+Right` | - |
-| Split or Move Up | `Ctrl+Alt+Up` | - |
-| Split or Move Down | `Ctrl+Alt+Down` | - |
-| Quadrant Top-Left Split | `Ctrl+Alt+I` | - |
-| Quadrant Top-Right Split | `Ctrl+Alt+O` | - |
-| Quadrant Bottom-Left Split | `Ctrl+Alt+K` | - |
-| Quadrant Bottom-Right Split | `Ctrl+Alt+L` | - |
-| Cycle Sidebar Mode | `Ctrl+Shift+B` | - |
-
-숫자 선택은 prefix와 함께 사용할 수 있습니다.
-
-```text
-Ctrl+B 0
-Ctrl+B 1
-Ctrl+B 2
-...
-```
-
-현재 pane 안에서 해당 index의 탭을 선택합니다.
-
-> 참고: Settings → Keybindings에서 일반 단축키는 변경할 수 있습니다. Prefix mapping은 현재 버전에서 고정입니다.
-
----
-
-## Settings 가이드
-
-Settings는 `Ctrl+,`로 열 수 있습니다.
-
-### Terminal
-
-새 터미널을 만들 때 사용할 기본 shell을 설정합니다.
-
-지원 preset:
-
-- Windows PowerShell: `powershell.exe`
-- PowerShell 7: `pwsh.exe`
-- Command Prompt: `cmd.exe`
-- WSL: `wsl.exe`
-- Git Bash: `C:\Program Files\Git\bin\bash.exe`
-- Custom
-
-예: Git Bash를 기본 터미널로 쓰고 싶다면:
-
-1. Settings → Terminal
-2. Global default → Preset에서 `Git Bash` 선택
-3. 이후 새 터미널은 Git Bash로 시작
-
-workspace별 override도 가능합니다.  
-예를 들어 `Windows` workspace는 PowerShell, `Linux` workspace는 WSL로 시작하게 설정할 수 있습니다.
-
-### Workspaces
-
-workspace별 기본 폴더를 설정합니다.
-
-예:
-
-| Workspace | Default folder |
-|---|---|
-| frontend | `C:\work\my-app` |
-| backend | `C:\work\my-api` |
-| scripts | `C:\work\scripts` |
-
-이렇게 설정하면 해당 workspace에서 새로 만든 터미널은 지정된 폴더에서 시작합니다.
-
-### Keybindings
-
-각 action의 단축키를 변경하거나 해제할 수 있습니다.
-
-- key cell 클릭 → 새 단축키 입력
-- Reset → 기본값으로 복구
-- Clear → 단축키 비활성화
-- Reset all → 전체 기본값 복구
-
-충돌하는 단축키가 있으면 경고가 표시됩니다.
-
-### Palette
-
-middle-click palette에 표시할 명령을 관리합니다.
-
-- Label: 메뉴에 보일 이름
-- Command: 터미널에 입력할 명령
-- Auto-run: Enter까지 자동 실행할지 여부
-- Display style: context menu 또는 radial menu
-
----
-
-## CLI와 daemon
-
-winmux는 GUI 앱과 별도로 daemon이 PTY 세션을 관리합니다.
-
-- GUI 앱: `rhyme-terminal.exe`
-- daemon: `winmuxd.exe`
-- CLI: `winmuxctl.exe`
-
-daemon은 첫 Tauri invoke 시 자동으로 실행됩니다.  
-IPC는 Windows named pipe를 사용합니다.
-
-```text
-\\.\pipe\winmux-{user}
-```
-
-### CLI 빌드
-
-CLI/daemon을 직접 빌드하려면:
-
-```powershell
-cd src-tauri
-cargo build --release --bin winmuxctl --bin winmuxd
-```
-
-생성 위치:
-
-```text
-src-tauri/target/release/winmuxctl.exe
-src-tauri/target/release/winmuxd.exe
-```
-
-### CLI 예시
-
-세션 목록:
-
-```powershell
+cargo build --manifest-path src-tauri/Cargo.toml --release --bin winmuxctl --bin winmuxd
 .\src-tauri\target\release\winmuxctl.exe ls
-```
-
-새 세션 생성:
-
-```powershell
-.\src-tauri\target\release\winmuxctl.exe new --name scratch --shell powershell.exe
-```
-
-작업 폴더를 지정해서 생성:
-
-```powershell
-.\src-tauri\target\release\winmuxctl.exe new --name repo --cwd C:\work\my-repo --shell pwsh.exe
-```
-
-Git Bash 세션 생성:
-
-```powershell
-.\src-tauri\target\release\winmuxctl.exe new `
-  --name bash `
-  --shell "C:\Program Files\Git\bin\bash.exe" `
-  --shell-arg "--login" `
-  --shell-arg "-i"
-```
-
-세션 종료:
-
-```powershell
-.\src-tauri\target\release\winmuxctl.exe kill scratch
-```
-
-세션 이름 변경:
-
-```powershell
-.\src-tauri\target\release\winmuxctl.exe rename scratch server
-```
-
-daemon ping:
-
-```powershell
 .\src-tauri\target\release\winmuxctl.exe ping
 ```
 
-daemon 종료:
+데몬은 필요할 때 자동으로 시작합니다. GUI 실행 파일은 별도 `winmuxd.exe`가 없으면 자체 데몬 모드로 실행할 수 있습니다.
 
-```powershell
-.\src-tauri\target\release\winmuxctl.exe kill-server
-```
+| 데이터 | 위치 |
+| --- | --- |
+| 작업 공간·환경설정·단축키·팔레트 | 앱 WebView의 localStorage, `winmux:{domain}:v1` |
+| 데몬 로그 | `%LOCALAPPDATA%\winmux\logs\winmuxd.log` |
+| Flow 정의·업무·실행 기록 | Tauri local-data 경로의 `flow/flow.sqlite3` |
 
----
+Flow 실행은 앱 프로세스가 살아 있는 동안 유지됩니다. 앱이 종료된 뒤 다시 시작하면 미완료 실행을 `interrupted`로 처리하며 자동 재실행하지 않습니다.
 
-## 프로젝트 구조
+</details>
 
-```text
-.
-├── src/                 # Vue 3 frontend
-│   ├── components/      # UI components
-│   ├── composables/     # 상태/동작 로직
-│   └── lib/             # keybindings, tauri bridge, persistence 등
-├── src-tauri/           # Rust/Tauri backend
-│   ├── src/bin/         # rhyme-terminald, winmuxctl
-│   ├── src/ipc/         # named-pipe IPC
-│   ├── src/pty/         # portable-pty wrapper
-│   └── src/commands.rs  # Tauri command handlers
-├── public/              # static assets
-├── dist/                # Vite build output
-├── package.json
-├── vite.config.ts
-└── tsconfig.json
-```
+<details>
+<summary><strong>실행이 잘되지 않을 때</strong></summary>
+
+- **빌드 실패** — Rust MSVC 툴체인, C++ Build Tools, Windows SDK와 WebView2 설치를 확인합니다.
+- **터미널 생성 실패** — 설정 → 터미널의 프로그램 경로와 프로젝트 기본 폴더를 확인합니다. PowerShell 7은 `pwsh.exe`, Windows PowerShell은 `powershell.exe`입니다.
+- **Git Bash 즉시 종료** — Git Bash 프리셋을 다시 선택하고 실행 인수 `--login`, `-i`를 확인합니다.
+- **WSL 실행 실패** — 일반 PowerShell에서 `wsl.exe --status`와 `wsl.exe`가 동작하는지 확인합니다.
+- **모바일 접속 실패** — 선택한 IP·포트, Tailscale 연결, Windows 방화벽을 확인합니다. 서버 재시작 후에는 새 QR로 페어링합니다.
+
+자세한 연결 절차는 [모바일 문서](docs/mobile-pairing.md), Flow 설정과 실행 조건은 [Rhyme Flow 문서](docs/rhyme-flow.md)를 참고하세요.
+
+</details>
 
 ---
 
-## 개발 명령어
-
-Frontend dev server만 실행:
-
-```powershell
-pnpm dev
-```
-
-Tauri 앱 개발 모드:
-
-```powershell
-pnpm tauri dev
-```
-
-프론트엔드 타입체크 + Vite build:
-
-```powershell
-pnpm build
-```
-
-Portable GUI exe 빌드:
-
-```powershell
-pnpm build:portable
-```
-
-Rust backend만 빌드:
-
-```powershell
-cd src-tauri
-cargo build
-```
-
----
-
-## 데이터 저장 위치
-
-프론트엔드 설정은 localStorage에 저장됩니다.
-
-주요 저장 항목:
-
-- preferences
-- workspace layout
-- keybindings
-- palette items
-
-저장 key는 아래 형식을 사용합니다.
-
-```text
-winmux:{domain}:v1
-```
-
-daemon 로그:
-
-```text
-%LOCALAPPDATA%\winmux\logs\winmuxd.log
-```
-
----
-
-## 문제 해결
-
-### 앱은 켜지는데 터미널이 생성되지 않습니다
-
-1. Settings → Terminal에서 Program 경로가 올바른지 확인하세요.
-2. Git Bash를 사용하는 경우 기본 경로는 보통 아래입니다.
-
-```text
-C:\Program Files\Git\bin\bash.exe
-```
-
-3. daemon 로그를 확인하세요.
-
-```text
-%LOCALAPPDATA%\winmux\logs\winmuxd.log
-```
-
-### Git Bash가 바로 종료됩니다
-
-Arguments가 아래처럼 설정되어 있는지 확인하세요.
-
-```text
---login
--i
-```
-
-또는 preset을 `Git Bash`로 다시 선택해 기본값을 복구하세요.
-
-### WSL이 열리지 않습니다
-
-PowerShell에서 먼저 WSL이 정상 동작하는지 확인하세요.
-
-```powershell
-wsl.exe --status
-wsl.exe
-```
-
-WSL 배포판이 설치되어 있지 않으면 Microsoft Store 또는 `wsl --install`로 설치해야 합니다.
-
-### Ctrl+클릭으로 파일이 열리지 않습니다
-
-파일 경로가 현재 터미널의 working directory 기준으로 존재해야 합니다.  
-workspace default folder나 shell의 현재 위치를 확인하세요.
-
-예:
-
-```powershell
-pwd
-ls
-```
-
-PowerShell/Git Bash/WSL preset은 prompt hook을 통해 현재 경로를 winmux에 알려주도록 구성되어 있습니다.
-
-### 빌드 시 chunk size warning이 보입니다
-
-Vite가 Monaco editor 등 큰 chunk에 대해 경고할 수 있습니다.
-
-```text
-Some chunks are larger than 500 kB after minification
-```
-
-현재는 빌드 실패가 아니라 경고입니다.
-
-### WebView2 관련 오류가 납니다
-
-Microsoft Edge WebView2 Runtime이 설치되어 있는지 확인하세요.  
-최신 Windows 10/11은 대부분 기본 포함되어 있지만, 오래된 환경에서는 별도 설치가 필요할 수 있습니다.
-
----
-
-## 설계 메모
-
-- backend mutex는 `parking_lot::Mutex`를 사용합니다.
-- PTY 출력은 Tauri event에서 base64로 전달됩니다.
-- daemon IPC는 Windows named pipe + length-prefixed frame 기반입니다.
-- 세션 이름은 workspace index prefix를 포함합니다.
-
-```text
-w{workspaceIndex}.{name}
-```
-
-예:
-
-```text
-w0.session-1
-w1.server
-```
-
-UI에서는 prefix를 제거한 이름만 보여줍니다.
-
----
-
-## 상태
-
-현재 버전은 `0.1.0`입니다.  
-아직 테스트 스위트와 CI는 구성되어 있지 않습니다.
-
+Tauri · Vue · xterm.js · Monaco Editor · Rust로 만듭니다. README 구성은 [Orca](https://github.com/stablyai/orca)의 짧은 소개와 기능별 안내를 참고했습니다.

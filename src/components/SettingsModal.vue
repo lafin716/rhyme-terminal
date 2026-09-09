@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import appIcon from "../../src-tauri/icons/32x32.png";
 import AccountEnvEditor from "./AccountEnvEditor.vue";
 import MobilePairingSettings from "./MobilePairingSettings.vue";
+import SessionMenuSettings from "./SessionMenuSettings.vue";
+import KeybindingsSettings from "./KeybindingsSettings.vue";
 import { Icon } from "@iconify/vue";
 import { sessionAgentIcon } from "../lib/session-agent-icon";
 import { t } from "../composables/useI18n";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { homeDir } from "@tauri-apps/api/path";
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
 import { useSettings } from "../composables/useSettings";
-import { useKeybindings } from "../composables/useKeybindings";
 import { useWorkspaces } from "../composables/useWorkspaces";
 import { usePrefs } from "../composables/usePrefs";
 import { useSessions } from "../composables/useSessions";
@@ -31,14 +31,6 @@ import {
 import { openOAuthLoginWindow } from "../lib/floating-login";
 import { api } from "../lib/tauri";
 import {
-  captureKeybinding,
-  formatKeybinding,
-  sameBinding,
-  type ActionDef,
-  type ActionId,
-  type Keybinding,
-} from "../lib/keybindings";
-import {
   usePalette,
   addPaletteItem,
   updatePaletteItem,
@@ -55,8 +47,8 @@ import type { PaletteUiMode } from "../lib/persistence";
 import { normalizeLocale } from "../lib/i18n";
 
 const { closeSettings } = useSettings();
-const { actions, bindingFor, prefixFor, setBinding, resetBinding, resetAll, isOverridden } =
-  useKeybindings();
+const backButton = ref<HTMLButtonElement>();
+const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 const { items: paletteItems } = usePalette();
 const { state: workspaceState, activeWorkspace, updateWorkspaceSettings } = useWorkspaces();
 const { prefs, setPref } = usePrefs();
@@ -232,185 +224,105 @@ async function chooseDefaultCwd(id: string) {
     updateWorkspaceSettings(id, { defaultCwd: selected });
   }
 }
-const capturingId = ref<ActionId | null>(null);
-
-function startCapture(id: ActionId) {
-  capturingId.value = id;
-}
-
-function cancelCapture() {
-  capturingId.value = null;
-}
-
-function onCaptureKey(ev: KeyboardEvent) {
-  if (!capturingId.value) return;
-  ev.preventDefault();
-  ev.stopPropagation();
-  if (ev.key === "Escape") {
-    capturingId.value = null;
-    return;
-  }
-  if (["Control", "Shift", "Alt", "Meta"].includes(ev.key)) return;
-  const captured = captureKeybinding(ev);
-  if (!captured) return;
-  setBinding(capturingId.value, captured);
-  capturingId.value = null;
-}
-
-function clearBinding(id: ActionId) {
-  setBinding(id, null);
-}
-
 function onEscape(ev: KeyboardEvent) {
-  if (ev.key === "Escape" && !capturingId.value) {
+  if (ev.key === "Escape" && !ev.defaultPrevented) {
     ev.stopPropagation();
     closeSettings();
   }
 }
 
-const conflicts = computed(() => {
-  const map = new Map<string, ActionId[]>();
-  for (const a of actions) {
-    const b = bindingFor(a.id as ActionId);
-    if (!b || !b.key) continue;
-    const k = JSON.stringify({
-      key: b.key.toLowerCase(),
-      c: !!b.ctrl, s: !!b.shift, a: !!b.alt, m: !!b.meta,
-    });
-    const arr = map.get(k) ?? [];
-    arr.push(a.id as ActionId);
-    map.set(k, arr);
-  }
-  const set = new Set<ActionId>();
-  for (const arr of map.values()) if (arr.length > 1) for (const id of arr) set.add(id);
-  return set;
-});
-
-// Actions grouped for the Keybindings category's 3 cards (session / pane /
-// window+settings) — presentational grouping only, same underlying data.
-const actionsByCategory = computed(() => {
-  const groups: Record<ActionDef["category"], ActionDef[]> = {
-    session: [], pane: [], window: [], settings: [],
-  };
-  for (const a of actions) groups[a.category].push(a);
-  return groups;
-});
-
-function hasConflict(id: ActionId): boolean {
-  return conflicts.value.has(id);
-}
-
-function displayBinding(id: ActionId): string {
-  if (capturingId.value === id) return t("Press a key... (Esc to cancel)");
-  const b = bindingFor(id);
-  return t(formatKeybinding(b, prefixFor(id)));
-}
-
-function isUnbound(b: Keybinding): boolean {
-  return !b || !b.key;
-}
-
 onMounted(() => {
-  window.addEventListener("keydown", onCaptureKey, true);
+  void nextTick(() => backButton.value?.focus());
   window.addEventListener("keydown", onEscape);
   homeDir()
     .then((dir) => { homeDirPath.value = dir; })
     .catch((error) => console.warn("Failed to resolve home directory", error));
 });
 onUnmounted(() => {
-  window.removeEventListener("keydown", onCaptureKey, true);
+  void nextTick(() => {
+    if (previousFocus?.isConnected) previousFocus.focus();
+  });
   window.removeEventListener("keydown", onEscape);
 });
 
-// reference sameBinding so unused-import isn't flagged after a refactor
-void sameBinding;
 </script>
 
 <template>
   <div class="settings-shell">
-    <header class="topbar">
-      <div class="topbar-left">
-        <div class="app-icon">
-          <img :src="appIcon" alt="rhyme-terminal" />
-        </div>
-        <div class="title-block">
-          <div class="title">{{ t("Settings") }}</div>
-          <div class="subtitle">{{ t("rhyme-terminal configuration") }}</div>
-        </div>
-      </div>
-      <div class="topbar-right">
-        <span class="esc-hint">Esc</span>
-        <button class="close" :aria-label="t('Close')" @click="closeSettings">&times;</button>
-      </div>
-    </header>
-
     <div class="body">
-      <aside class="nav">
-        <button
-          type="button"
-          :class="['nav-item', 'language-nav', { active: activeCategory === 'language' }]"
-          @click="activeCategory = 'language'"
-        >
-          <div class="nav-icon" aria-hidden="true">文</div>
-          <div class="nav-text">
-            <div class="nav-label">{{ t('Language') }}</div>
-            <div class="nav-desc">{{ t('App display language') }}</div>
-          </div>
+      <aside class="settings-sidebar">
+        <button ref="backButton" type="button" class="back-to-app" @click="closeSettings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 5-7 7 7 7M5 12h14" /></svg>
+          <span>{{ t('Back to app') }}</span>
         </button>
-        <button type="button"
-          :class="['nav-item', { active: activeCategory === 'terminal' }]"
-          @click="activeCategory = 'terminal'"
-        >
-          <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M6.5 8l3 2.2-3 2.2"/><path d="M11 12.4h3"/></svg></div>
-          <div class="nav-text">
-            <div class="nav-label">{{ t("Terminal") }}</div>
-            <div class="nav-desc">{{ t("Shell & workspace overrides") }}</div>
-          </div>
-        </button>
-        <button type="button"
-          :class="['nav-item', { active: activeCategory === 'accounts' }]"
-          @click="activeCategory = 'accounts'"
-        >
-          <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="7.2" r="3"/><path d="M4.2 16.5c0-3.2 2.6-5.2 5.8-5.2s5.8 2 5.8 5.2"/></svg></div>
-          <div class="nav-text">
-            <div class="nav-label">{{ t("Accounts") }}</div>
-            <div class="nav-desc">{{ t("Multi-account CLI logins") }}</div>
-          </div>
-        </button>
-        <button type="button"
-          :class="['nav-item', { active: activeCategory === 'workspaces' }]"
-          @click="activeCategory = 'workspaces'"
-        >
-          <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.8c0-.7.6-1.3 1.3-1.3H8l1.6 2h6.6c.7 0 1.3.6 1.3 1.3v6.9c0 .7-.6 1.3-1.3 1.3H3.8c-.7 0-1.3-.6-1.3-1.3z"/></svg></div>
-          <div class="nav-text">
-            <div class="nav-label">{{ t("Workspaces") }}</div>
-            <div class="nav-desc">{{ t("Per-workspace default folder") }}</div>
-          </div>
-        </button>
-        <button type="button"
-          :class="['nav-item', { active: activeCategory === 'keybindings' }]"
-          @click="activeCategory = 'keybindings'"
-        >
-          <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="5.5" width="15.6" height="10" rx="1.8"/><path d="M5.8 12h8.4"/><circle cx="5.6" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="8.4" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="11.2" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="14" cy="8.6" r="0.35" fill="currentColor" stroke="none"/></svg></div>
-          <div class="nav-text">
-            <div class="nav-label">{{ t("Keybindings") }}</div>
-            <div class="nav-desc">{{ t("Shortcuts & prefix keys") }}</div>
-          </div>
-        </button>
-        <button type="button"
-          :class="['nav-item', { active: activeCategory === 'palette' }]"
-          @click="activeCategory = 'palette'"
-        >
-          <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="9.5" height="9.5" rx="2"/><rect x="7" y="7" width="9.5" height="9.5" rx="2"/></svg></div>
-          <div class="nav-text">
-            <div class="nav-label">{{ t("Palette") }}</div>
-            <div class="nav-desc">{{ t("Quick command menu") }}</div>
-          </div>
-        </button>
-        <button type="button" :class="['nav-item', { active: activeCategory === 'mobile' }]" @click="activeCategory = 'mobile'">
-          <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="2" width="10" height="16" rx="2"/><path d="M8 15h4"/></svg></div>
-          <div class="nav-text"><div class="nav-label">{{ t('Mobile connection') }}</div><div class="nav-desc">{{ t('Pair a phone over Tailscale') }}</div></div>
-        </button>
+        <h1 class="sidebar-title">{{ t('Settings') }}</h1>
+        <nav class="nav" :aria-label="t('Settings')">
+          <button
+            type="button"
+            :class="['nav-item', 'language-nav', { active: activeCategory === 'language' }]"
+            @click="activeCategory = 'language'"
+          >
+            <div class="nav-icon" aria-hidden="true">文</div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t('Language') }}</div>
+              <div class="nav-desc">{{ t('App display language') }}</div>
+            </div>
+          </button>
+          <button type="button"
+            :class="['nav-item', { active: activeCategory === 'terminal' }]"
+            @click="activeCategory = 'terminal'"
+          >
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M6.5 8l3 2.2-3 2.2"/><path d="M11 12.4h3"/></svg></div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t("Terminal") }}</div>
+              <div class="nav-desc">{{ t("Shell & workspace overrides") }}</div>
+            </div>
+          </button>
+          <button type="button"
+            :class="['nav-item', { active: activeCategory === 'accounts' }]"
+            @click="activeCategory = 'accounts'"
+          >
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="7.2" r="3"/><path d="M4.2 16.5c0-3.2 2.6-5.2 5.8-5.2s5.8 2 5.8 5.2"/></svg></div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t("Providers") }}</div>
+              <div class="nav-desc">{{ t("Multi-account CLI logins") }}</div>
+            </div>
+          </button>
+          <button type="button"
+            :class="['nav-item', { active: activeCategory === 'workspaces' }]"
+            @click="activeCategory = 'workspaces'"
+          >
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 5.8c0-.7.6-1.3 1.3-1.3H8l1.6 2h6.6c.7 0 1.3.6 1.3 1.3v6.9c0 .7-.6 1.3-1.3 1.3H3.8c-.7 0-1.3-.6-1.3-1.3z"/></svg></div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t("Workspaces") }}</div>
+              <div class="nav-desc">{{ t("Per-workspace default folder") }}</div>
+            </div>
+          </button>
+          <button type="button"
+            :class="['nav-item', { active: activeCategory === 'keybindings' }]"
+            @click="activeCategory = 'keybindings'"
+          >
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="5.5" width="15.6" height="10" rx="1.8"/><path d="M5.8 12h8.4"/><circle cx="5.6" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="8.4" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="11.2" cy="8.6" r="0.35" fill="currentColor" stroke="none"/><circle cx="14" cy="8.6" r="0.35" fill="currentColor" stroke="none"/></svg></div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t("Keybindings") }}</div>
+              <div class="nav-desc">{{ t("Shortcuts & prefix keys") }}</div>
+            </div>
+          </button>
+          <button type="button"
+            :class="['nav-item', { active: activeCategory === 'palette' }]"
+            @click="activeCategory = 'palette'"
+          >
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="3.5" width="9.5" height="9.5" rx="2"/><rect x="7" y="7" width="9.5" height="9.5" rx="2"/></svg></div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t("Palette") }}</div>
+              <div class="nav-desc">{{ t("Quick command menu") }}</div>
+            </div>
+          </button>
+          <button type="button" :class="['nav-item', { active: activeCategory === 'mobile' }]" @click="activeCategory = 'mobile'">
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="2" width="10" height="16" rx="2"/><path d="M8 15h4"/></svg></div>
+            <div class="nav-text"><div class="nav-label">{{ t('Mobile connection') }}</div><div class="nav-desc">{{ t('Pair a phone over Tailscale') }}</div></div>
+          </button>
+        </nav>
       </aside>
 
       <main class="content">
@@ -506,6 +418,7 @@ void sameBinding;
               </label>
               <div class="panel-hint">{{ t("Show profile tags in the session list and tabs.") }}</div>
             </div>
+            <SessionMenuSettings />
             <div class="section-title">{{ t("Workspace overrides") }}</div>
             <div class="grid-3">
               <div v-for="ws in workspaceState.workspaces" :key="ws.id" class="card">
@@ -558,7 +471,7 @@ void sameBinding;
           <template v-else-if="activeCategory === 'accounts'">
             <div class="panel-header">
               <div>
-                <div class="panel-title">{{ t("Accounts") }}</div>
+                <div class="panel-title">{{ t("Providers") }}</div>
                 <div class="panel-hint"> {{ t("Each profile keeps an isolated login for that CLI, so you can stay signed in to more than one account at once. \"New session\" opens a terminal already pointed at that profile and runs the CLI for you. Pick a default with the radio button — new terminals use it automatically. \"System\" is the CLI's own login (e.g. from running") }} <code>claude login</code>{{ t("in a plain terminal) and stays the default until you add a profile of your own.") }}</div>
               </div>
             </div>
@@ -703,153 +616,7 @@ void sameBinding;
           </template>
 
           <template v-else-if="activeCategory === 'keybindings'">
-            <div class="panel-header">
-              <div>
-                <div class="panel-title">{{ t("Keybindings") }}</div>
-                <div class="panel-hint"> {{ t("Click on a key cell to record a new shortcut. Prefix shortcuts (Ctrl+B …) are fixed in this version.") }} </div>
-              </div>
-              <div class="panel-actions">
-                <button class="btn" @click="resetAll">
-                  <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>{{ t("Reset all") }}</button>
-              </div>
-            </div>
-
-            <div v-if="conflicts.size > 0" class="warn"> {{ t("⚠ Conflicting shortcuts detected. Only one action will be triggered per keystroke.") }} </div>
-
-            <div class="grid-3">
-              <div class="kb-card">
-                <div class="kb-card-title">
-                  <span class="kb-card-name">{{ t("Session") }}</span>
-                  <span class="kb-count">{{ actionsByCategory.session.length }}</span>
-                </div>
-                <div
-                  v-for="a in actionsByCategory.session"
-                  :key="a.id"
-                  :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
-                >
-                  <span class="kb-label">{{ t(a.label) }}</span>
-                  <button type="button"
-                    :class="['key-cell', {
-                      capturing: capturingId === a.id,
-                      unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
-                    }]"
-                    :title="t('Click to record • Right-click to clear')"
-                    @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
-                    @contextmenu.prevent="clearBinding(a.id as ActionId)"
-                  >
-                    {{ displayBinding(a.id as ActionId) }}
-                  </button>
-                  <button
-                    class="btn icon-only"
-                    :disabled="!isOverridden(a.id as ActionId)"
-                    @click="resetBinding(a.id as ActionId)"
-                    :title="t('Reset to default')"
-                  >
-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
-                  </button>
-                </div>
-              </div>
-
-              <div class="kb-card">
-                <div class="kb-card-title">
-                  <span class="kb-card-name">{{ t("Pane") }}</span>
-                  <span class="kb-count">{{ actionsByCategory.pane.length }}</span>
-                </div>
-                <div
-                  v-for="a in actionsByCategory.pane"
-                  :key="a.id"
-                  :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
-                >
-                  <span class="kb-label">{{ t(a.label) }}</span>
-                  <button type="button"
-                    :class="['key-cell', {
-                      capturing: capturingId === a.id,
-                      unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
-                    }]"
-                    :title="t('Click to record • Right-click to clear')"
-                    @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
-                    @contextmenu.prevent="clearBinding(a.id as ActionId)"
-                  >
-                    {{ displayBinding(a.id as ActionId) }}
-                  </button>
-                  <button
-                    class="btn icon-only"
-                    :disabled="!isOverridden(a.id as ActionId)"
-                    @click="resetBinding(a.id as ActionId)"
-                    :title="t('Reset to default')"
-                  >
-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
-                  </button>
-                </div>
-              </div>
-
-              <div class="col-stack">
-                <div class="kb-card">
-                  <div class="kb-card-title">
-                    <span class="kb-card-name">{{ t("Window") }}</span>
-                    <span class="kb-count">{{ actionsByCategory.window.length }}</span>
-                  </div>
-                  <div
-                    v-for="a in actionsByCategory.window"
-                    :key="a.id"
-                    :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
-                  >
-                    <span class="kb-label">{{ t(a.label) }}</span>
-                    <button type="button"
-                      :class="['key-cell', {
-                        capturing: capturingId === a.id,
-                        unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
-                      }]"
-                      :title="t('Click to record • Right-click to clear')"
-                      @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
-                      @contextmenu.prevent="clearBinding(a.id as ActionId)"
-                    >
-                      {{ displayBinding(a.id as ActionId) }}
-                    </button>
-                    <button
-                      class="btn icon-only"
-                      :disabled="!isOverridden(a.id as ActionId)"
-                      @click="resetBinding(a.id as ActionId)"
-                      :title="t('Reset to default')"
-                    >
-                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
-                    </button>
-                  </div>
-                </div>
-                <div class="kb-card">
-                  <div class="kb-card-title">
-                    <span class="kb-card-name">{{ t("Settings") }}</span>
-                    <span class="kb-count">{{ actionsByCategory.settings.length }}</span>
-                  </div>
-                  <div
-                    v-for="a in actionsByCategory.settings"
-                    :key="a.id"
-                    :class="['kb-row', { conflict: hasConflict(a.id as ActionId) }]"
-                  >
-                    <span class="kb-label">{{ t(a.label) }}</span>
-                    <button type="button"
-                      :class="['key-cell', {
-                        capturing: capturingId === a.id,
-                        unbound: isUnbound(bindingFor(a.id as ActionId)) && !prefixFor(a.id as ActionId),
-                      }]"
-                      :title="t('Click to record • Right-click to clear')"
-                      @click="capturingId === a.id ? cancelCapture() : startCapture(a.id as ActionId)"
-                      @contextmenu.prevent="clearBinding(a.id as ActionId)"
-                    >
-                      {{ displayBinding(a.id as ActionId) }}
-                    </button>
-                    <button
-                      class="btn icon-only"
-                      :disabled="!isOverridden(a.id as ActionId)"
-                      @click="resetBinding(a.id as ActionId)"
-                      :title="t('Reset to default')"
-                    >
-                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 8.2A6 6 0 1 1 5.7 14"/><path d="M4.2 4.2v4.3h4.3"/></svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <KeybindingsSettings />
           </template>
 
           <template v-else-if="activeCategory === 'palette'">
@@ -938,7 +705,7 @@ void sameBinding;
 .settings-shell :is(button, input, select, .key-cell):focus-visible { outline: 2px solid #4ec9b0; outline-offset: 2px; }
 .settings-shell {
   position: fixed;
-  inset: 0;
+  inset: var(--titlebar-height, 36px) 0 0;
   z-index: 1000;
   background: #1e1e1e;
   color: #d4d4d4;
@@ -949,64 +716,39 @@ void sameBinding;
   flex-direction: column;
 }
 
-/* Topbar */
-.topbar {
-  flex: 0 0 72px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 32px;
-  border-bottom: 1px solid #111111;
-}
-.topbar-left { display: flex; align-items: center; gap: 14px; }
-.app-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: #202020;
-  border: 1px solid #2a2a2a;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #4ec9b0;
-}
-.app-icon img { width: 24px; height: 24px; object-fit: contain; }
-.title-block { display: flex; flex-direction: column; gap: 2px; }
-.title { font-size: 17px; font-weight: 600; color: #e6e6e6; letter-spacing: -0.01em; }
-.subtitle { font-size: 12px; color: #888888; }
-.topbar-right { display: flex; align-items: center; gap: 14px; }
-.esc-hint {
-  font-size: 11px;
-  color: #777777;
-  border: 1px solid #2a2a2a;
-  border-radius: 4px;
-  padding: 3px 7px;
-  font-family: Consolas, "Cascadia Mono", monospace;
-}
-.close {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: transparent;
-  border: none;
-  color: #aaaaaa;
-  font-size: 22px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 1;
-}
-.close:hover { background: #202020; color: #e6e6e6; }
-
-/* Body: nav + content */
+/* Body: project-style sidebar and settings content */
 .body { flex: 1; display: flex; min-height: 0; }
-.nav {
-  width: 224px;
-  flex: 0 0 224px;
+.settings-sidebar {
+  width: 280px;
+  flex: 0 0 280px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: #1b1b1b;
   border-right: 1px solid #111111;
-  padding: 20px 12px;
+}
+.back-to-app {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  margin: 12px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #d4d4d4;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.back-to-app:hover { background: #282828; color: #fff; }
+.back-to-app svg { flex-shrink: 0; }
+.sidebar-title { margin: 6px 26px 14px; color: #aaa; font-size: 13px; font-weight: 600; }
+.nav {
+  min-height: 0;
+  padding: 0 12px 20px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1315,8 +1057,10 @@ void sameBinding;
 }
 
 @media (max-width: 760px) {
-  .topbar { flex-basis: 64px; padding: 0 16px; }
   .body { flex-direction: column; }
+  .settings-sidebar { width: 100%; flex: 0 0 auto; border-right: 0; }
+  .back-to-app { align-self: flex-start; margin: 8px 12px 0; }
+  .sidebar-title { margin: 8px 24px; }
   .nav { width: 100%; flex: 0 0 auto; flex-direction: row; padding: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid #333333; }
   .nav-item { width: auto; flex-shrink: 0; padding: 10px 12px; gap: 8px; }
   .nav-desc { display: none; }

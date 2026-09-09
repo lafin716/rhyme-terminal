@@ -1,0 +1,57 @@
+{
+  "initial": {
+    "noWorkModeTabs": true,
+    "flowBeforeAdd": true,
+    "terminalHtml": "<div data-v-1e6a1b43=\"\" data-v-e03bf96a=\"\" class=\"term-host\"><div dir=\"ltr\" class=\"terminal xterm\"><div class=\"xterm-viewport\" style=\"background-color: rgb(30, 30, 30);\"><div class=\"xterm-scroll-area\" style=\"height: 900px;\"></div></div><div class=\"xterm-screen\" style=\"width: 1204px; height: 900px;\"><div class=\"xterm-helpers\"><textarea class=\"xterm-helper-textarea\" aria-label=\"Terminal input\" aria-multiline=\"false\" autocorrect=\"off\" autocapitalize=\"off\" spellcheck=\"false\" tabindex=\"0\" style=\"left: 126px; top: 0px; width: 7px; height: 15px; line-height: 15px; z-index: -5;\"></textarea><div class=\"composition-view\"></div></div><div class=\"xterm-decoration-container\"></div><canvas class=\"xterm-link-layer\" width=\"1204\" height=\"900\" style=\"z-index: 2; width: 1204px; height: 900px;\"></canvas><canvas width=\"1204\" height=\"900\" style=\"width: 1204px; height: 900px;\"></canvas></div><canvas width=\"32\" height=\"23\" style=\"display: none;\"></canvas></div></div><!--v-if--><!--v-if--><!--v-if--><!--v-if-->"
+  },
+  "flowOpen": {
+    "visible": true,
+    "terminalPreserved": true
+  },
+  "flowClosed": true,
+  "editorBlank": true,
+  "cancel": {
+    "writeCount": 0,
+    "text": "QA note content"
+  },
+  "saved": {
+    "calls": [
+      {
+        "command": "plugin:dialog|save",
+        "args": {
+          "options": {
+            "title": "파일 저장",
+            "defaultPath": "C:\\qa-project\\Untitled.txt"
+          }
+        }
+      },
+      {
+        "command": "plugin:dialog|save",
+        "args": {
+          "options": {
+            "title": "파일 저장",
+            "defaultPath": "C:\\qa-project\\Untitled.txt"
+          }
+        }
+      },
+      {
+        "command": "write_file",
+        "args": {
+          "path": "C:\\qa-project\\qa-note.txt",
+          "contents": "QA note content"
+        }
+      }
+    ],
+    "title": "C:\\qa-project\\qa-note.txt",
+    "body": "QA Project\nqa\n설정\nqa\n×\n▤\nqa-note.txt\n×\n+\n▾\nC:\\qa-project\\qa-note.txt\n저장\n찾기\nplaintext · 15 바이트\n1\nQA note content\n[rhyme-terminal]\nQA Project\nClaude\n—%\n!\nCodex\n—%\n!\n오전 09:54"
+  },
+  "narrowEditor": {
+    "width": 800,
+    "scrollWidth": 800
+  },
+  "narrowFlow": {
+    "width": 800,
+    "scrollWidth": 800
+  },
+  "errors": []
+}

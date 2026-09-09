@@ -5,7 +5,7 @@ import { profilesForAgent } from '../composables/useAccountProfiles';
 import { canConnect, flowId, newFlow, newNode, removeFlowNode, type Flow, type FlowCatalog, type FlowEdge, type FlowNode, type FlowRun, type FlowTask, type NodeKind, type Worker } from '../lib/flow-types';
 
 const props = defineProps<{ project: string; projectId: string; active: boolean }>();
-const tab = ref<'designer' | 'workers' | 'tasks' | 'runs'>('designer');
+const tab = defineModel<'designer' | 'workers' | 'tasks' | 'runs'>('tab', { default: 'designer' });
 const catalog = ref<FlowCatalog>({ workers: [], flows: [], tasks: [], runs: [] });
 const flow = ref<Flow>(newFlow());
 const selected = ref(flow.value.nodes[0].id);
@@ -148,7 +148,6 @@ onUnmounted(() => { disposed = true; if (timer) clearInterval(timer); });
 <template>
   <section class="flow-panel" aria-label="Rhyme Flow">
     <header class="flow-header"><div><strong>Rhyme Flow</strong><small>로컬 워커 · 업무 자동화</small></div><span class="project" :title="project">{{ project || '프로젝트 폴더 설정 필요' }}</span><select v-model="profileId" aria-label="Codex 프로필"><option value="">기본 Codex 프로필</option><option v-for="p in profiles" :key="p.id" :value="p.id">{{ p.label }}</option></select></header>
-    <nav><button v-for="item in (['designer', 'workers', 'tasks', 'runs'] as const)" :key="item" :class="{ active: tab === item }" @click="tab = item">{{ { designer: 'Flow 디자이너', workers: '워커', tasks: '프로젝트 채팅', runs: '실행 기록' }[item] }}</button></nav>
     <div v-if="error" class="banner error" role="alert">{{ error }}<button @click="error = ''">닫기</button></div>
     <div v-if="notice" class="banner" role="status">{{ notice }}</div>
     <div v-if="!project" class="banner">프로젝트의 루트 폴더를 설정하면 관리형 실행과 프로젝트 채팅을 사용할 수 있습니다.</div>

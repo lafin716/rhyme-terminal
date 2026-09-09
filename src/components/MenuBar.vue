@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { t } from "../composables/useI18n";
 import appIcon from "../../src-tauri/icons/32x32.png";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Icon } from "@iconify/vue";
 import { useKeybindings } from "../composables/useKeybindings";
@@ -28,6 +28,8 @@ interface MenuDef {
   items: MenuItem[];
 }
 
+const props = withDefaults(defineProps<{ hideActions?: boolean }>(), { hideActions: false });
+watch(() => props.hideActions, (hidden) => { if (hidden) closeMenu(); });
 const { bindingFor, prefixFor } = useKeybindings();
 const { openSettings } = useSettings();
 const { panels, toggleLeft } = useShellPanels();
@@ -134,7 +136,7 @@ function runItem(item: MenuItem) {
 
 function shortcutLabel(item: MenuItem): string {
   if (item.kind === "action") {
-    return formatKeybinding(bindingFor(item.actionId), prefixFor(item.actionId));
+    return formatKeybinding(bindingFor(item.actionId), prefixFor(item.actionId), bindingFor("prefix.activate"));
   }
   if (item.kind === "cmd" && item.shortcut) return item.shortcut;
   return "";
@@ -165,7 +167,7 @@ onUnmounted(() => {
 <template>
   <div ref="rootRef" class="menubar" data-tauri-drag-region>
     <div class="app-icon" data-tauri-drag-region><img :src="appIcon" alt="rhyme-terminal" data-tauri-drag-region draggable="false" /></div>
-    <div class="overflow-menu">
+    <div v-if="!hideActions" class="overflow-menu">
       <button
         class="corner-toggle"
         :class="{ active: isOverflowMenuOpen }"
@@ -220,6 +222,7 @@ onUnmounted(() => {
     </div>
     <div class="spacer" data-tauri-drag-region />
     <button
+      v-if="!hideActions"
       class="corner-toggle"
       :class="{ active: panels.left.open }"
       :title="leftToggleTitle"

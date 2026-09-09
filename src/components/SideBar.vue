@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { t } from "../composables/useI18n";
-import { ref, computed } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Icon } from "@iconify/vue";
 import SessionProfileTag from "./SessionProfileTag.vue";
 import { useWorkspaces, workspaceDefaultCwd } from "../composables/useWorkspaces";
 import { useSessions } from "../composables/useSessions";
 import { useResources } from "../composables/useResources";
 import { useFocus } from "../composables/useFocus";
+import { useFlowPage } from "../composables/useFlowPage";
 import { useSettings } from "../composables/useSettings";
+import { useConfirm } from "../composables/useConfirm";
+import { displayName } from "../lib/session-names";
 import {
   collectAllSessionIds,
   addTabToLeaf,
@@ -37,9 +40,12 @@ const {
   agentTaskStatus,
   createForWorkspace,
   kill,
+  rename,
 } = useSessions();
+const { confirm: confirmSessionDelete } = useConfirm();
 const { setFocusedLeaf } = useFocus();
 const { openSettings } = useSettings();
+const { openFlow } = useFlowPage();
 const resources = useResources();
 
 // Grouped Workspace -> Session tree the Navigator renders. Derivation and its
@@ -60,6 +66,41 @@ const editingId = ref<string | null>(null);
 const editValue = ref("");
 const menuFor = ref<string | null>(null);
 const menuPos = ref({ x: 0, y: 0 });
+const menuKind = ref<"workspace" | "session">("workspace");
+const menuRef = ref<HTMLElement | null>(null);
+const editingSessionId = ref<string | null>(null);
+const sessionEditValue = ref("");
+
+async function startSessionRename(id: string) {
+  closeMenu();
+  const session = sessState.sessions.find(s => s.id === id);
+  if (!session) return;
+  editingSessionId.value = id;
+  sessionEditValue.value = displayName(session.name);
+  await nextTick();
+  const input = document.querySelector<HTMLInputElement>(".session-rename-input");
+  input?.focus();
+  input?.select();
+}
+
+async function commitSessionRename() {
+  const id = editingSessionId.value;
+  const name = sessionEditValue.value.trim();
+  editingSessionId.value = null;
+  if (id && name) await rename(id, name);
+}
+
+async function removeSession(id: string) {
+  closeMenu();
+  const session = sessState.sessions.find(s => s.id === id);
+  if (!session) return;
+  const ok = await confirmSessionDelete({
+    message: t('Kill session "{name}"?', { name: displayName(session.name) }),
+    confirmLabel: t("Kill"),
+    rememberKey: "skipKillSessionConfirm",
+  });
+  if (ok && sessState.sessions.some(s => s.id === id)) await kill(id);
+}
 
 const draggedSession = ref<{ workspaceId: string; sessionId: string } | null>(null);
 const sessionDrop = ref<{ workspaceId: string; sessionId: string; after: boolean } | null>(null);
@@ -178,10 +219,18 @@ async function removeWorkspace(id: string) {
   deleteWorkspace(id);
 }
 
-function openContextMenu(ev: MouseEvent, id: string) {
+async function openContextMenu(ev: MouseEvent, id: string, kind: "workspace" | "session" = "workspace") {
   ev.preventDefault();
+  ev.stopPropagation();
+  menuKind.value = kind;
   menuFor.value = id;
   menuPos.value = { x: ev.clientX, y: ev.clientY };
+  await nextTick();
+  const rect = menuRef.value?.getBoundingClientRect();
+  if (rect) menuPos.value = {
+    x: Math.max(8, Math.min(ev.clientX, window.innerWidth - rect.width - 8)),
+    y: Math.max(8, Math.min(ev.clientY, window.innerHeight - rect.height - 8)),
+  };
 }
 
 function closeMenu() {
@@ -189,6 +238,23 @@ function closeMenu() {
 }
 
 const canDelete = computed(() => state.workspaces.length > 1);
+
+function onOutsidePointerDown(ev: PointerEvent) {
+  if (!menuRef.value?.contains(ev.target as Node)) closeMenu();
+}
+function onMenuKeydown(ev: KeyboardEvent) {
+  if (ev.key === "Escape") closeMenu();
+}
+onMounted(() => {
+  document.addEventListener("pointerdown", onOutsidePointerDown);
+  document.addEventListener("keydown", onMenuKeydown);
+  window.addEventListener("resize", closeMenu);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onOutsidePointerDown);
+  document.removeEventListener("keydown", onMenuKeydown);
+  window.removeEventListener("resize", closeMenu);
+});
 
 </script>
 
@@ -222,6 +288,19 @@ const canDelete = computed(() => state.workspaces.length > 1);
             <Icon class="ws-icon" :icon="folderIcon" />
             <span class="ws-name">{{ ws.name }}</span>
             <button
+              class="open-flow"
+              :title="ws.name + ' - Rhyme Flow'"
+              :aria-label="ws.name + ' - Rhyme Flow'"
+              @click.stop="openFlow(ws.id)"
+              @dblclick.stop
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <rect x="3" y="3" width="6" height="6" rx="1.5" />
+                <rect x="15" y="15" width="6" height="6" rx="1.5" />
+                <path d="M6 9v6a3 3 0 0 0 3 3h6M9 6h6a3 3 0 0 1 3 3v6" />
+              </svg>
+            </button>
+            <button
               class="add-terminal"
               :title="t('Add terminal to {name}', { name: ws.name })"
               @click.stop="addTerminal(ws.id)"
@@ -236,13 +315,14 @@ const canDelete = computed(() => state.workspaces.length > 1);
             :key="s.id"
             :class="['session', sessionDropClass(ws.id, s.id), { focused: s.isFocusedSession }]"
             :title="s.displayName"
-            draggable="true"
+            :draggable="editingSessionId !== s.id"
             @dragstart="startSessionDrag($event, ws.id, s.id)"
             @dragend="endSessionDrag"
             @dragover.stop="overSession($event, ws.id, s.id)"
             @dragleave="sessionDrop = null"
             @drop.stop="dropSession($event, ws.id, s.id)"
             @click.stop="focusSession(ws.id, s.id)"
+            @contextmenu="openContextMenu($event, s.id, 'session')"
           >
             <span
               :class="['agent-status', sessionIndicatorClass(s.agentStatus)]"
@@ -253,7 +333,19 @@ const canDelete = computed(() => state.workspaces.length > 1);
               :icon="sessionAgentIcon(s.agent)"
             />
             <SessionProfileTag :session-id="s.id" />
-            <span class="s-name">{{ s.displayName }}</span>
+            <input
+              v-if="editingSessionId === s.id"
+              v-model="sessionEditValue"
+              class="session-rename-input"
+              :aria-label="t('Rename')"
+              @blur="commitSessionRename"
+              @keydown.enter.prevent.stop="!$event.isComposing && commitSessionRename()"
+              @keydown.escape.prevent.stop="editingSessionId = null"
+              @keydown.stop
+              @click.stop
+              @contextmenu.stop
+            />
+            <span v-else class="s-name">{{ s.displayName }}</span>
             <Icon
               v-if="s.hasBell"
               class="s-badge bell"
@@ -283,16 +375,19 @@ const canDelete = computed(() => state.workspaces.length > 1);
     </div>
     <div
       v-if="menuFor"
+      ref="menuRef"
       class="menu"
+      role="menu"
       :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
       @click.stop
     >
-      <div class="menu-item" @click="startRename(menuFor)">{{ t("Rename") }}</div>
-      <div
+      <button class="menu-item" role="menuitem" @click="menuKind === 'session' ? startSessionRename(menuFor) : startRename(menuFor)">{{ t("Rename") }}</button>
+      <button
         class="menu-item"
-        :class="{ disabled: !canDelete }"
-        @click="canDelete && removeWorkspace(menuFor)"
-      >{{ t("Delete") }}</div>
+        role="menuitem"
+        :disabled="menuKind === 'workspace' && !canDelete"
+        @click="menuKind === 'session' ? removeSession(menuFor) : removeWorkspace(menuFor)"
+      >{{ t("Delete") }}</button>
     </div>
   </aside>
 </template>
@@ -437,6 +532,7 @@ input {
   font-size: 15px;
   opacity: 0.85;
 }
+.open-flow,
 .add-terminal {
   display: inline-flex;
   align-items: center;
@@ -451,10 +547,12 @@ input {
   cursor: pointer;
   flex-shrink: 0;
 }
+.open-flow:hover,
 .add-terminal:hover {
   background: #3a3a3a;
   color: #e6e6e6;
 }
+.open-flow:focus-visible, .add-terminal:focus-visible { outline: 2px solid #4ec9b0; outline-offset: 1px; }
 .add-terminal :deep(svg) {
   font-size: 16px;
 }
@@ -547,14 +645,32 @@ input {
   font-size: 12px;
 }
 .menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
   padding: 6px 12px;
   color: #d4d4d4;
   cursor: pointer;
 }
 .menu-item:hover { background: #2e2e2e; }
-.menu-item.disabled {
+.menu-item:disabled {
   color: #555;
   cursor: not-allowed;
 }
-.menu-item.disabled:hover { background: transparent; }
+.menu-item:disabled:hover { background: transparent; }
+.session-rename-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: #1e1e1e;
+  color: inherit;
+  border: 1px solid #4ec9b0;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font: inherit;
+  outline: none;
+}
 </style>
