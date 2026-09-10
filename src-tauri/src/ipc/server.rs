@@ -344,9 +344,6 @@ async fn dispatch(
             Ok(json!(null))
         }
         Method::WriteSession { id, data } => {
-            if state.routing.blocked.lock().contains(&id) {
-                return Err(anyhow!("루프 그룹이 전환 또는 일시정지 중입니다"));
-            }
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
                 .map_err(|e| anyhow!("invalid base64: {e}"))?;

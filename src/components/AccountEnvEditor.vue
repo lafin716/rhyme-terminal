@@ -68,14 +68,14 @@ p { margin: 0; color: #aaa; line-height: 1.6; }
 button { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 5px; padding: 6px 9px; cursor: pointer; font: inherit; }
 button:hover:not(:disabled) { background: #383838; }
 button:disabled { opacity: .4; cursor: default; }
-button:focus-visible, summary:focus-visible, input:focus { outline: 1px solid #4ec9b0; outline-offset: 2px; }
+button:focus-visible, summary:focus-visible, input:focus { outline: 1px solid var(--accent); outline-offset: 2px; }
 .presets button { font: 11px Consolas, monospace; }
 .env-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 label { display: grid; gap: 5px; color: #aaa; min-width: 0; }
 input { box-sizing: border-box; width: 100%; min-width: 0; padding: 9px; background: #252525; border: 1px solid #444; border-radius: 5px; color: #e6e6e6; font: 12px Consolas, monospace; }
 .row-tools { grid-column: 1 / -1; justify-content: flex-end; }
 .spacer { flex: 1; }
-.save { color: #4ec9b0; border-color: #4ec9b0; }
+.save { color: var(--accent); border-color: var(--accent); }
 .error { color: #f48771; }
 .storage-note { font-size: 11px; color: #999; }
 </style>

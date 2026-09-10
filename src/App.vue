@@ -529,6 +529,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style>
+/*
+ * Accent fallbacks. `startAccentThemeSync` (main.ts) overwrites these on the
+ * document root from the saved theme; keeping the defaults here means the
+ * shell still paints correctly if styles land before that first write.
+ */
+:root {
+  --accent: #5a9bff;
+  --accent-strong: #82b4ff;
+  --accent-soft: rgba(90, 155, 255, 0.12);
+  --accent-softer: rgba(90, 155, 255, 0.22);
+  --accent-border: rgba(90, 155, 255, 0.32);
+  --accent-on: #151a20;
+}
 html, body, #app {
   margin: 0;
   height: 100vh;
@@ -583,7 +596,7 @@ html, body, #app {
   z-index: 1;
 }
 .region-splitter:hover {
-  background: #4ec9b0;
+  background: var(--accent);
 }
 .content {
   display: flex;

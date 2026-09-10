@@ -7,7 +7,6 @@ import { useTitlebarInsets } from "../composables/useTitlebarInsets";
 import {
   ref,
   computed,
-  defineAsyncComponent,
   nextTick,
   onMounted,
   onUnmounted,
@@ -15,10 +14,11 @@ import {
 import { Icon } from "@iconify/vue";
 import SessionProfileTag from "./SessionProfileTag.vue";
 import { profilesForAgent, resolveProfileEnv, useAccountProfiles, type CliAgentKind, type AccountProfile } from "../composables/useAccountProfiles";
-import { orderedSessionMenuItems } from "../lib/session-menu";
+import { orderedSessionMenuItems, sessionMenuGroup } from "../lib/session-menu";
 import { resolveDefaultProfile } from "../lib/default-profile";
 import type { LeafNode } from "../lib/layout-types";
 import TerminalView from "./Terminal.vue";
+import FileViewer from "./FileViewerLoader.vue";
 import LoopGroupView from './LoopGroupView.vue';
 import LoopCreateDialog from './LoopCreateDialog.vue';
 import { homeDir } from '@tauri-apps/api/path';
@@ -42,6 +42,7 @@ import { sessionAgentIcon } from "../lib/session-agent-icon";
 import { sessionIndicatorClass } from "../lib/session-indicator";
 import {
   TERMINAL_PRESETS,
+  availableTerminalPresets,
   cloneTerminalConfig,
   type TerminalConfig,
 } from "../lib/terminal-config";
@@ -59,7 +60,6 @@ import {
 const props = defineProps<{ leaf: LeafNode }>();
 const titlebarRow = ref<HTMLElement | null>(null);
 const titlebarStyle = useTitlebarInsets(titlebarRow);
-const FileViewer = defineAsyncComponent(() => import("./FileViewer.vue"));
 
 const {
   kill,
@@ -80,29 +80,42 @@ const editingId = ref<string | null>(null);
 const editValue = ref("");
 const catcherRef = ref<HTMLDivElement | null>(null);
 const terminalMenuOpen = ref(false);
-const profileMenuAgent = ref<CliAgentKind | null>(null);
-const profileMenuRef = ref<HTMLDivElement | null>(null);
-const profileMenuPosition = ref({ left: 0, top: 0 });
-let profileMenuTrigger: HTMLElement | null = null;
+/** The one flyout the options menu can have open: an agent's profiles, or the terminal picker. */
+type Submenu = { kind: "agent"; agent: CliAgentKind } | { kind: "terminal" };
+const submenu = ref<Submenu | null>(null);
+const submenuRef = ref<HTMLDivElement | null>(null);
+const submenuPosition = ref({ left: 0, top: 0 });
+const submenuAgent = computed(() => submenu.value?.kind === "agent" ? submenu.value.agent : null);
+let submenuTrigger: HTMLElement | null = null;
 
-async function openProfileMenu(agent: CliAgentKind, event: Event, focus = false) {
-  profileMenuAgent.value = agent;
-  profileMenuTrigger = event.currentTarget as HTMLElement;
-  const rect = profileMenuTrigger.getBoundingClientRect();
+async function openSubmenu(next: Submenu, event: Event, focus = false) {
+  submenu.value = next;
+  submenuTrigger = event.currentTarget as HTMLElement;
+  const rect = submenuTrigger.getBoundingClientRect();
   await nextTick();
-  const menu = profileMenuRef.value;
+  const menu = submenuRef.value;
   if (!menu) return;
   const width = menu.offsetWidth;
-  profileMenuPosition.value = {
+  submenuPosition.value = {
     left: Math.max(8, rect.right + width + 8 <= window.innerWidth ? rect.right : rect.left - width),
     top: Math.max(8, Math.min(rect.top, window.innerHeight - menu.offsetHeight - 8)),
   };
   if (focus) menu.querySelector<HTMLButtonElement>('button')?.focus();
 }
 
-function closeProfileMenu() {
-  profileMenuAgent.value = null;
-  profileMenuTrigger?.focus();
+function openProfileMenu(agent: CliAgentKind, event: Event, focus = false) {
+  return openSubmenu({ kind: "agent", agent }, event, focus);
+}
+
+function closeSubmenu() {
+  submenu.value = null;
+  submenuTrigger?.focus();
+}
+
+/** Label of the profile a plain click on an agent row launches with. */
+function defaultProfileLabel(agent: CliAgentKind): string {
+  return resolveDefaultProfile(agent, useAccountProfiles().profiles, prefs.defaultProfileId)?.label
+    ?? t("System");
 }
 
 async function createWithAgent(agent: CliAgentKind, profile?: AccountProfile | null) {
@@ -129,26 +142,18 @@ const isFocused = computed(() => focusedLeafId.value === props.leaf.id);
 const effectiveTerminal = computed<TerminalConfig>(() =>
   cloneTerminalConfig(activeWorkspace.value?.settings?.terminal ?? prefs.defaultTerminal),
 );
-const selectableTerminals = computed(() => {
-  const defaultTerminal = effectiveTerminal.value;
-  return TERMINAL_PRESETS
-    .filter((preset) => preset.id !== "custom")
-    .map((preset) => ({
-      ...preset,
-      preset: preset.id,
-      args: [...preset.args],
-    }))
-    .filter((preset) => !sameTerminalConfig(defaultTerminal, preset));
-});
+// Shells offered by the "New Terminal" flyout: everything installable on this
+// host (Windows shells on Windows, zsh on macOS), the default one included so
+// it can be picked explicitly and is badged as the default.
+const selectableTerminals = computed(() => availableTerminalPresets(effectiveTerminal.value.preset)
+  .filter((preset) => preset.id !== "custom")
+  .map((preset) => ({ ...preset, preset: preset.id, args: [...preset.args] })));
 
-const terminalMenuItems = computed(() => orderedSessionMenuItems(prefs.sessionMenuOrder)
-  .map((item) => ({
-    ...item,
-    terminal: item.kind === "terminal"
-      ? selectableTerminals.value.find((preset) => preset.preset === item.preset)
-      : effectiveTerminal.value,
-  }))
-  .filter((item) => item.terminal !== undefined));
+const terminalMenuItems = computed(() => orderedSessionMenuItems(prefs.sessionMenuOrder));
+
+function isDefaultTerminal(terminal: TerminalConfig): boolean {
+  return sameTerminalConfig(effectiveTerminal.value, terminal);
+}
 
 function sameTerminalConfig(a: TerminalConfig, b: TerminalConfig): boolean {
   return a.preset === b.preset
@@ -218,7 +223,7 @@ function tabIcon(id: string): string {
 }
 
 function terminalTabIcon(id: string) {
-  return sessionAgentIcon(loops.getByTab(id)?.attempts.slice(-1)[0]?.agent ?? getSessionById(id)?.agent ?? "terminal");
+  return sessionAgentIcon(loops.getByTab(id)?.runtime?.provider ?? getSessionById(id)?.agent ?? "terminal");
 }
 
 function fileTab(id: string | null): FileTab | null {
@@ -507,7 +512,7 @@ async function toggleTerminalMenu(ev: MouseEvent) {
   ev.stopPropagation();
   closeTabContextMenu();
   setFocusedLeaf(props.leaf.id);
-  profileMenuAgent.value = null;
+  submenu.value = null;
   terminalMenuOpen.value = !terminalMenuOpen.value;
   if (!terminalMenuOpen.value) return;
   await nextTick();
@@ -533,7 +538,7 @@ function positionTerminalMenu() {
 }
 
 function closeTerminalMenu() {
-  profileMenuAgent.value = null;
+  submenu.value = null;
   terminalMenuOpen.value = false;
 }
 
@@ -549,6 +554,12 @@ function openNewPage() {
   resources.openNewPage();
 }
 
+function openNewBrowser() {
+  closeTerminalMenu();
+  setFocusedLeaf(props.leaf.id);
+  resources.openNewBrowser();
+}
+
 function onDocumentPointerDown(ev: PointerEvent) {
   const target = ev.target as Node | null;
   if (tabMenuFor.value) {
@@ -559,7 +570,7 @@ function onDocumentPointerDown(ev: PointerEvent) {
   }
   if (!terminalMenuOpen.value) return;
   if (target && (
-    profileMenuRef.value?.contains(target)
+    submenuRef.value?.contains(target)
     || terminalMenuRef.value?.contains(target)
     || terminalMenuButtonRef.value?.contains(target)
   )) return;
@@ -569,8 +580,8 @@ function onDocumentPointerDown(ev: PointerEvent) {
 function onWindowKeyDown(ev: KeyboardEvent) {
   if (ev.key === "Escape" && (terminalMenuOpen.value || tabMenuFor.value)) {
     ev.stopPropagation();
-    if (profileMenuAgent.value) {
-      closeProfileMenu();
+    if (submenu.value) {
+      closeSubmenu();
       return;
     }
     closeTerminalMenu();
@@ -637,7 +648,7 @@ onUnmounted(() => {
             />
             <Icon
               v-if="tabKind(id) === 'terminal'"
-              :class="['kind-icon', `agent-${loops.getByTab(id)?.attempts.slice(-1)[0]?.agent ?? getSessionById(id)?.agent ?? 'terminal'}`]"
+              :class="['kind-icon', `agent-${loops.getByTab(id)?.runtime?.provider ?? getSessionById(id)?.agent ?? 'terminal'}`]"
               :icon="terminalTabIcon(id)"
             />
             <span v-else class="kind-icon">{{ tabIcon(id) }}</span>
@@ -687,53 +698,85 @@ onUnmounted(() => {
         role="menu"
         @mousedown.stop
       >
-        <button class="terminal-option" role="menuitem" @mouseenter="profileMenuAgent = null" @click="createLoop"><span class="terminal-agent-slot">↻</span>새 에이전트 루프</button>
+        <button class="terminal-option" role="menuitem" @mouseenter="submenu = null" @click="createLoop"><span class="terminal-agent-slot">↻</span>새 에이전트 루프</button>
         <div class="terminal-option-separator" />
         <template v-for="(item, index) in terminalMenuItems" :key="item.id">
-          <div v-if="index > 0 && item.kind !== terminalMenuItems[index - 1].kind" class="terminal-option-separator" />
-          <button v-if="item.kind === 'page'" class="terminal-option" role="menuitem" @mouseenter="profileMenuAgent = null" @click="openNewPage">
+          <div v-if="index > 0 && sessionMenuGroup(item) !== sessionMenuGroup(terminalMenuItems[index - 1])" class="terminal-option-separator" />
+          <button v-if="item.kind === 'page'" class="terminal-option" role="menuitem" @mouseenter="submenu = null" @click="openNewPage">
             <span class="terminal-agent-slot"><Icon icon="lucide:file-plus-2" /></span>
             <span class="terminal-option-name">{{ t(item.label) }}</span>
           </button>
-          <button v-else-if="item.kind === 'agent'" class="terminal-option" role="menuitem"
-            :aria-haspopup="profilesForAgent(item.agent).length ? 'menu' : undefined"
-            :aria-expanded="profileMenuAgent === item.agent"
-            @mouseenter="profilesForAgent(item.agent).length ? openProfileMenu(item.agent, $event) : profileMenuAgent = null"
-            @click="profilesForAgent(item.agent).length ? openProfileMenu(item.agent, $event, true) : createWithAgent(item.agent)"
-            @keydown.right.prevent="profilesForAgent(item.agent).length && openProfileMenu(item.agent, $event, true)">
-            <span class="terminal-agent-slot">
-              <Icon :class="['terminal-agent-icon', 'agent-' + item.agent]" :icon="sessionAgentIcon(item.agent)" />
-            </span>
-            <span class="terminal-option-name">{{ item.label }}</span>
-            <span v-if="profilesForAgent(item.agent).length" class="submenu-arrow">&#8250;</span>
+          <button v-else-if="item.kind === 'browser'" class="terminal-option" role="menuitem" @mouseenter="submenu = null" @click="openNewBrowser">
+            <span class="terminal-agent-slot"><Icon icon="lucide:globe" /></span>
+            <span class="terminal-option-name">{{ t(item.label) }}</span>
           </button>
-          <button v-else-if="item.terminal" class="terminal-option" :class="{ 'default-option': item.kind === 'default' }"
-            @mouseenter="profileMenuAgent = null" role="menuitem" @click="createWithTerminal(item.terminal)">
-            <span class="terminal-option-icon">{{ terminalGlyph(item.terminal) }}</span>
+          <div v-else-if="item.kind === 'agent'" class="terminal-option split-option" role="none">
+            <button class="split-option-main" role="menuitem"
+              :title="defaultProfileLabel(item.agent)"
+              @mouseenter="submenu = null" @click="createWithAgent(item.agent)">
+              <span class="terminal-agent-slot">
+                <Icon :class="['terminal-agent-icon', 'agent-' + item.agent]" :icon="sessionAgentIcon(item.agent)" />
+              </span>
+              <span class="terminal-option-copy">
+                <span class="terminal-option-name">{{ item.label }}</span>
+              </span>
+              <span v-if="profilesForAgent(item.agent).length" class="split-option-hint">{{ defaultProfileLabel(item.agent) }}</span>
+            </button>
+            <button v-if="profilesForAgent(item.agent).length" class="split-option-arrow" role="menuitem"
+              aria-haspopup="menu" :aria-expanded="submenuAgent === item.agent"
+              :aria-label="t('Select account')" :title="t('Select account')"
+              @mouseenter="openProfileMenu(item.agent, $event)"
+              @click.stop="openProfileMenu(item.agent, $event, true)"
+              @keydown.right.prevent="openProfileMenu(item.agent, $event, true)">&#8250;</button>
+          </div>
+          <div v-else class="terminal-option split-option" role="none">
+            <button class="split-option-main" role="menuitem"
+              :title="terminalLabel(effectiveTerminal)"
+              @mouseenter="submenu = null" @click="createWithTerminal(effectiveTerminal)">
+              <span class="terminal-option-icon">{{ terminalGlyph(effectiveTerminal) }}</span>
+              <span class="terminal-option-copy">
+                <span class="terminal-option-name">{{ t(item.label) }}</span>
+              </span>
+              <span class="split-option-hint">{{ terminalLabel(effectiveTerminal) }}</span>
+            </button>
+            <button class="split-option-arrow" role="menuitem" aria-haspopup="menu"
+              :aria-expanded="submenu?.kind === 'terminal'"
+              :aria-label="t('Select terminal')" :title="t('Select terminal')"
+              @mouseenter="openSubmenu({ kind: 'terminal' }, $event)"
+              @click.stop="openSubmenu({ kind: 'terminal' }, $event, true)"
+              @keydown.right.prevent="openSubmenu({ kind: 'terminal' }, $event, true)">&#8250;</button>
+          </div>
+        </template>
+      </div>
+      <div v-if="terminalMenuOpen && submenu" ref="submenuRef"
+        class="terminal-picker profile-picker" role="menu"
+        :aria-label="submenuAgent ? (submenuAgent === 'claude' ? 'Claude' : 'Codex') : t('Select terminal')"
+        :style="{ left: submenuPosition.left + 'px', top: submenuPosition.top + 'px' }"
+        @mousedown.stop @keydown.left.prevent.stop="closeSubmenu" @keydown.esc.prevent.stop="closeSubmenu">
+        <template v-if="submenuAgent">
+          <button class="terminal-option" role="menuitem" @click="createWithAgent(submenuAgent, null)">
+            <span class="profile-option-label">{{ t('System') }}</span>
+            <span v-if="!resolveDefaultProfile(submenuAgent, useAccountProfiles().profiles, prefs.defaultProfileId)" class="default-badge">{{ t('Default') }}</span>
+          </button>
+          <button v-for="profile in profilesForAgent(submenuAgent)" :key="profile.id"
+            class="terminal-option" role="menuitem" :title="profile.label"
+            @click="createWithAgent(submenuAgent, profile)">
+            <span class="profile-option-label">{{ profile.label }}</span>
+            <span v-if="prefs.defaultProfileId[submenuAgent] === profile.id" class="default-badge">{{ t('Default') }}</span>
+          </button>
+        </template>
+        <template v-else>
+          <button v-for="terminal in selectableTerminals" :key="terminal.preset"
+            class="terminal-option" role="menuitem" @click="createWithTerminal(terminal)">
+            <span class="terminal-option-icon">{{ terminalGlyph(terminal) }}</span>
             <span class="terminal-option-copy">
               <span class="terminal-option-name">
-                {{ item.kind === 'default' ? terminalLabel(item.terminal) : t(item.label) }}
-                <span v-if="item.kind === 'default'" class="default-badge">{{ t('Default') }}</span>
+                {{ t(terminal.label) }}
+                <span v-if="isDefaultTerminal(terminal)" class="default-badge">{{ t('Default') }}</span>
               </span>
             </span>
           </button>
         </template>
-      </div>
-      <div v-if="terminalMenuOpen && profileMenuAgent" ref="profileMenuRef"
-        class="terminal-picker profile-picker" role="menu"
-        :aria-label="profileMenuAgent === 'claude' ? 'Claude' : 'Codex'"
-        :style="{ left: profileMenuPosition.left + 'px', top: profileMenuPosition.top + 'px' }"
-        @mousedown.stop @keydown.left.prevent.stop="closeProfileMenu" @keydown.esc.prevent.stop="closeProfileMenu">
-        <button class="terminal-option" role="menuitem" @click="createWithAgent(profileMenuAgent, null)">
-          <span class="profile-option-label">{{ t('System') }}</span>
-          <span v-if="!resolveDefaultProfile(profileMenuAgent, useAccountProfiles().profiles, prefs.defaultProfileId)" class="default-badge">{{ t('Default') }}</span>
-        </button>
-        <button v-for="profile in profilesForAgent(profileMenuAgent)" :key="profile.id"
-          class="terminal-option" role="menuitem" :title="profile.label"
-          @click="createWithAgent(profileMenuAgent, profile)">
-          <span class="profile-option-label">{{ profile.label }}</span>
-          <span v-if="prefs.defaultProfileId[profileMenuAgent] === profile.id" class="default-badge">{{ t('Default') }}</span>
-        </button>
       </div>
     </Teleport>
 
@@ -814,7 +857,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.loop-tag { color: #4ec9b0; font-size: 10px; }
+.loop-tag { color: var(--accent); font-size: 10px; }
 .pane {
   display: flex;
   flex-direction: column;
@@ -826,7 +869,7 @@ onUnmounted(() => {
   position: relative;
 }
 .pane.focused .tab-bar {
-  border-bottom-color: #4ec9b0;
+  border-bottom-color: var(--accent);
 }
 .tab-row { height: var(--titlebar-height); padding-top: 6px; flex-shrink: 0; min-width: 0; overflow: hidden; background: #252525; }
 .tab-bar {
@@ -865,7 +908,7 @@ onUnmounted(() => {
   justify-content: center;
   width: 1em;
   height: 1em;
-  color: #4ec9b0;
+  color: var(--accent);
   font-family: Consolas, monospace;
   font-size: 11px;
   line-height: 1;
@@ -894,7 +937,7 @@ onUnmounted(() => {
   to { opacity: 1; transform: scale(1); }
 }
 .dirty-dot {
-  color: #4ec9b0;
+  color: var(--accent);
   font-size: 10px;
   line-height: 1;
 }
@@ -908,7 +951,7 @@ onUnmounted(() => {
   background: #5a2d2d;
   color: #fff;
 }
-.drop-gap.insert-active { background: #4ec9b0; }
+.drop-gap.insert-active { background: var(--accent); }
 .drop-gap {
   width: 4px;
   flex-shrink: 0;
@@ -947,14 +990,14 @@ onUnmounted(() => {
 }
 .terminal-menu-toggle:focus-visible,
 .add-tab:focus-visible {
-  outline: 1px solid #4ec9b0;
+  outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 .tab-bar-spacer { flex: 1; min-width: 24px; }
 input {
   background: #1e1e1e;
   color: #e6e6e6;
-  border: 1px solid #4ec9b0;
+  border: 1px solid var(--accent);
   font: inherit;
   padding: 0 4px;
   width: 120px;
@@ -985,8 +1028,8 @@ input {
 }
 .overlay {
   position: absolute;
-  background: rgba(78, 201, 176, 0.22);
-  border: 2px solid #4ec9b0;
+  background: var(--accent-softer);
+  border: 2px solid var(--accent);
   pointer-events: none;
   transition: all 80ms ease;
 }
@@ -1038,7 +1081,7 @@ input {
   width: 30px;
   height: 20px;
   flex: 0 0 30px;
-  color: #4ec9b0;
+  color: var(--accent);
   background: #1e1e1e;
   border: 1px solid #3a3a3a;
   border-radius: 4px;
@@ -1056,7 +1099,41 @@ input {
 .terminal-agent-icon.agent-claude { color: #d97757; }
 /* The Codex SVG includes padding around its artwork. */
 .terminal-agent-icon.agent-codex { width: 24px; height: 24px; }
-.submenu-arrow { margin-left: auto; font-size: 18px; }
+/* "New Terminal": the row runs the default shell, the arrow opens the picker. */
+.split-option { gap: 0; padding: 0; }
+.split-option:hover, .split-option:focus-within { background: transparent; }
+.split-option-main,
+.split-option-arrow {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 8px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.split-option-main { gap: 10px; flex: 1; min-width: 0; text-align: left; }
+.split-option-arrow { justify-content: center; flex: 0 0 22px; font-size: 18px; }
+.split-option-main:hover,
+.split-option-main:focus-visible,
+.split-option-arrow:hover,
+.split-option-arrow:focus-visible {
+  background: #094771;
+  color: #fff;
+  outline: none;
+}
+.split-option-main .terminal-option-copy { flex: 0 0 auto; }
+.split-option-main .terminal-option-name { white-space: nowrap; }
+.split-option-hint {
+  margin-left: auto;
+  overflow: hidden;
+  color: #8c8c8c;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .profile-picker { z-index: 1001; }
 .profile-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-option-copy {
@@ -1076,8 +1153,8 @@ input {
 .default-badge {
   padding: 1px 5px;
   color: #9fe3d4;
-  background: rgba(78, 201, 176, 0.14);
-  border: 1px solid rgba(78, 201, 176, 0.32);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
   border-radius: 8px;
   font-size: 9px;
   font-weight: 600;

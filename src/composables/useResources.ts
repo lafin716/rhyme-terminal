@@ -38,6 +38,9 @@ const state = reactive({
   tabs: {} as Record<string, ResourceTab>,
 });
 
+/** Start page for a browser tab opened without an address of its own. */
+const NEW_BROWSER_URL = "https://www.google.com/";
+
 function normalizeUrl(raw: string): string {
   const trimmed = raw.trim();
   const url = new URL(trimmed);
@@ -106,6 +109,19 @@ export function useResources() {
   async function openBrowser(rawUrl: string): Promise<void> {
     const url = normalizeUrl(rawUrl);
     if (activateExisting((tab) => tab.kind === "browser" && tab.url === url)) return;
+    spawnBrowserTab(url);
+  }
+
+  /**
+   * Opens a browser tab from the session tab options menu. Unlike
+   * {@link openBrowser} it never reuses an existing tab: every click asks for
+   * one more browser to type an address into.
+   */
+  function openNewBrowser(): void {
+    spawnBrowserTab(NEW_BROWSER_URL);
+  }
+
+  function spawnBrowserTab(url: string): void {
     const leafId = targetLeafId();
     const ws = activeWorkspace.value;
     if (!leafId || !ws) return;
@@ -213,6 +229,7 @@ export function useResources() {
     updateFileDraft,
     saveFile,
     openBrowser,
+    openNewBrowser,
     closeResource,
     forgetResource,
     updateBrowserUrl,

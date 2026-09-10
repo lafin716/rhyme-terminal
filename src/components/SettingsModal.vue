@@ -38,7 +38,7 @@ import {
   removePaletteItem,
 } from "../composables/usePalette";
 import {
-  TERMINAL_PRESETS,
+  availableTerminalPresets,
   cloneTerminalConfig,
   configForPreset,
   type TerminalConfig,
@@ -46,6 +46,8 @@ import {
 } from "../lib/terminal-config";
 import type { PaletteUiMode } from "../lib/persistence";
 import { normalizeLocale } from "../lib/i18n";
+import { useTheme } from "../composables/useTheme";
+import { accentCssVars, type AccentTheme } from "../lib/theme";
 
 const { closeSettings } = useSettings();
 const backButton = ref<HTMLButtonElement>();
@@ -55,8 +57,17 @@ const { state: workspaceState, activeWorkspace, updateWorkspaceSettings } = useW
 const { prefs, setPref } = usePrefs();
 const { create: createSession } = useSessions();
 const { confirm } = useConfirm();
+const { themes: accentThemes, activeTheme, setAccentTheme } = useTheme();
 
-type Category = "loops" | "mobile" | "language" | "terminal" | "accounts" | "workspaces" | "keybindings" | "palette";
+/**
+ * Renders each swatch in its *own* accent rather than the active one, so the
+ * tiles preview the theme instead of all showing the current color.
+ */
+function themePreviewVars(theme: AccentTheme): Record<string, string> {
+  return accentCssVars(theme);
+}
+
+type Category = "loops" | "mobile" | "language" | "theme" | "terminal" | "accounts" | "workspaces" | "keybindings" | "palette";
 const activeCategory = ref<Category>("language");
 
 const newProfileLabel = reactive<Record<CliAgentKind, string>>({ claude: "", codex: "" });
@@ -269,6 +280,17 @@ onUnmounted(() => {
               <div class="nav-desc">{{ t('App display language') }}</div>
             </div>
           </button>
+          <button
+            type="button"
+            :class="['nav-item', { active: activeCategory === 'theme' }]"
+            @click="activeCategory = 'theme'"
+          >
+            <div class="nav-icon"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2.6a7.4 7.4 0 1 0 0 14.8c1 0 1.6-.7 1.6-1.5 0-.4-.2-.8-.4-1.1-.3-.3-.4-.6-.4-1 0-.8.6-1.4 1.4-1.4h1.4a3.8 3.8 0 0 0 3.8-3.8c0-3.3-3.3-6-7.4-6Z"/><circle cx="6.6" cy="8.2" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="6.2" r="1" fill="currentColor" stroke="none"/><circle cx="13.4" cy="8.2" r="1" fill="currentColor" stroke="none"/></svg></div>
+            <div class="nav-text">
+              <div class="nav-label">{{ t('Theme') }}</div>
+              <div class="nav-desc">{{ t('Main color of the app') }}</div>
+            </div>
+          </button>
           <button type="button"
             :class="['nav-item', { active: activeCategory === 'terminal' }]"
             @click="activeCategory = 'terminal'"
@@ -359,6 +381,42 @@ onUnmounted(() => {
               </div>
             </div>
           </template>
+          <template v-else-if="activeCategory === 'theme'">
+            <div class="panel-header">
+              <div>
+                <div class="panel-title">{{ t('Theme') }}</div>
+                <div class="panel-hint">{{ t('Pick the main color used for highlights, selections and the status bar. Applies immediately and is saved automatically.') }}</div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-title">{{ t('Main color') }}</div>
+              <div class="theme-tiles">
+                <button
+                  v-for="theme in accentThemes"
+                  :key="theme.id"
+                  type="button"
+                  :style="themePreviewVars(theme)"
+                  :class="['theme-tile', { selected: activeTheme.id === theme.id }]"
+                  :aria-pressed="activeTheme.id === theme.id"
+                  @click="setAccentTheme(theme.id)"
+                >
+                  <div class="theme-swatch" aria-hidden="true">
+                    <span class="theme-swatch-bar" />
+                    <span class="theme-swatch-dot" />
+                    <span class="theme-swatch-chip">Aa</span>
+                  </div>
+                  <div class="theme-tile-label">
+                    <span class="theme-tile-name">{{ t(theme.label) }}</span>
+                    <span v-if="activeTheme.id === theme.id" class="theme-tile-check" aria-hidden="true">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 10.5 3.5 3.5 7.5-8" /></svg>
+                    </span>
+                  </div>
+                  <div class="theme-tile-hex">{{ theme.accent }}</div>
+                </button>
+              </div>
+            </div>
+          </template>
           <template v-else-if="activeCategory === 'terminal'">
             <div class="panel-header">
               <div>
@@ -377,7 +435,11 @@ onUnmounted(() => {
                   :value="prefs.defaultTerminal.preset"
                   @change="applyGlobalPreset(($event.target as HTMLSelectElement).value)"
                 >
-                  <option v-for="preset in TERMINAL_PRESETS" :key="preset.id" :value="preset.id">
+                  <option
+                    v-for="preset in availableTerminalPresets(prefs.defaultTerminal.preset)"
+                    :key="preset.id"
+                    :value="preset.id"
+                  >
                     {{ t(preset.label) }}
                   </option>
                 </select>
@@ -455,7 +517,7 @@ onUnmounted(() => {
                     )"
                   >
                     <option
-                      v-for="preset in TERMINAL_PRESETS"
+                      v-for="preset in availableTerminalPresets(ws.settings.terminal.preset)"
                       :key="preset.id"
                       :value="preset.id"
                     >
@@ -711,7 +773,7 @@ onUnmounted(() => {
 
 <style scoped>
 .settings-shell, .settings-shell * { box-sizing: border-box; }
-.settings-shell :is(button, input, select, .key-cell):focus-visible { outline: 2px solid #4ec9b0; outline-offset: 2px; }
+.settings-shell :is(button, input, select, .key-cell):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .settings-shell {
   position: fixed;
   inset: var(--titlebar-height, 36px) 0 0;
@@ -784,9 +846,9 @@ onUnmounted(() => {
 .nav-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .nav-label { font-size: 13.5px; font-weight: 500; color: #aaaaaa; }
 .nav-desc { font-size: 12px; color: #999999; }
-.nav-item.active { background: #202020; border-left-color: #4ec9b0; }
-.nav-item.active .nav-icon { color: #4ec9b0; }
-.nav-item.active .nav-label { color: #4ec9b0; }
+.nav-item.active { background: #202020; border-left-color: var(--accent); }
+.nav-item.active .nav-icon { color: var(--accent); }
+.nav-item.active .nav-label { color: var(--accent); }
 
 .content { flex: 1; min-width: 0; overflow: auto; container-type: inline-size; container-name: settings-content; }
 .content-inner { padding: 32px; width: 100%; max-width: 1680px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
@@ -872,7 +934,7 @@ onUnmounted(() => {
 }
 .field-grid.compact .input { font-size: 13px; }
 .input.mono { font-family: Consolas, "Cascadia Mono", monospace; }
-.input:focus, select.input:focus { outline: none; border-color: #4ec9b0; }
+.input:focus, select.input:focus { outline: none; border-color: var(--accent); }
 
 .inline-row { display: flex; gap: 10px; min-width: 0; }
 .inline-row .input { flex: 1; }
@@ -889,11 +951,11 @@ onUnmounted(() => {
   line-height: 1.6;
   flex-shrink: 0;
 }
-.tag.active-tag { color: #4ec9b0; background: rgba(78, 201, 176, 0.12); border: 1px solid rgba(78, 201, 176, 0.25); }
+.tag.active-tag { color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-border); }
 .tag.muted-tag { color: #777777; background: #1e1e1e; border: 1px solid #2a2a2a; }
 
-.checkbox { accent-color: #4ec9b0; width: 16px; height: 16px; }
-.radio { accent-color: #4ec9b0; width: 15px; height: 15px; cursor: pointer; }
+.checkbox { accent-color: var(--accent); width: 16px; height: 16px; }
+.radio { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
 
 .ov-card-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 14px; }
 .ov-card-head .name { min-width: 0; overflow-wrap: anywhere; font-size: 13.5px; font-weight: 600; color: #e6e6e6; }
@@ -962,8 +1024,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(78, 201, 176, 0.12);
-  color: #4ec9b0;
+  background: var(--accent-soft);
+  color: var(--accent);
   font-size: 13px;
   font-weight: 700;
 }
@@ -995,8 +1057,52 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .key-cell:hover { background: #2a2a2a; }
-.key-cell.capturing { background: #1e2f2c; border-color: #4ec9b0; color: #4ec9b0; }
+.key-cell.capturing { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .key-cell.unbound { color: #666666; font-style: italic; }
+
+/* Theme — each tile carries its own --accent* vars so it previews its color. */
+.theme-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+.theme-tile {
+  border: 1px solid #333333;
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: #252525;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.theme-tile:hover { border-color: var(--accent-border); }
+.theme-tile.selected { border-color: var(--accent); background: var(--accent-soft); }
+.theme-swatch {
+  height: 64px;
+  border-radius: 6px;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+}
+.theme-swatch-bar { flex: 1; height: 8px; border-radius: 4px; background: var(--accent); }
+.theme-swatch-dot { width: 14px; height: 14px; border-radius: 50%; background: var(--accent-softer); border: 1px solid var(--accent); }
+.theme-swatch-chip {
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.theme-tile-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.theme-tile-name { font-size: 13px; font-weight: 600; color: #e6e6e6; }
+.theme-tile-check { display: flex; color: var(--accent); }
+.theme-tile-check svg { width: 16px; height: 16px; }
+.theme-tile-hex { font-size: 11px; color: #666666; font-family: Consolas, "Cascadia Mono", monospace; }
 
 /* Palette */
 .style-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
@@ -1013,7 +1119,7 @@ onUnmounted(() => {
   text-align: left;
   cursor: pointer;
 }
-.style-tile.selected { border-color: #4ec9b0; background: rgba(78, 201, 176, 0.12); }
+.style-tile.selected { border-color: var(--accent); background: var(--accent-soft); }
 .style-tile-preview {
   height: 90px;
   border-radius: 6px;
@@ -1025,7 +1131,7 @@ onUnmounted(() => {
   color: #777777;
 }
 .style-tile-preview svg { width: 54px; height: 54px; }
-.style-tile.selected .style-tile-preview { color: #4ec9b0; }
+.style-tile.selected .style-tile-preview { color: var(--accent); }
 .style-tile-label { display: flex; align-items: center; justify-content: space-between; }
 .style-tile-name { font-size: 13px; font-weight: 600; color: #e6e6e6; }
 .style-tile-desc { font-size: 11.5px; color: #777777; }

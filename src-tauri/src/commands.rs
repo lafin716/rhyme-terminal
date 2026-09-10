@@ -520,6 +520,119 @@ fn list_directory(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>, String> {
     Ok(entries)
 }
 
+
+/// Characters that may never appear in a single file/folder name: the Windows
+/// reserved set plus both path separators. Rejecting the separators is what
+/// keeps a rename or create confined to one directory — see
+/// [`validate_entry_name`].
+const INVALID_NAME_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*', '/', '\\'];
+
+/// Validate a leaf name typed into the Explorer and return it trimmed. Anything
+/// that is not a plain sibling name — empty, `.`/`..`, a path, a control
+/// character — is refused, so the Explorer's rename/create can only ever touch
+/// an entry inside the directory the user right-clicked.
+fn validate_entry_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("A name is required.".to_string());
+    }
+    if trimmed == "." || trimmed == ".." {
+        return Err("That name is reserved.".to_string());
+    }
+    if trimmed.contains(INVALID_NAME_CHARS) {
+        return Err("A name cannot contain \\ / : * ? \" < > |".to_string());
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err("A name cannot contain control characters.".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Rename the entry at `path` to `new_name` (a leaf name, never a path) and
+/// return its new absolute path so the tree can re-read the parent. Backs the
+/// Explorer context menu's inline rename. Mirrors the established command shape:
+/// a thin async wrapper over a synchronous, unit-testable core.
+#[tauri::command]
+pub async fn rename_path(path: String, new_name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || rename_path_sync(&path, &new_name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn rename_path_sync(path: &str, new_name: &str) -> Result<String, String> {
+    let name = validate_entry_name(new_name)?;
+    let source = PathBuf::from(path.trim())
+        .canonicalize()
+        .map_err(|e| format!("Not found: {path} ({e})"))?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| format!("Cannot rename a filesystem root: {}", source.display()))?;
+    let target = parent.join(&name);
+    // A case-only rename (`readme.md` -> `README.md`) resolves back to the same
+    // file on Windows, so only an existing *different* entry is a collision.
+    if target.exists() && target.canonicalize().ok().as_deref() != Some(source.as_path()) {
+        return Err(format!("{name} already exists."));
+    }
+    std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
+/// Delete the entry at `path`; a directory goes recursively with everything in
+/// it. The Explorer always confirms with the user before invoking this.
+#[tauri::command]
+pub async fn delete_path(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_path_sync(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn delete_path_sync(path: &str) -> Result<(), String> {
+    let target = PathBuf::from(path.trim())
+        .canonicalize()
+        .map_err(|e| format!("Not found: {path} ({e})"))?;
+    if target.parent().is_none() {
+        return Err(format!(
+            "Refusing to delete a filesystem root: {}",
+            target.display()
+        ));
+    }
+    if target.is_dir() {
+        std::fs::remove_dir_all(&target).map_err(|e| e.to_string())
+    } else {
+        std::fs::remove_file(&target).map_err(|e| e.to_string())
+    }
+}
+
+/// Create an empty file (or a directory, when `is_dir`) named `name` inside
+/// `parent`, returning the created absolute path. Backs the Explorer's
+/// "New File" / "New Folder"; refuses to clobber an existing entry.
+#[tauri::command]
+pub async fn create_entry(parent: String, name: String, is_dir: bool) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || create_entry_sync(&parent, &name, is_dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn create_entry_sync(parent: &str, name: &str, is_dir: bool) -> Result<String, String> {
+    let leaf = validate_entry_name(name)?;
+    let dir = PathBuf::from(parent.trim())
+        .canonicalize()
+        .map_err(|e| format!("Directory not found: {parent} ({e})"))?;
+    if !dir.is_dir() {
+        return Err(format!("Not a directory: {}", dir.display()));
+    }
+    let target = dir.join(&leaf);
+    if target.exists() {
+        return Err(format!("{leaf} already exists."));
+    }
+    if is_dir {
+        std::fs::create_dir(&target).map_err(|e| e.to_string())?;
+    } else {
+        std::fs::File::create(&target).map_err(|e| e.to_string())?;
+    }
+    Ok(target.to_string_lossy().into_owned())
+}
+
 /// Maximum number of files [`list_files`] returns. The walk stops once this many
 /// files are collected so a huge tree can never flood Quick Open or stall the UI.
 const FILE_INDEX_CAP: usize = 5000;
@@ -816,6 +929,74 @@ mod directory_tests {
         assert_eq!(names, vec!["sub", "top.txt"]);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_names_that_are_not_plain_leaf_names() {
+        for bad in [
+            "", "   ", ".", "..", "a/b", "a\\b", "c:name", "star*", "quote\"", "pipe|", "q?", "lt<",
+            "gt>", "bell\u{7}",
+        ] {
+            assert!(super::validate_entry_name(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(super::validate_entry_name("  notes.md  ").unwrap(), "notes.md");
+        assert_eq!(super::validate_entry_name(".gitignore").unwrap(), ".gitignore");
+    }
+
+    #[test]
+    fn renames_an_entry_without_clobbering_a_sibling() {
+        let dir = temp_dir("rename");
+        fs::write(dir.join("old.txt"), b"body").unwrap();
+        fs::write(dir.join("taken.txt"), b"other").unwrap();
+
+        let renamed = super::rename_path_sync(dir.join("old.txt").to_str().unwrap(), "new.txt")
+            .unwrap();
+        assert!(renamed.ends_with("new.txt"));
+        assert_eq!(fs::read_to_string(dir.join("new.txt")).unwrap(), "body");
+        assert!(!dir.join("old.txt").exists());
+
+        let err = super::rename_path_sync(dir.join("new.txt").to_str().unwrap(), "taken.txt")
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("taken.txt")).unwrap(), "other");
+
+        // A path, not a leaf name, must never escape the directory.
+        assert!(
+            super::rename_path_sync(dir.join("new.txt").to_str().unwrap(), "../escaped.txt")
+                .is_err()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn creates_files_and_folders_and_refuses_existing_names() {
+        let dir = temp_dir("create");
+        let file = super::create_entry_sync(dir.to_str().unwrap(), "notes.md", false).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "");
+        let folder = super::create_entry_sync(dir.to_str().unwrap(), "sub", true).unwrap();
+        assert!(PathBuf::from(&folder).is_dir());
+
+        fs::write(dir.join("notes.md"), b"kept").unwrap();
+        let err = super::create_entry_sync(dir.to_str().unwrap(), "notes.md", false).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read_to_string(dir.join("notes.md")).unwrap(), "kept");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deletes_files_and_folders_recursively() {
+        let dir = temp_dir("delete");
+        fs::write(dir.join("gone.txt"), b"x").unwrap();
+        super::delete_path_sync(dir.join("gone.txt").to_str().unwrap()).unwrap();
+        assert!(!dir.join("gone.txt").exists());
+
+        fs::create_dir(dir.join("tree")).unwrap();
+        fs::write(dir.join("tree").join("nested.txt"), b"x").unwrap();
+        super::delete_path_sync(dir.join("tree").to_str().unwrap()).unwrap();
+        assert!(!dir.join("tree").exists());
+
+        assert!(super::delete_path_sync(dir.join("missing").to_str().unwrap()).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 

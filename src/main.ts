@@ -1,6 +1,7 @@
 import { createApp, watchEffect } from "vue";
 import { useI18n } from "./composables/useI18n";
 import { loadPrefsFromStorage } from "./composables/usePrefs";
+import { startAccentThemeSync } from "./composables/useTheme";
 import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import App from "./App.vue";
@@ -14,6 +15,7 @@ const params = new URLSearchParams(window.location.search);
 const root = params.get("win") === "oauth-login" ? OAuthLoginWindow : App;
 
 loadPrefsFromStorage();
+startAccentThemeSync();
 const { locale } = useI18n();
 watchEffect(() => {
   document.documentElement.lang = locale.value;

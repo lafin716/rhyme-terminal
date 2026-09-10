@@ -68,8 +68,8 @@ h1 { font-size: 13px; font-weight: 600; margin: 0; color: #aaa; }
 nav { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 20px; }
 .nav-item { padding: 11px 14px; border: 0; border-left: 3px solid transparent; border-radius: 8px; background: transparent; color: #aaa; text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
 .nav-item:hover { background: #202020; }
-.nav-item.active { background: #202020; border-left-color: #4ec9b0; color: #4ec9b0; }
-button:focus-visible { outline: 2px solid #4ec9b0; outline-offset: 2px; }
+.nav-item.active { background: #202020; border-left-color: var(--accent); color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .flow-page :deep(.flow-panel) { flex: 1; min-width: 0; height: auto; }
 @media (max-width: 760px) {
   .flow-page { flex-direction: column; }

@@ -1,19 +1,28 @@
-import { TERMINAL_PRESETS, type TerminalPreset } from "./terminal-config";
+export type SessionMenuItem =
+  | { id: string; label: string; kind: "page" | "browser" | "terminal" }
+  | { id: string; label: string; kind: "agent"; agent: "claude" | "codex" };
 
-type SessionMenuItem =
-  | { id: string; label: string; kind: "page" | "default" }
-  | { id: string; label: string; kind: "agent"; agent: "claude" | "codex" }
-  | { id: string; label: string; kind: "terminal"; preset: TerminalPreset };
-
+/**
+ * Rows of the session tab options menu. Terminals are one "New Terminal" row:
+ * clicking it launches the default terminal, while its arrow opens a submenu
+ * listing the shells available on this host (see `PaneTabs.vue`).
+ */
 export const SESSION_MENU_ITEMS: readonly SessionMenuItem[] = [
-  { id: "page", label: "Open new page", kind: "page" },
+  { id: "page", label: "New File", kind: "page" },
+  { id: "browser", label: "Open new browser", kind: "browser" },
   { id: "claude", label: "Claude", kind: "agent", agent: "claude" },
   { id: "codex", label: "Codex", kind: "agent", agent: "codex" },
-  { id: "default", label: "Default terminal", kind: "default" },
-  ...TERMINAL_PRESETS.filter((preset) => preset.id !== "custom").map((preset) => ({
-    id: `terminal:${preset.id}`, label: preset.label, kind: "terminal" as const, preset: preset.id,
-  })),
+  { id: "terminal", label: "New Terminal", kind: "terminal" },
 ];
+
+/**
+ * Section a row belongs to. The options menu draws a separator wherever two
+ * neighbouring rows disagree, so page/browser stay one block however the user
+ * reorders them.
+ */
+export function sessionMenuGroup(item: SessionMenuItem): "resource" | "agent" | "terminal" {
+  return item.kind === "agent" ? "agent" : item.kind === "terminal" ? "terminal" : "resource";
+}
 
 /** Keep saved positions, drop obsolete/duplicate IDs, and append newly added items. */
 export function normalizeSessionMenuOrder(value: unknown): string[] {

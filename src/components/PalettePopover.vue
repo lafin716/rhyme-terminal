@@ -280,7 +280,7 @@ onBeforeUnmount(() => {
 }
 .context-icon {
   flex: 0 0 16px;
-  color: #4ec9b0;
+  color: var(--accent);
   font-size: 16px;
 }
 .context-label {
@@ -311,7 +311,7 @@ onBeforeUnmount(() => {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #4ec9b0;
+  background: var(--accent);
   left: -5px;
   top: -5px;
   opacity: 0.7;
@@ -336,12 +336,12 @@ onBeforeUnmount(() => {
 }
 .radial-item:hover {
   background: #2e2e2e;
-  border-color: #4ec9b0;
+  border-color: var(--accent);
   transform: scale(1.05);
 }
 .radial-item .ico {
   font-size: 20px;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .radial-item .lbl {
   font-size: 9px;

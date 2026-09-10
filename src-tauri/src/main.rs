@@ -2,6 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(desktop)]
+    if winmux_lib::loop_routing::bridge::dispatch() {
+        return;
+    }
     #[cfg(all(desktop, unix))]
     if winmux_lib::unix_cli::dispatch() {
         return;

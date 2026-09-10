@@ -20,6 +20,8 @@ fn agent_order() -> Vec<String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Candidate {
+    #[serde(default)]
+    pub priority: i32,
     pub agent: String,
     pub profile_id: Option<String>,
     pub label: String,
@@ -44,6 +46,16 @@ impl Candidate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+    #[serde(default = "poll_interval")]
+    pub polling_interval_seconds: u64,
+    #[serde(default = "interrupt_timeout")]
+    pub interrupt_timeout_seconds: u64,
+    #[serde(default = "kill_timeout")]
+    pub force_kill_timeout_seconds: u64,
+    #[serde(default = "auto_resume")]
+    pub auto_resume: bool,
     #[serde(default = "threshold")]
     pub short_threshold: f64,
     #[serde(default = "threshold")]
@@ -56,8 +68,13 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            short_threshold: 90.0,
-            weekly_threshold: 90.0,
+            strategy: default_strategy(),
+            polling_interval_seconds: poll_interval(),
+            interrupt_timeout_seconds: interrupt_timeout(),
+            force_kill_timeout_seconds: kill_timeout(),
+            auto_resume: auto_resume(),
+            short_threshold: threshold(),
+            weekly_threshold: threshold(),
             agent_order: agent_order(),
             candidates: vec![],
         }
@@ -65,6 +82,19 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            matches!(
+                self.strategy.as_str(),
+                "SMART" | "LEAST_USAGE" | "ROUND_ROBIN" | "PRIORITY"
+            ),
+            "Invalid selection strategy"
+        );
+        ensure!(
+            (10..=300).contains(&self.polling_interval_seconds)
+                && (1..=10).contains(&self.interrupt_timeout_seconds)
+                && (1..=5).contains(&self.force_kill_timeout_seconds),
+            "Invalid loop timeouts"
+        );
         let valid = |n: f64| n.is_finite() && (1.0..=100.0).contains(&n);
         ensure!(
             valid(self.short_threshold) && valid(self.weekly_threshold),
@@ -107,15 +137,7 @@ impl Settings {
         Ok(())
     }
     pub fn ordered(&self) -> Vec<Candidate> {
-        self.agent_order
-            .iter()
-            .flat_map(|agent| {
-                self.candidates
-                    .iter()
-                    .filter(move |c| &c.agent == agent && c.enabled)
-                    .cloned()
-            })
-            .collect()
+        self.candidates.iter().filter(|c| c.enabled).cloned().collect()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -146,13 +168,39 @@ pub struct Attempt {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Group {
+    #[serde(default)]
+    pub policy: Option<Settings>,
+    #[serde(default)]
+    pub participants: Vec<String>,
+    #[serde(default)]
+    pub runtime: crate::pty::runtime_monitor::AgentRuntimeState,
+    #[serde(default)]
+    pub active_profile: Option<String>,
+    #[serde(default)]
+    pub profiles: Vec<ProfileSnapshot>,
+    #[serde(default)]
+    pub waiting_profile_id: Option<String>,
+    #[serde(default)]
+    pub resume_at: Option<u64>,
+    #[serde(default)]
+    pub events: Vec<SystemEvent>,
+    #[serde(default)]
+    pub queued_input: Vec<InputChunk>,
+    #[serde(default)]
+    pub handoff_context: Option<String>,
+    #[serde(default)]
+    pub command_args: Vec<String>,
+    #[serde(default)]
+    pub current_provider: Option<String>,
+    #[serde(default)]
+    pub current_agent_session_id: Option<String>,
     pub id: uuid::Uuid,
     pub name: String,
     pub workspace_id: String,
     #[serde(default = "default_workspace_index")]
     pub workspace_index: u32,
     pub cwd: String,
-    pub status: String,
+    pub status: LoopStatus,
     pub active_session_id: Option<uuid::Uuid>,
     pub reason: Option<String>,
     pub attempts: Vec<Attempt>,
@@ -161,11 +209,142 @@ pub struct Group {
     pub pending_work: bool,
 }
 impl Group {
-    pub fn state(&mut self, state: &str, reason: Option<&str>) {
-        self.status = state.into();
+    pub fn state(&mut self, state: LoopStatus, reason: Option<&str>) {
+        if self.status == state && self.reason.as_deref() == reason {
+            return;
+        }
+        self.status = state;
         self.reason = reason.map(str::to_string);
         self.updated_at = now();
+        if let Some(message) = reason {
+            self.event(self.status.as_str(), message);
+        }
     }
+    pub fn event(&mut self, kind: &str, message: &str) {
+        self.events.push(SystemEvent {
+            at: now(),
+            kind: kind.into(),
+            message: message.into(),
+        });
+        if self.events.len() > 200 {
+            self.events.remove(0);
+        }
+        self.updated_at = now();
+    }
+}
+
+fn default_strategy() -> String {
+    "SMART".into()
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopStatus {
+    Idle,
+    #[serde(alias = "starting")]
+    Preparing,
+    Running,
+    Paused,
+    #[serde(alias = "switching", alias = "switch_pending")]
+    SwitchingProfile,
+    Handoff,
+    #[serde(alias = "waiting")]
+    WaitingForUsageReset,
+    Resuming,
+    Stopped,
+    #[serde(alias = "recovery")]
+    Error,
+}
+impl LoopStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Preparing => "preparing",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::SwitchingProfile => "switching_profile",
+            Self::Handoff => "handoff",
+            Self::WaitingForUsageReset => "waiting_for_usage_reset",
+            Self::Resuming => "resuming",
+            Self::Stopped => "stopped",
+            Self::Error => "error",
+        }
+    }
+}
+impl PartialEq<&str> for LoopStatus {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+#[cfg(test)]
+impl From<&str> for LoopStatus {
+    fn from(value: &str) -> Self {
+        match value {
+            "idle" => Self::Idle,
+            "preparing" | "starting" => Self::Preparing,
+            "running" => Self::Running,
+            "paused" => Self::Paused,
+            "switching_profile" | "switching" | "switch_pending" => Self::SwitchingProfile,
+            "handoff" => Self::Handoff,
+            "waiting_for_usage_reset" | "waiting" => Self::WaitingForUsageReset,
+            "resuming" => Self::Resuming,
+            "stopped" => Self::Stopped,
+            "error" => Self::Error,
+            _ => panic!("Unknown test LoopStatus: {value}"),
+        }
+    }
+}
+fn poll_interval() -> u64 {
+    30
+}
+fn interrupt_timeout() -> u64 {
+    5
+}
+fn kill_timeout() -> u64 {
+    3
+}
+fn auto_resume() -> bool {
+    true
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProfileStatus {
+    Active,
+    Available,
+    NearLimit,
+    Exhausted,
+    RateLimited,
+    WaitingReset,
+    Disabled,
+    Error,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSnapshot {
+    #[serde(default)]
+    pub usage_pending: bool,
+    pub key: String,
+    pub agent: String,
+    pub label: String,
+    pub status: ProfileStatus,
+    pub usage: Option<f64>,
+    pub threshold: f64,
+    pub remaining: Option<f64>,
+    pub reset_at: Option<u64>,
+    pub error: Option<String>,
+    pub windows: Vec<crate::usage::UsageWindow>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SystemEvent {
+    pub at: u64,
+    pub kind: String,
+    pub message: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InputChunk {
+    pub id: String,
+    pub bytes: Vec<u8>,
+    #[serde(default)]
+    pub delivering: bool,
 }
 
 /// Advance from the current candidate without preempting it when a higher priority recovers.
@@ -188,6 +367,7 @@ mod tests {
     use super::*;
     fn c(id: &str) -> Candidate {
         Candidate {
+            priority: 0,
             agent: "claude".into(),
             profile_id: Some(id.into()),
             label: id.into(),
@@ -229,6 +409,16 @@ mod tests {
         assert!(s.validate().is_ok());
     }
     #[test]
+    fn global_profile_order_is_preserved_across_providers() {
+        let mut settings = Settings::default();
+        let mut codex = c("first");
+        codex.agent = "codex".into();
+        let mut waiting = c("waiting");
+        waiting.enabled = false;
+        settings.candidates = vec![waiting, codex, c("second")];
+        assert_eq!(settings.ordered().iter().map(Candidate::key).collect::<Vec<_>>(), vec!["codex:first", "claude:second"]);
+    }
+    #[test]
     fn persisted_settings_never_include_environment_values() {
         let mut candidate = c("a");
         candidate.env.insert("SECRET".into(), "sensitive".into());
@@ -236,4 +426,22 @@ mod tests {
             .unwrap()
             .contains("sensitive"));
     }
+}
+
+/// Only these per-loop fields are editable; global defaults and credentials stay untouched.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PolicyPatch {
+    pub strategy: Option<String>,
+    pub polling_interval_seconds: Option<u64>,
+    pub auto_resume: Option<bool>,
+    pub profile: Option<ProfilePolicyPatch>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfilePolicyPatch {
+    pub key: String,
+    pub short_threshold: Option<f64>,
+    pub weekly_threshold: Option<f64>,
+    pub priority: Option<i32>,
 }

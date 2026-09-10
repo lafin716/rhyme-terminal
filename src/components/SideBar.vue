@@ -25,6 +25,7 @@ import {
   bellIcon,
   folderIcon,
   plusIcon,
+  moreHorizontalIcon,
 } from "../lib/offline-icons";
 import { sessionAgentIcon } from "../lib/session-agent-icon";
 import { sessionIndicatorClass } from "../lib/session-indicator";
@@ -66,7 +67,11 @@ const tree = computed(() =>
     activeWorkspaceId: state.activeWorkspaceId,
     focusedSessionId: focusedSession.value?.id ?? focusedLoopTab.value,
     activityById: activity,
-    agentStatusById: agentTaskStatus,
+    agentStatusById: {
+      ...agentTaskStatus,
+      ...Object.fromEntries(loops.state.groups.filter(group => group.runtime?.pid).map(group => [loopTabId(group.id),
+        (group.activeSessionId && agentTaskStatus[group.activeSessionId]) || 'working'])),
+    },
   }),
 );
 
@@ -185,6 +190,7 @@ function addWorkspace() {
 }
 
 async function addTerminal(workspaceId: string) {
+  closeMenu();
   const ws = state.workspaces.find((workspace) => workspace.id === workspaceId);
   if (!ws) return;
 
@@ -247,22 +253,28 @@ async function removeWorkspace(id: string) {
   deleteWorkspace(id);
 }
 
-async function openContextMenu(ev: MouseEvent, id: string, kind: "workspace" | "session" = "workspace") {
+async function openContextMenu(ev: MouseEvent, id: string, kind: "workspace" | "session" = "workspace", anchor = { x: ev.clientX, y: ev.clientY }) {
   ev.preventDefault();
   ev.stopPropagation();
   menuKind.value = kind;
   menuFor.value = id;
-  menuPos.value = { x: ev.clientX, y: ev.clientY };
+  menuPos.value = anchor;
   await nextTick();
   const rect = menuRef.value?.getBoundingClientRect();
   if (rect) menuPos.value = {
-    x: Math.max(8, Math.min(ev.clientX, window.innerWidth - rect.width - 8)),
-    y: Math.max(8, Math.min(ev.clientY, window.innerHeight - rect.height - 8)),
+    x: Math.max(8, Math.min(anchor.x, window.innerWidth - rect.width - 8)),
+    y: Math.max(8, Math.min(anchor.y, window.innerHeight - rect.height - 8)),
   };
+  menuRef.value?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
 }
 
 function closeMenu() {
   menuFor.value = null;
+}
+
+function openWorkspaceOptions(ev: MouseEvent, id: string) {
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+  void openContextMenu(ev, id, "workspace", { x: rect.left, y: rect.bottom + 4 });
 }
 
 const canDelete = computed(() => state.workspaces.length > 1);
@@ -288,9 +300,12 @@ onBeforeUnmount(() => {
 
 <template>
   <aside class="sidebar" @click="closeMenu">
-    <button class="add" :title="t('Add project')" :aria-label="t('Add project')" @click.stop="addWorkspace">
-      <Icon class="ico" :icon="plusIcon" />
-    </button>
+    <header class="project-header">
+      <h2>Project</h2>
+      <button class="add" :title="t('Add project')" :aria-label="t('Add project')" @click.stop="addWorkspace">
+        <Icon class="ico" :icon="plusIcon" />
+      </button>
+    </header>
     <div class="ws-list">
       <div v-for="ws in tree" :key="ws.id" class="ws-group">
         <div
@@ -329,11 +344,15 @@ onBeforeUnmount(() => {
               </svg>
             </button>
             <button
-              class="add-terminal"
-              :title="t('Add terminal to {name}', { name: ws.name })"
-              @click.stop="addTerminal(ws.id)"
+              class="workspace-options"
+              :title="t('Project options')"
+              :aria-label="ws.name + ' - ' + t('Project options')"
+              aria-haspopup="menu"
+              :aria-expanded="menuFor === ws.id && menuKind === 'workspace'"
+              @click.stop="openWorkspaceOptions($event, ws.id)"
+              @dblclick.stop
             >
-              <Icon :icon="plusIcon" />
+              <Icon :icon="moreHorizontalIcon" />
             </button>
           </template>
         </div>
@@ -411,6 +430,7 @@ onBeforeUnmount(() => {
       :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
       @click.stop
     >
+      <button v-if="menuKind === 'workspace'" class="menu-item" role="menuitem" @click="addTerminal(menuFor)">{{ t("New terminal") }}</button>
       <button class="menu-item" role="menuitem" @click="menuKind === 'session' ? startSessionRename(menuFor) : startRename(menuFor)">{{ t("Rename") }}</button>
       <button
         class="menu-item"
@@ -423,10 +443,10 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.loop-profile { color: #4ec9b0; font-size: 10px; white-space: nowrap; }
+.loop-profile { color: var(--accent); font-size: 10px; white-space: nowrap; }
 .loop-state { color: #aaa; font-size: 10px; }
-.session.insert-before { box-shadow: inset 0 2px #4ec9b0; }
-.session.insert-after { box-shadow: inset 0 -2px #4ec9b0; }
+.session.insert-before { box-shadow: inset 0 2px var(--accent); }
+.session.insert-after { box-shadow: inset 0 -2px var(--accent); }
 .sidebar {
   position: relative;
   width: 100%;
@@ -485,7 +505,7 @@ onBeforeUnmount(() => {
 }
 .settings-button:focus-visible,
 .add:focus-visible {
-  outline: 1px solid #4ec9b0;
+  outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
 .ws-group {
@@ -512,7 +532,7 @@ onBeforeUnmount(() => {
 .ws:hover { background: #333; }
 .ws.active {
   background: #1e1e1e;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .ws .bar {
   position: absolute;
@@ -523,30 +543,48 @@ onBeforeUnmount(() => {
   border-radius: 2px;
   background: transparent;
 }
-.ws.active .bar { background: #4ec9b0; }
+.ws.active .bar { background: var(--accent); }
 input {
   background: #1e1e1e;
   color: #e6e6e6;
-  border: 1px solid #4ec9b0;
+  border: 1px solid var(--accent);
   width: 100%;
   text-align: left;
   font: inherit;
   padding: 0;
 }
+.project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.project-header h2 {
+  margin: 0;
+  color: #b8b8b8;
+  font-size: 12px;
+  font-weight: 600;
+}
 .add {
-  width: 100%;
-  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   background: transparent;
-  border: 1px dashed #444;
-  border-radius: 8px;
-  color: #888;
-  font-size: 18px;
+  border: 0;
+  border-radius: 4px;
+  color: #9a9a9a;
+  font-size: 16px;
   cursor: pointer;
   flex-shrink: 0;
 }
 .add:hover {
   color: #e6e6e6;
-  border-color: #4ec9b0;
+  background: #3a3a3a;
 }
 .ws-name {
   display: inline;
@@ -565,7 +603,7 @@ input {
   opacity: 0.85;
 }
 .open-flow,
-.add-terminal {
+.workspace-options {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -580,12 +618,12 @@ input {
   flex-shrink: 0;
 }
 .open-flow:hover,
-.add-terminal:hover {
+.workspace-options:hover {
   background: #3a3a3a;
   color: #e6e6e6;
 }
-.open-flow:focus-visible, .add-terminal:focus-visible { outline: 2px solid #4ec9b0; outline-offset: 1px; }
-.add-terminal :deep(svg) {
+.open-flow:focus-visible, .workspace-options:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.workspace-options :deep(svg) {
   font-size: 16px;
 }
 .sessions {
@@ -611,7 +649,7 @@ input {
 }
 .session.focused {
   background: #223532;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .session .s-ico {
   flex-shrink: 0;
@@ -660,7 +698,7 @@ input {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #4ec9b0;
+  background: var(--accent);
 }
 /* The focused Session is cleared upstream, but guard against a residual badge. */
 .session.focused .s-badge {
@@ -699,7 +737,7 @@ input {
   width: 100%;
   background: #1e1e1e;
   color: inherit;
-  border: 1px solid #4ec9b0;
+  border: 1px solid var(--accent);
   border-radius: 3px;
   padding: 2px 4px;
   font: inherit;

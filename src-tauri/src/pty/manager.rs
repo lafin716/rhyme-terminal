@@ -2,18 +2,21 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::agent::{agent_for_shell, ProcessEntry};
+use super::agent::ProcessEntry;
 use super::agent_status::{AgentTaskEvent, AgentTaskStatus};
+use super::runtime_monitor::AgentRuntimeMonitor;
 use super::{AgentKind, Session, SessionInfo};
 
 pub struct SessionManager {
     pub sessions: Mutex<HashMap<Uuid, Session>>,
+    pub runtime: Mutex<AgentRuntimeMonitor>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            runtime: Mutex::new(AgentRuntimeMonitor::default()),
         }
     }
 
@@ -23,6 +26,7 @@ impl SessionManager {
             let _ = session.killer.kill();
         }
         map.clear();
+        *self.runtime.lock() = AgentRuntimeMonitor::default();
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
@@ -40,10 +44,20 @@ impl SessionManager {
     pub fn refresh_agents(&self, processes: &[ProcessEntry]) -> Vec<(Uuid, AgentKind)> {
         let changes = {
             let mut sessions = self.sessions.lock();
+            let mut runtime = self.runtime.lock();
+            runtime.states.retain(|id, _| sessions.contains_key(id));
+            if sessions.is_empty() {
+                runtime.processes.clear();
+                runtime.revision += 1;
+                return Vec::new();
+            }
+            runtime.processes = processes.to_vec();
+            runtime.revision += 1;
+            let tree = super::agent::ProcessTree::new(processes);
             sessions
                 .iter_mut()
                 .filter_map(|(id, session)| {
-                    let agent = agent_for_shell(session.shell_pid, processes);
+                    let agent = runtime.observe_tree(*id, session.shell_pid, &tree);
                     if session.info.agent == agent {
                         None
                     } else {
@@ -177,5 +191,7 @@ mod tests {
 
         manager.kill_all();
         assert!(!manager.has_sessions());
+        assert!(manager.runtime.lock().states.is_empty());
+        assert!(manager.runtime.lock().processes.is_empty());
     }
 }

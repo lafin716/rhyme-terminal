@@ -1,6 +1,7 @@
 import { reactive } from "vue";
 import { normalizeSessionMenuOrder } from "../lib/session-menu";
 import { DEFAULT_LOCALE, normalizeLocale } from "../lib/i18n";
+import { DEFAULT_ACCENT_THEME_ID, normalizeAccentThemeId } from "../lib/theme";
 import {
   loadPrefs,
   savePrefs,
@@ -20,6 +21,7 @@ import {
 const prefs = reactive<Prefs>({
   sessionMenuOrder: normalizeSessionMenuOrder(undefined),
   language: DEFAULT_LOCALE,
+  accentTheme: DEFAULT_ACCENT_THEME_ID,
   showAccountProfile: true,
   skipKillSessionConfirm: false,
   defaultTerminal: defaultTerminalConfig(),
@@ -42,6 +44,7 @@ export function loadPrefsFromStorage(): void {
     ...stored,
     sessionMenuOrder: normalizeSessionMenuOrder(stored.sessionMenuOrder),
     language: normalizeLocale(stored.language),
+    accentTheme: normalizeAccentThemeId(stored.accentTheme),
     showAccountProfile: typeof stored.showAccountProfile === "boolean" ? stored.showAccountProfile : true,
     defaultTerminal: normalizeTerminalConfig(stored.defaultTerminal),
     paletteUiMode,

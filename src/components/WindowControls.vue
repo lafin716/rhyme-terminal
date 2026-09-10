@@ -51,10 +51,10 @@ onBeforeUnmount(() => { disposed = true; unlisten?.(); });
 .window-controls { position: fixed; top: 0; right: 0; height: var(--titlebar-height); width: 172px; display: flex; background: #252525; z-index: 60; }
 button { width: 46px; height: 100%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border: 0; background: transparent; color: #aaa; cursor: pointer; }
 button:hover { background: #3a3a3a; color: #fff; }
-button:focus-visible { outline: 1px solid #4ec9b0; outline-offset: -2px; }
+button:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 .panel-toggle { width: 34px; font-size: 15px; }
 .window-controls.page-controls { width: 138px; }
-.panel-toggle.active { color: #4ec9b0; }
+.panel-toggle.active { color: var(--accent); }
 .close-window:hover { background: #c42b1c; color: #fff; }
 svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1; }
 </style>

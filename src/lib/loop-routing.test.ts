@@ -23,7 +23,7 @@ describe('loop routing profile membership', () => {
 });
 
 describe('loop navigator rows', () => {
-  const group: LoopGroup = { id: 'g1', name: 'Loop', workspaceId: 'w2', cwd: 'C:/repo', status: 'running', activeSessionId: 'live', attempts: [{ id: 'a1', sessionId: 'old', agent: 'codex', profileId: 'p1', label: 'Work', status: 'completed', reason: null, startedAt: 0, endedAt: 1 }], reason: null, updatedAt: 1 };
+  const group: LoopGroup = { id: 'g1', name: 'Loop', workspaceId: 'w2', cwd: 'C:/repo', status: 'running', runtime: { status: 'RUNNING', provider: 'codex', pid: 12 }, activeSessionId: 'live', attempts: [{ id: 'a1', sessionId: 'old', agent: 'codex', profileId: 'p1', label: 'Work', status: 'completed', reason: null, startedAt: 0, endedAt: 1 }], reason: null, updatedAt: 1 };
   it('hides all managed PTYs and shows the group once in its current workspace namespace', () => {
     const sessions = [{ id: 'ordinary', name: 'w1.shell', agent: 'terminal' as const }, { id: 'old', name: 'w1.old', agent: 'claude' as const }, { id: 'live', name: 'w1.current', agent: 'codex' as const }];
     expect(loopNavigatorSessions(sessions, [group], [{ id: 'w2', index: 2, layout: makeLeaf('leaf', ['loop:g1']) }])).toEqual([sessions[0], { id: 'loop:g1', name: 'w2.Loop', agent: 'codex' }]);

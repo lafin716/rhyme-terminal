@@ -14,37 +14,57 @@ pub struct ProcessEntry {
 }
 
 pub fn agent_for_shell(shell_pid: u32, processes: &[ProcessEntry]) -> AgentKind {
-    let mut children_by_parent: HashMap<u32, Vec<&ProcessEntry>> = HashMap::new();
-    for process in processes {
-        if let Some(parent_pid) = process.parent_pid {
-            children_by_parent
-                .entry(parent_pid)
-                .or_default()
-                .push(process);
+    runtime_for_shell(shell_pid, processes)
+        .map(|(_, agent)| agent)
+        .unwrap_or(AgentKind::Terminal)
+}
+
+pub fn runtime_for_shell(
+    shell_pid: u32,
+    processes: &[ProcessEntry],
+) -> Option<(ProcessEntry, AgentKind)> {
+    ProcessTree::new(processes).runtime_for_shell(shell_pid)
+}
+
+pub struct ProcessTree<'a> {
+    children_by_parent: HashMap<u32, Vec<&'a ProcessEntry>>,
+}
+impl<'a> ProcessTree<'a> {
+    pub fn new(processes: &'a [ProcessEntry]) -> Self {
+        let mut children_by_parent: HashMap<u32, Vec<&ProcessEntry>> = HashMap::new();
+        for process in processes {
+            if let Some(parent_pid) = process.parent_pid {
+                children_by_parent
+                    .entry(parent_pid)
+                    .or_default()
+                    .push(process);
+            }
         }
+        Self { children_by_parent }
     }
+    pub fn descendants(&self, roots: impl IntoIterator<Item = u32>) -> Vec<&'a ProcessEntry> {
+        let mut descendants = Vec::new();
+        let mut pending: VecDeque<_> = roots.into_iter().collect();
+        let mut seen: HashSet<_> = pending.iter().copied().collect();
 
-    let mut descendants = Vec::new();
-    let mut pending = VecDeque::from([shell_pid]);
-    let mut seen = HashSet::from([shell_pid]);
-
-    while let Some(parent_pid) = pending.pop_front() {
-        if let Some(children) = children_by_parent.get(&parent_pid) {
-            for &process in children {
-                if seen.insert(process.pid) {
-                    descendants.push(process);
-                    pending.push_back(process.pid);
+        while let Some(parent_pid) = pending.pop_front() {
+            if let Some(children) = self.children_by_parent.get(&parent_pid) {
+                for &process in children {
+                    if seen.insert(process.pid) {
+                        descendants.push(process);
+                        pending.push_back(process.pid);
+                    }
                 }
             }
         }
+        descendants
     }
-
-    descendants
-        .into_iter()
-        .filter_map(|process| agent_for_process(process).map(|agent| (process.started_at, agent)))
-        .max_by_key(|(started_at, _)| *started_at)
-        .map(|(_, agent)| agent)
-        .unwrap_or(AgentKind::Terminal)
+    pub fn runtime_for_shell(&self, shell_pid: u32) -> Option<(ProcessEntry, AgentKind)> {
+        self.descendants([shell_pid])
+            .into_iter()
+            .filter_map(|process| agent_for_process(process).map(|agent| (process.clone(), agent)))
+            .max_by_key(|(process, _)| process.started_at)
+    }
 }
 
 pub fn process_snapshot() -> Vec<ProcessEntry> {
@@ -68,7 +88,7 @@ pub fn process_snapshot() -> Vec<ProcessEntry> {
         .collect()
 }
 
-fn agent_for_process(process: &ProcessEntry) -> Option<AgentKind> {
+pub fn agent_for_process(process: &ProcessEntry) -> Option<AgentKind> {
     [AgentKind::Claude, AgentKind::Codex]
         .into_iter()
         .find(|agent| {
@@ -76,6 +96,20 @@ fn agent_for_process(process: &ProcessEntry) -> Option<AgentKind> {
                 || wrapper_target(process)
                     .is_some_and(|target| wrapper_target_matches(target, *agent))
         })
+}
+
+/// Preserve argv as data when a direct executable bypasses the shell gate.
+/// Composite command-shell expressions cannot be replayed reliably.
+pub fn invocation_args(process: &ProcessEntry) -> Option<Vec<String>> {
+    let agent = agent_for_process(process)?;
+    let arguments = command_arguments(process);
+    if executable_matches(&process.image_name, agent.executable_name()) {
+        Some(arguments.to_vec())
+    } else if executable_matches(&process.image_name, "node") {
+        Some(arguments.get(1..)?.to_vec())
+    } else {
+        None
+    }
 }
 
 fn wrapper_target(process: &ProcessEntry) -> Option<&str> {

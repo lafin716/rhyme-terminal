@@ -21,6 +21,25 @@ export type ViewerMode =
 /** The narrow slice of a `FilePreview` the resolver actually reads. */
 export type ViewerModeInput = Pick<FilePreview, "kind" | "language">;
 
+/**
+ * Whether a mode has a raw source view behind it. Markdown is the only one: the
+ * backend ships it as text, so the rendered page can always be swapped for the
+ * editable source. Image/PDF/binary have no text to edit, and `text` is already
+ * its own source.
+ */
+export function canShowSource(mode: ViewerMode): boolean {
+  return mode === "markdown";
+}
+
+/**
+ * The view the FileViewer actually renders, once the Markdown source toggle is
+ * applied. Toggling source on Markdown drops to the editable `text` view;
+ * everything else ignores the flag.
+ */
+export function effectiveViewerMode(mode: ViewerMode, showSource: boolean): ViewerMode {
+  return showSource && canShowSource(mode) ? "text" : mode;
+}
+
 export function resolveViewerMode(preview: ViewerModeInput): ViewerMode {
   switch (preview.kind) {
     case "binary":

@@ -97,17 +97,28 @@ it('renames a loop through its real group id without changing the stable tab', a
   expect(useLoopRouting().getByTab('loop:group-1')?.name).toBe('Renamed loop');
 });
 
-it('passes only the explicitly chosen start mode to creation', async () => {
-  mocks.invoke.mockImplementation(async (_command, args) => args.request.op === 'create' ? group(null) : args.request.op === 'list' ? [] : { explicitStart: true });
-  const start = { kind: 'prompt' as const, prompt: 'Implement checkout' };
-  await useLoopRouting().create('Checkout', 'w1', 1, 'C:/repo', start);
-  expect(mocks.invoke).toHaveBeenCalledWith('loop_request', { request: expect.objectContaining({ op: 'create', start }) });
+it('requests guarded automatic creation without a prompt or session selector', async () => {
+  mocks.invoke.mockImplementation(async (_command, args) => args.request.op === 'create' ? { ...group('shell'), status: 'resuming' } : args.request.op === 'list' ? [] : { runtimeMonitor: true, autoStart: true });
+  await useLoopRouting().create({ name: 'Checkout', workspaceId: 'w1', workspaceIndex: 1, cwd: 'C:/repo', participants: ['codex:work'] });
+  expect(mocks.invoke).toHaveBeenCalledWith('loop_request', { request: expect.objectContaining({ op: 'create', participants: ['codex:work'] }) });
+  const request = mocks.invoke.mock.calls.find(([, args]) => args.request.op === 'create')![1].request;
+  expect(request).not.toHaveProperty('start');
   expect(mocks.invoke.mock.calls.some(([, args]) => args.request.op === 'conversations')).toBe(false);
 });
+it('blocks a runtime-aware daemon without automatic startup before creation', async () => {
+  mocks.invoke.mockResolvedValue({ version: 1, runtimeMonitor: true });
+  await expect(useLoopRouting().create({ name: 'New', workspaceId: 'w1', workspaceIndex: 1, cwd: 'C:/repo' })).rejects.toThrow('데몬');
+  expect(mocks.invoke.mock.calls.every(([, args]) => args.request.op === 'capabilities')).toBe(true);
+});
 
-it('blocks a legacy daemon before sending creation or conversation commands', async () => {
-  mocks.invoke.mockResolvedValue({ version: 1 });
-  await expect(useLoopRouting().create('New', 'w1', 1, 'C:/repo', { kind: 'prompt', prompt: 'Build checkout' })).rejects.toThrow('데몬');
-  await expect(useLoopRouting().conversations('C:/repo')).rejects.toThrow('데몬');
+it('updates only the requested loop policy and refreshes its persisted state', async () => {
+  mocks.invoke.mockImplementation(async (_command, args) => args.request.op === 'capabilities' ? { livePolicy: true } : args.request.op === 'list' ? [group('shell')] : group('shell'));
+  await useLoopRouting().updatePolicy('group-1', { profile: { key: 'codex:work', shortThreshold: 75 } });
+  expect(mocks.invoke).toHaveBeenCalledWith('loop_request', { request: { op: 'update_policy', id: 'group-1', patch: { profile: { key: 'codex:work', shortThreshold: 75 } } } });
+  expect(mocks.invoke.mock.calls.some(([, args]) => args.request.op === 'configure')).toBe(false);
+});
+it('rejects live editing on an older daemon without writing settings', async () => {
+  mocks.invoke.mockResolvedValue({ runtimeMonitor: true, autoStart: true });
+  await expect(useLoopRouting().updatePolicy('group-1', { autoResume: false })).rejects.toThrow('데몬');
   expect(mocks.invoke.mock.calls.every(([, args]) => args.request.op === 'capabilities')).toBe(true);
 });

@@ -3,6 +3,7 @@ import type { Keybinding } from "./keybindings";
 import type { TerminalConfig } from "./terminal-config";
 import type { ShellPanelsState } from "./shell-panels";
 import type { Locale } from "./i18n";
+import type { AccentThemeId } from "./theme";
 
 const STORAGE_KEY = "winmux:workspaces:v1";
 const KEYBINDINGS_KEY = "winmux:keybindings:v1";
@@ -25,6 +26,8 @@ export type PaletteUiMode = "context" | "radial";
 export interface Prefs {
   sessionMenuOrder?: string[];
   language: Locale;
+  /** Main color the whole shell is tinted with — see `lib/theme.ts`. */
+  accentTheme: AccentThemeId;
   showAccountProfile: boolean;
   skipKillSessionConfirm: boolean;
   defaultTerminal: TerminalConfig;

@@ -266,7 +266,7 @@ watch(
 .qo-icon {
   flex: 0 0 16px;
   font-size: 16px;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .qo-label {
   flex: 0 1 auto;

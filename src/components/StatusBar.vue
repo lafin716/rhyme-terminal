@@ -127,7 +127,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.status-bar { display:flex; align-items:center; background:#4ec9b0; color:#1a1a1a; height:22px; padding:0 8px; font-size:12px; font-family:Consolas,"Cascadia Mono",monospace; user-select:none; }
+.status-bar { display:flex; align-items:center; background:var(--accent); color:var(--accent-on); height:22px; padding:0 8px; font-size:12px; font-family:Consolas,"Cascadia Mono",monospace; user-select:none; }
 .left { display:flex; gap:6px; align-items:center; min-width:0; overflow:hidden; white-space:nowrap; }
 .badge,.ws { font-weight:600; } .ws,.session { overflow:hidden; text-overflow:ellipsis; }
 .usage { flex:1 0 auto; display:flex; gap:3px; padding:0 12px; align-items:center; }

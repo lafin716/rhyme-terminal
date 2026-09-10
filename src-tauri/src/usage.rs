@@ -103,6 +103,11 @@ pub async fn query_account_usage(agent: &str, dir: &Path, session_usage: bool) -
     result
 }
 
+/// Scheduling decisions never consume the display cache (60 seconds).
+pub async fn refresh_account_usage(agent: &str, dir: &Path, session_usage: bool) -> UsageResult {
+    fetch_account_usage(agent, dir, session_usage).await
+}
+
 fn parse_windows(agent: &str, body: &Value) -> Vec<UsageWindow> {
     let mut windows = Vec::new();
     let fields = if agent == "claude" {

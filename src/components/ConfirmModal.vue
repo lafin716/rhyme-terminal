@@ -107,13 +107,13 @@ onUnmounted(() => {
 }
 .btn:hover { background: #333; }
 .btn.primary {
-  background: #4ec9b0;
-  color: #1e1e1e;
-  border-color: #4ec9b0;
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: var(--accent);
   font-weight: 600;
 }
 .btn.primary:hover {
-  background: #5fd9c0;
-  border-color: #5fd9c0;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 </style>

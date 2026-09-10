@@ -106,6 +106,6 @@ function onSplitterMouseDown(ev: MouseEvent, index: number) {
   height: 4px;
 }
 .splitter:hover {
-  background: #4ec9b0;
+  background: var(--accent);
 }
 </style>

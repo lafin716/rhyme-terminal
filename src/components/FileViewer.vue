@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { t } from "../composables/useI18n";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watchEffect } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import "monaco-editor/esm/vs/language/json/monaco.contribution";
 import "monaco-editor/esm/vs/basic-languages/bat/bat.contribution";
@@ -18,7 +18,7 @@ import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import MarkdownIt from "markdown-it";
 import { base64ToBytes, type FilePreview } from "../lib/tauri";
-import { resolveViewerMode } from "../lib/viewer-mode";
+import { canShowSource, effectiveViewerMode, resolveViewerMode } from "../lib/viewer-mode";
 import { useResources } from "../composables/useResources";
 import { useKeybindings } from "../composables/useKeybindings";
 import { formatKeybinding, matchesEvent } from "../lib/keybindings";
@@ -44,12 +44,19 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 
 const mode = computed(() => resolveViewerMode(props.preview));
 
+// Markdown opens rendered; "Show Source" swaps in the Monaco editor over the
+// same text so the file can be edited and saved, and "Preview" swaps back.
+const showSource = ref(false);
+const view = computed(() => effectiveViewerMode(mode.value, showSource.value));
+
 const imageSrc = computed(() =>
   props.preview.data ? `data:${props.preview.mime};base64,${props.preview.data}` : "",
 );
 
+// Render the live draft, not the on-disk text, so edits made in the source view
+// are visible the moment the user switches back to the preview.
 const markdownHtml = computed(() =>
-  mode.value === "markdown" ? md.render(props.preview.text ?? "") : "",
+  view.value === "markdown" ? md.render(fileTab.value?.draftText ?? props.preview.text ?? "") : "",
 );
 
 // Feed the PDF to the webview's native viewer via a same-origin blob URL built
@@ -86,8 +93,16 @@ function monacoLanguage(language: string): string {
   return language;
 }
 
+function disposeEditor() {
+  editor?.dispose();
+  editor = null;
+  model?.dispose();
+  model = null;
+}
+
 async function createEditor() {
-  if (mode.value !== "text") return;
+  disposeEditor();
+  if (view.value !== "text") return;
   await nextTick();
   if (!editorHost.value) return;
   model = monaco.editor.createModel(
@@ -154,7 +169,7 @@ function openFind() {
 }
 
 function onShortcut(ev: KeyboardEvent) {
-  if (ev.defaultPrevented || ev.isComposing || mode.value !== "text") return;
+  if (ev.defaultPrevented || ev.isComposing || view.value !== "text") return;
   if (matchesEvent(bindingFor("editor.save"), ev)) {
     ev.preventDefault(); ev.stopPropagation(); void save();
   } else if (matchesEvent(bindingFor("editor.find"), ev)) {
@@ -166,37 +181,40 @@ function onShortcut(ev: KeyboardEvent) {
 }
 
 onMounted(createEditor);
-onBeforeUnmount(() => {
-  editor?.dispose();
-  editor = null;
-  model?.dispose();
-  model = null;
-});
+// Toggling the Markdown source view mounts/unmounts the editor host, so the
+// editor is rebuilt (from the draft, which survives in the tab resource).
+watch(view, () => void createEditor());
+onBeforeUnmount(disposeEditor);
 </script>
 
 <template>
   <div class="file-viewer" @keydown.capture="onShortcut">
     <div class="toolbar">
       <span class="path" :title="preview.canonicalPath || fileTab?.projectPath">{{ preview.canonicalPath || preview.name }}</span>
-      <button v-if="mode === 'text'" :disabled="fileTab?.saving" :title="`${t('Save')} (${formatKeybinding(bindingFor('editor.save'))})`" @click="save">{{ t("Save") }}</button>
-      <button v-if="mode === 'text'" :title="`${t('Find')} (${formatKeybinding(bindingFor('editor.find'))})`" @click="openFind">{{ t("Find") }}</button>
+      <button
+        v-if="canShowSource(mode)"
+        :title="t(showSource ? 'Back to the rendered preview' : 'Edit the raw source')"
+        @click="showSource = !showSource"
+      >{{ t(showSource ? "Preview" : "Show Source") }}</button>
+      <button v-if="view === 'text'" :disabled="fileTab?.saving" :title="`${t('Save')} (${formatKeybinding(bindingFor('editor.save'))})`" @click="save">{{ t("Save") }}</button>
+      <button v-if="view === 'text'" :title="`${t('Find')} (${formatKeybinding(bindingFor('editor.find'))})`" @click="openFind">{{ t("Find") }}</button>
       <span v-if="saveError" class="save-error" :title="saveError">{{ t("Save failed") }}</span>
       <span class="meta">{{ preview.language }} · {{ preview.size.toLocaleString() }} {{ t("bytes") }}</span>
     </div>
 
-    <div v-if="mode === 'image'" class="image-wrap">
+    <div v-if="view === 'image'" class="image-wrap">
       <img :src="imageSrc" :alt="preview.name" />
     </div>
     <!-- Rendered read-only Markdown; markdown-it emits safe HTML (html: false). -->
-    <div v-else-if="mode === 'markdown'" class="markdown-body" v-html="markdownHtml" />
+    <div v-else-if="view === 'markdown'" class="markdown-body" v-html="markdownHtml" />
     <iframe
-      v-else-if="mode === 'pdf'"
+      v-else-if="view === 'pdf'"
       class="pdf-frame"
       :src="pdfSrc"
       :title="preview.name"
     />
-    <div v-else-if="mode === 'binary'" class="message">{{ t("Binary files cannot be previewed.") }}</div>
-    <div v-else-if="mode === 'too_large'" class="message">{{ t("This file is too large to preview.") }}</div>
+    <div v-else-if="view === 'binary'" class="message">{{ t("Binary files cannot be previewed.") }}</div>
+    <div v-else-if="view === 'too_large'" class="message">{{ t("This file is too large to preview.") }}</div>
     <div v-else ref="editorHost" class="editor-host" />
   </div>
 </template>

@@ -250,7 +250,7 @@ onUnmounted(() => {
 }
 .app-icon { width: 34px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
 .app-icon img { width: 24px; height: 24px; }
-.corner-toggle:focus-visible { outline: 1px solid #4ec9b0; outline-offset: -2px; }
+.corner-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 .overflow-menu {
   position: relative;
   display: flex;
@@ -273,7 +273,7 @@ onUnmounted(() => {
   background: #3a3a3a;
   color: #d4d4d4;
 }
-.corner-toggle.active { color: #4ec9b0; }
+.corner-toggle.active { color: var(--accent); }
 .corner-toggle .ico { font-size: 15px; }
 .dropdown {
   position: absolute;

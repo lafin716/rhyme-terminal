@@ -1,5 +1,7 @@
 pub mod adapter;
+pub mod bridge;
 pub mod model;
+mod process_controller;
 mod runtime;
 
 use crate::ipc::{client::DaemonClient, protocol::Method, server::DaemonState};
@@ -13,7 +15,6 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct Service {
     engine: AsyncMutex<Option<runtime::Engine>>,
     pub owned: Mutex<HashSet<uuid::Uuid>>,
-    pub blocked: Mutex<HashSet<uuid::Uuid>>,
 }
 
 pub async fn daemon_supports_routing(client: &DaemonClient) -> bool {
@@ -84,13 +85,13 @@ impl Service {
             }
         });
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 let targets = {
-                    let engine = state.routing.engine.lock().await;
+                    let mut engine = state.routing.engine.lock().await;
                     engine
-                        .as_ref()
+                        .as_mut()
                         .map(|e| e.usage_targets())
                         .unwrap_or_default()
                 };
@@ -98,22 +99,31 @@ impl Service {
                 let mut targets = targets.into_iter();
                 loop {
                     while pending.len() < 2 {
-                        let Some((key, agent, dir, session_usage)) = targets.next() else {
+                        let Some((key, agent, dir, session_usage, requested_at)) = targets.next()
+                        else {
                             break;
                         };
                         pending.spawn(async move {
-                            let result =
-                                crate::usage::query_account_usage(&agent, &dir, session_usage)
-                                    .await;
-                            (key, result)
+                            let result = tokio::time::timeout(
+                                std::time::Duration::from_secs(20),
+                                crate::usage::refresh_account_usage(&agent, &dir, session_usage),
+                            )
+                            .await
+                            .unwrap_or_else(|_| Err("Usage refresh timeout".into()));
+                            (key, result, requested_at)
                         });
                     }
                     let Some(result) = pending.join_next().await else {
                         break;
                     };
-                    if let Ok((key, usage)) = result {
+                    if let Ok((key, usage, requested_at)) = result {
                         if let Some(engine) = state.routing.engine.lock().await.as_mut() {
-                            engine.quota(key, usage);
+                            engine.quota(key.clone(), usage, requested_at);
+                            // Threshold evidence acts immediately, not at the next tick.
+                            if let Err(error) = engine.tick_for_profile(&state, &key) {
+                                tracing::warn!("usage guard: {error}");
+                            }
+                            engine.sync_guards(&state.routing);
                         }
                     }
                 }

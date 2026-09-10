@@ -70,6 +70,7 @@ pub fn hook() -> Result<()> {
         "PostToolUseFailure",
         "PermissionRequest",
         "Stop",
+        "StopFailure",
         "SubagentStart",
         "SubagentStop",
         "Interrupt",
@@ -80,51 +81,13 @@ pub fn hook() -> Result<()> {
     }
     let session = payload["session_id"].as_str().context("Missing session")?;
     uuid::Uuid::parse_str(session)?;
-    let control = root.join("control.json");
-    let boundary = read(&control).is_some_and(|v| v["switchRequested"] == true)
-        && ["PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"].contains(&kind);
-    let input = if let Some(text) = payload["tool_input"].as_str() {
-        serde_json::from_str(text).unwrap_or(Value::Null)
-    } else {
-        payload["tool_input"].clone()
-    };
-    let response = &payload["tool_response"];
-    let text = response
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| response.to_string())
-        .to_lowercase();
-    let shell = [
-        "Bash",
-        "Shell",
-        "exec_command",
-        "write_stdin",
-        "shell_command",
-    ]
-    .contains(&payload["tool_name"].as_str().unwrap_or(""));
-    let background = input["run_in_background"] == true
-        || response["backgrounded"] == true
-        || !response["backgroundTaskId"].is_null()
-        || !response["background_task_id"].is_null()
-        || (kind == "PostToolUse"
-            && shell
-            && (!response["session_id"].is_null()
-                || [
-                    "process running with session id",
-                    "script running with cell id",
-                    "running in background",
-                    "running in the background",
-                ]
-                .iter()
-                .any(|phrase| text.contains(phrase))));
-    let evidence = json!({"kind":kind,"sessionId":session,"transcriptPath":payload["transcript_path"],
-        "toolUseId":payload["tool_use_id"],"subagentId":payload["agent_id"],"atMs":now(),"boundary":boundary,"unknownBackground":background});
+    let evidence = json!({"kind":kind,"errorCode":crate::loop_routing::adapter::hook_error_code(&payload),"sessionId":session,"transcriptPath":payload["transcript_path"],
+        "toolUseId":payload["tool_use_id"],"subagentId":payload["agent_id"],"atMs":now()});
     event(&root, &evidence)?;
     let expiry = || -> Result<()> {
         let mut value = evidence.clone();
-        value["kind"] = json!("BoundaryExpired");
+        value["kind"] = json!("StartupTimeout");
         value["atMs"] = json!(now());
-        value["boundary"] = json!(false);
         event(&root, &value)
     };
     if kind == "SessionStart" {
@@ -145,33 +108,7 @@ pub fn hook() -> Result<()> {
             &json!({"sessionId":session}),
         )?;
     }
-    let mut resumed = false;
-    if boundary {
-        let started = Instant::now();
-        let mut reported = false;
-        loop {
-            std::thread::sleep(Duration::from_millis(100));
-            if root.join("release.json").exists() {
-                break;
-            }
-            if read(&control).is_some_and(|v| v["switchRequested"] == false) {
-                resumed = true;
-                break;
-            }
-            if !reported && started.elapsed().as_secs() >= 30 {
-                expiry()?;
-                reported = true;
-            }
-        }
-    }
-    let output = if !boundary || resumed {
-        json!({})
-    } else if kind == "PreToolUse" {
-        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Rhyme Loop switching accounts"}})
-    } else {
-        json!({"continue":false,"stopReason":"Rhyme Loop switching accounts"})
-    };
-    println!("{output}");
+    println!("{{}}");
     Ok(())
 }
 pub fn statusline(dir: &Path) -> Result<()> {

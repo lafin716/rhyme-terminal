@@ -133,6 +133,18 @@ export const api = {
   readDirectory(path: string): Promise<DirListing> {
     return invoke("read_directory", { path });
   },
+  /** Renames an Explorer entry in place; `newName` is a leaf name, not a path. */
+  renamePath(path: string, newName: string): Promise<string> {
+    return invoke("rename_path", { path, newName });
+  },
+  /** Deletes an Explorer entry; directories go recursively. Confirm first. */
+  deletePath(path: string): Promise<void> {
+    return invoke("delete_path", { path });
+  },
+  /** Creates an empty file (or a folder) inside `parent`; returns its path. */
+  createEntry(parent: string, name: string, isDir: boolean): Promise<string> {
+    return invoke("create_entry", { parent, name, isDir });
+  },
   listFiles(root: string): Promise<FileIndex> {
     return invoke("list_files", { root });
   },

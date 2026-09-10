@@ -75,7 +75,7 @@ function move(id: string, offset: -1 | 1) {
         <button type="button" :disabled="index === items.length - 1" :aria-label="t('Move {item} down', { item: t(item.label) })" @click="move(item.id, 1)">↓</button>
       </li>
     </ol>
-    <p>{{ t('The shell matching the default terminal is hidden in the options menu.') }}</p>
+    <p>{{ t('New Terminal opens the default shell; its arrow lists the other shells available on this computer.') }}</p>
   </section>
 </template>
 
@@ -87,7 +87,7 @@ p { color: #999; font-size: 12px; line-height: 1.6; }
 ol { padding: 0; margin: 16px 0; list-style: none; }
 li { position: relative; display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #2b2b2b; }
 li.dragging { opacity: .45; }
-li.drop-before::before, li.drop-after::after { content: ""; position: absolute; left: 0; right: 0; height: 2px; background: #4ec9b0; pointer-events: none; }
+li.drop-before::before, li.drop-after::after { content: ""; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent); pointer-events: none; }
 li.drop-before::before { top: -1px; }
 li.drop-after::after { bottom: -1px; }
 .drag-handle { display: flex; align-items: center; justify-content: center; flex: 0 0 24px; height: 30px; color: #888; cursor: grab; user-select: none; }
@@ -98,5 +98,5 @@ li.drop-after::after { bottom: -1px; }
 button { min-width: 30px; min-height: 30px; padding: 4px 10px; border: 1px solid #444; border-radius: 4px; background: #292929; color: #ddd; cursor: pointer; }
 button:hover:enabled { background: #383838; }
 button:disabled { opacity: .3; cursor: default; }
-button:focus-visible { outline: 2px solid #4ec9b0; outline-offset: 2px; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>

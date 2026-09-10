@@ -4,18 +4,18 @@ import { usePrefs } from './usePrefs';
 import { useAccountProfiles } from './useAccountProfiles';
 import { useWorkspaces } from './useWorkspaces';
 import { addTabToLeaf, findFirstLeaf, findLeafBySession, removeTab } from './useLayout';
-import { loopTabId, mergeLoopProfiles, type LoopGroup, type LoopSettings, type LoopStart, type LoopConversation } from '../lib/loop-routing';
+import { loopTabId, mergeLoopProfiles, type LoopGroup, type LoopSettings, type LoopPolicyPatch } from '../lib/loop-routing';
 const KEY = 'winmux:loop-routing:v1';
-const state = reactive({ settings: { shortThreshold: 90, weeklyThreshold: 90, agentOrder: ['claude', 'codex'], candidates: [] } as LoopSettings, groups: [] as LoopGroup[], error: '', ready: false });
+const state = reactive({ settings: { strategy: 'SMART', pollingIntervalSeconds: 30, interruptTimeoutSeconds: 5, forceKillTimeoutSeconds: 3, autoResume: true, shortThreshold: 90, weeklyThreshold: 90, agentOrder: ['claude', 'codex'], candidates: [] } as LoopSettings, groups: [] as LoopGroup[], error: '', ready: false });
 let timer: ReturnType<typeof setTimeout> | undefined;
 let stopProfiles: (() => void) | undefined;
 let closed = false;
 let knownActiveSessions = new Set<string>();
 let refreshGeneration = 0;
 const request = <T>(request: object) => invoke<T>('loop_request', { request });
-async function requireExplicitStart() {
-  const capabilities = await request<{ explicitStart?: boolean }>({ op: 'capabilities' });
-  if (!capabilities.explicitStart) throw new Error('실행 중인 데몬은 새 루프 생성 방식을 지원하지 않습니다. 작업을 마친 뒤 앱과 데몬을 재시작하세요.');
+async function requireRuntimeMonitor() {
+  const capabilities = await request<{ runtimeMonitor?: boolean; autoStart?: boolean }>({ op: 'capabilities' });
+  if (!capabilities.runtimeMonitor || !capabilities.autoStart) throw new Error('실행 중인 데몬은 새 루프 생성 방식을 지원하지 않습니다. 작업을 마친 뒤 앱과 데몬을 재시작하세요.');
 }
 export async function saveLoopSettings(settings = state.settings) {
   const merged = mergeLoopProfiles(settings, useAccountProfiles().profiles);
@@ -58,7 +58,7 @@ export async function initializeLoopRouting() {
   closed = false;
   try {
     const stored = JSON.parse(localStorage.getItem(KEY) ?? 'null');
-    if (stored?.version === 1 && Array.isArray(stored.candidates) && Array.isArray(stored.agentOrder)) state.settings = stored;
+    if (stored?.version === 1 && Array.isArray(stored.candidates) && Array.isArray(stored.agentOrder)) state.settings = { ...state.settings, ...stored };
     await saveLoopSettings();
     await refreshLoopGroups();
     state.ready = true;
@@ -73,19 +73,23 @@ export async function initializeLoopRouting() {
 export function disposeLoopRouting() { closed = true; refreshGeneration++; clearTimeout(timer); stopProfiles?.(); }
 export function useLoopRouting() {
   return { state, getByTab: (id: string | null) => state.groups.find(g => loopTabId(g.id) === id),
-    async create(name: string, workspaceId: string, workspaceIndex: number, cwd: string, start: LoopStart, requestId?: string) {
-      await requireExplicitStart();
-      await saveLoopSettings();
-      const group = await request<LoopGroup>({ op: 'create', name, workspaceId, workspaceIndex, cwd, start, requestId, cols: 120, rows: 30 });
+    async create(options: { name: string; workspaceId: string; workspaceIndex: number; cwd: string; participants?: string[]; requestId?: string; settings?: LoopSettings }) {
+      await requireRuntimeMonitor();
+      const { settings, ...args } = options;
+      await saveLoopSettings(settings);
+      const group = await request<LoopGroup>({ op: 'create', ...args, cols: 120, rows: 30 });
       await refreshLoopGroups(group.id).catch(e => { state.error = String(e); });
       return group;
     },
-    async conversations(cwd: string) {
-      await requireExplicitStart();
-      await saveLoopSettings();
-      return request<LoopConversation[]>({ op: 'conversations', cwd });
-    },
     async control(op: 'pause' | 'resume' | 'next' | 'stop', id: string) { await request({ op, id }); await refreshLoopGroups(); },
+    async updatePolicy(id: string, patch: LoopPolicyPatch) {
+      const capabilities = await request<{ livePolicy?: boolean }>({ op: 'capabilities' });
+      if (!capabilities.livePolicy) throw new Error('실행 중인 데몬은 Loop 설정 수정을 지원하지 않습니다. 기존 작업 종료 후 앱과 데몬을 재시작하세요.');
+      const group = await request<LoopGroup>({ op: 'update_policy', id, patch });
+      refreshGeneration++; // Discard polls started before this confirmed update.
+      state.groups = state.groups.map(current => current.id === id ? group : current);
+    },
+    async resolveInput(id: string, delivered: boolean) { await request({ op: 'resolve_input', id, delivered }); await refreshLoopGroups(); },
     async rename(id: string, name: string) {
       await request({ op: 'rename', id, name });
       await refreshLoopGroups();

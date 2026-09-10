@@ -137,10 +137,10 @@ h3 { margin: 0 0 12px; font-size: 13px; } h3 span { color: #888; margin-left: 8p
 .kb-label { font-size: 12px; overflow-wrap: anywhere; }
 .binding-cells { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 button { color: #ddd; background: #2a2a2a; border: 1px solid #454545; border-radius: 5px; padding: 6px 8px; cursor: pointer; font-size: 11px; overflow-wrap: anywhere; }
-button:hover { border-color: #888; } button:focus-visible { outline: 2px solid #4ec9b0; outline-offset: 2px; }
+button:hover { border-color: #888; } button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .key-cell, .prefix-cell { font-family: "Cascadia Mono", Consolas, monospace; }
 .prefix-cell { color: #aaa; background: transparent; }
-.capturing { border-color: #4ec9b0; color: #4ec9b0; }
+.capturing { border-color: var(--accent); color: var(--accent); }
 .reset { padding: 4px; font-size: 16px; } .reset:disabled { opacity: .25; cursor: default; }
 .reset-all { white-space: nowrap; }
 .conflict .key-cell, .conflict .prefix-cell { border-color: #dba45e; }
