@@ -99,6 +99,52 @@ fn create_schedules_guarded_auto_start_and_is_idempotent() {
     assert_eq!(f.state.manager.list().len(), 1);
 }
 #[test]
+fn daemon_restart_recovers_an_in_flight_session_to_paused_not_idle() {
+    let mut f = Fixture::auto_start();
+    let root = f.engine.root.clone();
+    let session_id = Uuid::new_v4().to_string();
+    let attempt_id = Uuid::new_v4().to_string();
+    {
+        let g = f.engine.groups.get_mut(&f.id).unwrap();
+        g.status = LoopStatus::Running;
+        g.active_profile = Some("codex:a".into());
+        g.current_provider = Some("codex".into());
+        g.current_agent_session_id = Some(session_id.clone());
+        g.attempts.push(
+            serde_json::from_value(json!({
+                "id": attempt_id, "sessionId": null, "agent": "codex", "profileId": "a",
+                "label": "A", "status": "running", "reason": null, "startedAt": now(),
+                "endedAt": null,
+                "reference": {"agent": "codex", "id": session_id, "transcriptPath": root.join("dummy.jsonl")},
+                "expectedSessionId": null,
+            }))
+            .unwrap(),
+        );
+    }
+    f.engine.save().unwrap();
+    drop(f); // release the sqlite connection before reopening the same database
+    let reopened = Engine::open_at(root).unwrap();
+    let g = reopened.groups.values().next().unwrap();
+    // Idle would invite the user to retype the Agent command directly in the
+    // terminal, which discards current_agent_session_id/handoff_context and is
+    // exactly how a Profile switch loses the ability to resume. Paused forces
+    // the explicit Resume action, which replays interrupt → handoff → resume.
+    assert_eq!(g.status, "paused");
+    assert_eq!(g.current_agent_session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(g.attempts.last().unwrap().reference.as_ref().unwrap().id, session_id);
+}
+#[test]
+fn daemon_restart_with_no_session_history_still_lands_on_idle() {
+    let mut f = Fixture::auto_start();
+    let root = f.engine.root.clone();
+    f.engine.groups.get_mut(&f.id).unwrap().status = LoopStatus::Preparing;
+    f.engine.save().unwrap();
+    drop(f);
+    let reopened = Engine::open_at(root).unwrap();
+    let g = reopened.groups.values().next().unwrap();
+    assert_eq!(g.status, "idle");
+}
+#[test]
 fn ordinary_shell_input_is_not_an_agent_trigger() {
     let mut f = Fixture::new();
     let sid = f.sid();
@@ -150,7 +196,10 @@ fn threshold_is_inclusive_and_independent_for_each_window() {
     assert!(over_limit(&s, &c, &[window(1.0, 0), weekly]));
 }
 #[test]
-fn threshold_interrupts_without_any_tool_boundary() {
+// `running()` never sets `pending_work`, so it defaults false: the Agent is
+// already at a safe boundary (idle at the prompt) the moment the threshold is
+// crossed, and the switch fires on this same tick without ever waiting.
+fn threshold_interrupts_immediately_when_already_at_a_safe_boundary() {
     let mut f = Fixture::new();
     running(&mut f);
     f.engine.quota(
@@ -166,6 +215,215 @@ fn threshold_interrupts_without_any_tool_boundary() {
     );
     assert!(f.engine.live[&f.id].interrupt_at.is_some());
     assert_eq!(f.engine.groups[&f.id].active_session_id, Some(f.sid()));
+    assert!(!f.engine.groups[&f.id].switch_pending);
+}
+#[test]
+fn soft_threshold_defers_switch_while_a_turn_is_in_progress() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(90.0, now() + 60_000)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    let g = &f.engine.groups[&f.id];
+    // Mid-turn: the soft usage threshold only arms switch_pending, it never
+    // interrupts a Tool/Thinking-equivalent turn in progress.
+    assert_eq!(g.status, "running");
+    assert!(g.switch_pending);
+    assert!(g.switch_pending_since.is_some());
+    assert_eq!(g.runtime.status, RuntimeStatus::Running);
+    assert!(f.engine.live[&f.id].interrupt_at.is_none());
+    // Ticking again while still mid-turn changes nothing new.
+    f.engine.tick(&f.state).unwrap();
+    assert_eq!(f.engine.groups[&f.id].status, "running");
+    assert!(f.engine.groups[&f.id].switch_pending);
+}
+#[test]
+fn soft_threshold_switches_once_the_turn_completes() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(90.0, now() + 60_000)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    assert!(f.engine.groups[&f.id].switch_pending);
+    // Stop event equivalent: the turn completes and usage is still fresh
+    // (CACHE_TTL_SECS has not elapsed), so cache is trusted for verification.
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = false;
+    f.engine.tick(&f.state).unwrap();
+    let g = &f.engine.groups[&f.id];
+    assert_eq!(g.status, "switching_profile");
+    assert!(!g.switch_pending);
+    assert!(g.switch_pending_since.is_none());
+    assert!(f.engine.live[&f.id].interrupt_at.is_some());
+}
+#[test]
+fn soft_threshold_clears_when_usage_recovers_before_the_boundary() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(95.0, now() + 60_000)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    assert!(f.engine.groups[&f.id].switch_pending);
+    // A later sample (still mid-turn) shows usage back under threshold.
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(40.0, now() + 60_000)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    let g = &f.engine.groups[&f.id];
+    assert!(!g.switch_pending);
+    assert_eq!(g.status, "running");
+    assert!(f.engine.live[&f.id].interrupt_at.is_none());
+}
+#[test]
+fn safe_boundary_waits_for_a_fresh_sample_before_switching() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(90.0, now() + 60_000)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    assert!(f.engine.groups[&f.id].switch_pending);
+    // Turn completes, but the cached sample is older than CACHE_TTL_SECS.
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = false;
+    f.engine.quotas.get_mut("codex:a").unwrap().fetched_at =
+        now() - (polling::CACHE_TTL_SECS + 5) * 1000;
+    f.engine.tick(&f.state).unwrap();
+    let g = &f.engine.groups[&f.id];
+    // Never guesses: stays pending, does not switch, does not silently resume.
+    assert!(g.switch_pending);
+    assert_eq!(g.status, "running");
+    assert!(f.engine.live[&f.id].interrupt_at.is_none());
+    // But a fresh re-check was explicitly demanded (bypasses the passive interval).
+    assert!(f.engine.live[&f.id].guard_at >= now().saturating_sub(1_000));
+}
+#[test]
+fn backoff_grows_exponentially_with_jitter_and_caps() {
+    let d1 = backoff_delay_ms(1);
+    let d2 = backoff_delay_ms(2);
+    let d3 = backoff_delay_ms(3);
+    let d10 = backoff_delay_ms(10);
+    assert!((polling::BACKOFF_BASE_SECS * 800..=polling::BACKOFF_BASE_SECS * 1200).contains(&d1));
+    assert!(d2 > d1 && d3 > d2);
+    assert!(d10 <= polling::BACKOFF_MAX_SECS * 1200);
+}
+#[test]
+fn rate_limited_fetch_keeps_cached_usage_and_respects_retry_after() {
+    let mut f = Fixture::new();
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(42.0, now() + 60_000)]), now());
+    let before = now();
+    f.engine.quota(
+        "codex:a".into(),
+        Err(UsageError {
+            message: "429 Too many requests. Try again later".into(),
+            rate_limited: true,
+            retry_after_ms: Some(5_000),
+        }),
+        before + 1,
+    );
+    let q = &f.engine.quotas["codex:a"];
+    // Cached usage from the last success is never discarded on 429.
+    assert_eq!(q.windows.len(), 1);
+    assert_eq!(q.windows[0].percent_used, 42.0);
+    assert!(q.rate_limited);
+    assert_eq!(q.consecutive_failures, 1);
+    assert!(q.error.as_deref().unwrap().contains("429"));
+    // The server's Retry-After wins over our own exponential estimate.
+    let retry_in = q.blocked_until.saturating_sub(before);
+    assert!((4_500..=5_500).contains(&retry_in), "retry_in={retry_in}");
+}
+#[test]
+fn repeated_failures_without_retry_after_back_off_the_fetch_cadence_not_just_eligibility() {
+    let mut f = Fixture::new();
+    let err = || UsageError {
+        message: "Usage service is temporarily unavailable".into(),
+        rate_limited: false,
+        retry_after_ms: None,
+    };
+    f.engine.quota("codex:a".into(), Err(err()), now());
+    let first = f.engine.quotas["codex:a"].next_fetch_at;
+    f.engine.quota("codex:a".into(), Err(err()), now() + 1);
+    let second = f.engine.quotas["codex:a"].next_fetch_at;
+    assert_eq!(f.engine.quotas["codex:a"].consecutive_failures, 2);
+    assert!(second > first, "second backoff should be longer: {first} -> {second}");
+}
+#[test]
+fn exhausted_profile_with_a_known_reset_skips_polling_until_near_it() {
+    let mut f = Fixture::new();
+    let reset = now() + 2 * 3_600_000; // 2h out, beyond MAX_RESET_SKIP_SECS
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(95.0, reset)]), now());
+    let q = &f.engine.quotas["codex:a"];
+    assert!(q.next_fetch_at >= now() + polling::MAX_RESET_SKIP_SECS * 1000 - 1_000);
+    assert!(q.next_fetch_at <= now() + polling::MAX_RESET_SKIP_SECS * 1000 + 1_000);
+}
+#[test]
+fn exhausted_profile_reset_skip_targets_the_actual_reset_when_sooner_than_the_cap() {
+    let mut f = Fixture::new();
+    let reset = now() + 20 * 60_000; // 20 minutes out, well under the 1h cap
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(95.0, reset)]), now());
+    let q = &f.engine.quotas["codex:a"];
+    assert!(q.next_fetch_at <= reset);
+    assert!(q.next_fetch_at >= reset.saturating_sub(60_000));
+}
+#[test]
+fn usage_targets_skips_an_exhausted_candidate_until_near_its_reset() {
+    let mut f = Fixture::auto_start();
+    let reset = now() + 20 * 60_000;
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(95.0, reset)]), now());
+    f.engine
+        .quota("codex:b".into(), Ok(vec![window(10.0, now() + 60_000)]), now());
+    let targets = f.engine.usage_targets();
+    assert!(
+        !targets.iter().any(|(key, ..)| key == "codex:a"),
+        "an exhausted candidate with a known reset should not be due yet"
+    );
+    assert!(targets.iter().any(|(key, ..)| key == "codex:b"));
+}
+#[test]
+fn tier_interval_speeds_up_near_threshold_and_slows_down_when_not_active() {
+    let mut f = Fixture::new();
+    let base = 120;
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(50.0, now() + 60_000)]), now());
+    assert_eq!(f.engine.tier_interval("codex:a", base, true), base);
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(72.0, now() + 60_000)]), now());
+    assert_eq!(
+        f.engine.tier_interval("codex:a", base, true),
+        polling::HIGH_INTERVAL_SECS
+    );
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(90.0, now() + 60_000)]), now());
+    assert_eq!(
+        f.engine.tier_interval("codex:a", base, true),
+        polling::CRITICAL_INTERVAL_SECS
+    );
+    // Low usage but not any Loop's active running profile: standby cadence.
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(10.0, now() + 60_000)]), now());
+    assert_eq!(
+        f.engine.tier_interval("codex:a", base, false),
+        polling::IDLE_INTERVAL_SECS
+    );
 }
 #[test]
 fn no_replacement_before_confirmed_process_exit() {

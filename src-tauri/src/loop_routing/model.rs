@@ -14,6 +14,41 @@ fn default_workspace_index() -> u32 {
 fn threshold() -> f64 {
     90.0
 }
+
+/// Central, named usage-polling/backoff policy. Nothing here is a per-loop
+/// setting — `Settings::polling_interval_seconds` remains the one
+/// user-configurable knob (the "active, usage below HIGH" baseline); the
+/// tiers below adapt around it so a Loop with many participant Profiles does
+/// not poll all of them on a single fixed cadence (see AGENTS.md notes on the
+/// usage-polling scheduler in `runtime.rs`).
+pub mod polling {
+    /// Schema default for `Settings::polling_interval_seconds` — the cadence
+    /// for a candidate that is this Loop's active, running profile with usage
+    /// still below [`HIGH_USAGE_PCT`].
+    pub const DEFAULT_INTERVAL_SECS: u64 = 120;
+    /// Cadence for a candidate that is not currently any Loop's active,
+    /// running profile (standby monitoring only).
+    pub const IDLE_INTERVAL_SECS: u64 = 600;
+    /// Usage percent at which polling speeds up ahead of the switch threshold.
+    pub const HIGH_USAGE_PCT: f64 = 70.0;
+    pub const HIGH_INTERVAL_SECS: u64 = 60;
+    /// Usage percent at which polling speeds up further.
+    pub const CRITICAL_USAGE_PCT: f64 = 85.0;
+    pub const CRITICAL_INTERVAL_SECS: u64 = 30;
+    /// A usage sample this fresh is reused instead of triggering a new fetch
+    /// (manual refresh, safe-boundary re-verification, dashboards, ...).
+    pub const CACHE_TTL_SECS: u64 = 30;
+    /// Exponential backoff after a failed usage fetch, most importantly a 429.
+    /// Doubles each consecutive failure (60s, 120s, 240s, 480s, capped at MAX).
+    pub const BACKOFF_BASE_SECS: u64 = 60;
+    pub const BACKOFF_MAX_SECS: u64 = 900;
+    pub const BACKOFF_JITTER_MIN: f64 = 0.8;
+    pub const BACKOFF_JITTER_MAX: f64 = 1.2;
+    /// A known-exhausted candidate is never skipped past its own reported
+    /// reset time by more than this, even if that reset is far out — guards
+    /// against ever wrong/stale reset estimates permanently starving a check.
+    pub const MAX_RESET_SKIP_SECS: u64 = 3600;
+}
 fn agent_order() -> Vec<String> {
     vec!["claude".into(), "codex".into()]
 }
@@ -194,6 +229,15 @@ pub struct Group {
     pub current_provider: Option<String>,
     #[serde(default)]
     pub current_agent_session_id: Option<String>,
+    /// Set when the active profile's usage has crossed its configured
+    /// threshold while `status` is still `running`. This is a *request* to
+    /// switch, not the switch itself — see the "running" branch of
+    /// `Engine::step`. The actual interrupt only fires once `pending_work` is
+    /// false (a safe turn boundary) and the usage has been re-verified.
+    #[serde(default)]
+    pub switch_pending: bool,
+    #[serde(default)]
+    pub switch_pending_since: Option<u64>,
     pub id: uuid::Uuid,
     pub name: String,
     pub workspace_id: String,
@@ -294,7 +338,7 @@ impl From<&str> for LoopStatus {
     }
 }
 fn poll_interval() -> u64 {
-    30
+    polling::DEFAULT_INTERVAL_SECS
 }
 fn interrupt_timeout() -> u64 {
     5

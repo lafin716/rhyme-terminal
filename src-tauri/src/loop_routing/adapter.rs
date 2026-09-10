@@ -262,10 +262,22 @@ fn records(reference: &SessionReference) -> Result<Vec<Value>> {
     {
         bail!("Unsupported conversation transcript (requires a regular JSONL file under 64 MiB)");
     }
+    let mut lines: Vec<String> = BufReader::new(fs::File::open(&reference.transcript_path)?)
+        .lines()
+        .collect::<std::io::Result<_>>()?;
+    // An abruptly killed CLI or daemon (e.g. the daemon process itself was
+    // terminated) can leave only the final JSONL line half-written. Drop just
+    // that trailing fragment so a legitimate conversation can still be found
+    // and resumed; a bad line anywhere else in the file is a real problem and
+    // still fails hard below.
+    if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
+        if serde_json::from_str::<Value>(&lines[last]).is_err() {
+            lines.truncate(last);
+        }
+    }
     let mut result = Vec::new();
     let mut identity_found = false;
-    for line in BufReader::new(fs::File::open(&reference.transcript_path)?).lines() {
-        let line = line?;
+    for line in lines {
         if line.trim().is_empty() {
             continue;
         }
@@ -956,6 +968,24 @@ mod tests {
             assert!(import_transcript(&reference, &root.join("new")).is_ok());
             fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn records_tolerates_only_a_truncated_final_line() {
+        let (root, reference) = fixture("claude");
+        let good = fs::read_to_string(&reference.transcript_path).unwrap();
+        // An abruptly killed daemon or CLI can leave just the last JSONL line
+        // half-written. That is not a corrupt conversation.
+        fs::write(
+            &reference.transcript_path,
+            format!("{good}\n{{\"type\":\"user\",\"message\":{{\"role\":\"use"),
+        )
+        .unwrap();
+        assert!(records(&reference).is_ok());
+        // A bad line anywhere else in the file is a real problem, not a kill
+        // artifact, and must still fail.
+        fs::write(&reference.transcript_path, format!("{{not json}}\n{good}")).unwrap();
+        assert!(records(&reference).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn rejects_wrong_identity_and_truncated_transcripts() {

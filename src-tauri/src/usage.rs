@@ -22,6 +22,36 @@ pub struct UsageWindow {
 }
 
 type UsageResult = Result<Vec<UsageWindow>, String>;
+
+/// Richer failure detail for the daemon-side scheduler (backoff, `Retry-After`).
+/// The public, string-based [`UsageResult`] stays the wire/display contract —
+/// this only travels between `fetch_account_usage` and its two Rust callers.
+#[derive(Clone, Debug)]
+pub struct UsageError {
+    pub message: String,
+    pub rate_limited: bool,
+    pub retry_after_ms: Option<u64>,
+}
+impl From<String> for UsageError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            rate_limited: false,
+            retry_after_ms: None,
+        }
+    }
+}
+impl From<&str> for UsageError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 type CacheKey = (String, PathBuf, bool);
 #[derive(Default)]
 struct CacheEntry {
@@ -97,14 +127,24 @@ pub async fn query_account_usage(agent: &str, dir: &Path, session_usage: bool) -
             };
         }
     }
-    let result = fetch_account_usage(agent, dir, session_usage).await;
+    let result: UsageResult = fetch_account_usage(agent, dir, session_usage)
+        .await
+        .map_err(|e| e.message);
     entry.fetched_at = Some(Instant::now());
     entry.result = Some(result.clone());
     result
 }
 
-/// Scheduling decisions never consume the display cache (60 seconds).
-pub async fn refresh_account_usage(agent: &str, dir: &Path, session_usage: bool) -> UsageResult {
+/// Scheduling decisions never consume the display cache (60 seconds). Unlike
+/// [`query_account_usage`], this keeps the rate-limit/backoff detail the
+/// loop-routing scheduler needs and is not itself cached or deduplicated —
+/// callers (the daemon's usage-polling loop) are already responsible for not
+/// calling this more often than a candidate's `next_fetch_at`.
+pub async fn refresh_account_usage(
+    agent: &str,
+    dir: &Path,
+    session_usage: bool,
+) -> Result<Vec<UsageWindow>, UsageError> {
     fetch_account_usage(agent, dir, session_usage).await
 }
 
@@ -267,7 +307,11 @@ pub async fn get_account_usage(
         .map_err(|error| error.to_string())
 }
 
-async fn fetch_account_usage(agent: &str, dir: &Path, use_session: bool) -> UsageResult {
+async fn fetch_account_usage(
+    agent: &str,
+    dir: &Path,
+    use_session: bool,
+) -> Result<Vec<UsageWindow>, UsageError> {
     if use_session {
         crate::usage_bridge::install(&dir)?;
         let bytes = tokio::fs::read(dir.join("winmux-usage.json"))
@@ -281,7 +325,8 @@ async fn fetch_account_usage(agent: &str, dir: &Path, use_session: bool) -> Usag
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-        );
+        )
+        .map_err(Into::into);
     }
     let file = dir.join(if agent == "claude" {
         ".credentials.json"
@@ -324,7 +369,21 @@ async fn fetch_account_usage(agent: &str, dir: &Path, use_session: bool) -> Usag
         200 => (),
         401 => return Err("Login expired. Sign in again through the CLI".into()),
         403 => return Err("This login cannot access subscription usage".into()),
-        429 => return Err("Too many requests. Try again later".into()),
+        429 => {
+            // Respect the provider's own cooldown when it gives one; the
+            // daemon-side scheduler falls back to exponential backoff otherwise.
+            let retry_after_ms = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|secs| secs.saturating_mul(1000));
+            return Err(UsageError {
+                message: "429 Too many requests. Try again later".into(),
+                rate_limited: true,
+                retry_after_ms,
+            });
+        }
         _ => return Err("Usage service is temporarily unavailable".into()),
     }
     let body: Value = response

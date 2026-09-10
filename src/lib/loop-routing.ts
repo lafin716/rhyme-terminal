@@ -9,7 +9,15 @@ export interface LoopAttempt { id: string; sessionId: string | null; agent: Loop
 export interface AgentRuntimeState { status: 'IDLE' | 'STARTING' | 'RUNNING' | 'INTERRUPTING' | 'EXITED' | 'ERROR'; provider: LoopAgent | null; pid: number | null; startedAt?: number | null }
 export interface LoopProfileSnapshot { usagePending?: boolean; key: string; agent: LoopAgent; label: string; status: 'ACTIVE' | 'AVAILABLE' | 'NEAR_LIMIT' | 'EXHAUSTED' | 'RATE_LIMITED' | 'WAITING_RESET' | 'DISABLED' | 'ERROR'; usage: number | null; threshold: number; remaining: number | null; resetAt: number | null; error: string | null; windows?: { label: string; percentUsed: number; kind: string }[] }
 export type LoopPolicyPatch = Partial<Pick<LoopSettings, 'strategy' | 'pollingIntervalSeconds' | 'autoResume'>> & { profile?: { key: string; shortThreshold?: number; weeklyThreshold?: number; priority?: number } };
-export interface LoopGroup { policy?: LoopSettings; queuedInput?: { id: string; bytes: number[]; delivering: boolean }[]; runtime?: AgentRuntimeState; activeProfile?: string | null; profiles?: LoopProfileSnapshot[]; currentProvider?: LoopAgent | null; currentAgentSessionId?: string | null; waitingProfileId?: string | null; resumeAt?: number | null; events?: { at: number; kind: string; message: string }[]; id: string; name: string; workspaceId: string; cwd: string; status: 'idle' | 'preparing' | 'running' | 'switching_profile' | 'handoff' | 'waiting_for_usage_reset' | 'resuming' | 'paused' | 'stopped' | 'error' | 'recovery'; activeSessionId: string | null; reason: string | null; attempts: LoopAttempt[]; updatedAt: number }
+export interface LoopGroup { policy?: LoopSettings; queuedInput?: { id: string; bytes: number[]; delivering: boolean }[]; runtime?: AgentRuntimeState; activeProfile?: string | null; profiles?: LoopProfileSnapshot[]; currentProvider?: LoopAgent | null; currentAgentSessionId?: string | null; waitingProfileId?: string | null; resumeAt?: number | null; events?: { at: number; kind: string; message: string }[]; id: string; name: string; workspaceId: string; cwd: string; status: 'idle' | 'preparing' | 'running' | 'switching_profile' | 'handoff' | 'waiting_for_usage_reset' | 'resuming' | 'paused' | 'stopped' | 'error' | 'recovery'; activeSessionId: string | null; reason: string | null; attempts: LoopAttempt[]; updatedAt: number;
+  /** Usage crossed the active profile's threshold but a switch has not (yet)
+   * happened — see the Rust `Engine::step` "running" branch. It only clears
+   * once a safe turn boundary is reached and usage is re-verified: either the
+   * switch actually fires (`status` becomes `switching_profile`) or usage
+   * recovered and this simply goes back to `false`. */
+  switchPending?: boolean;
+  switchPendingSince?: number | null;
+}
 export const loopTabId = (id: string) => `loop:${id}`;
 export function mergeLoopProfiles(settings: LoopSettings, profiles: AccountProfile[]): LoopSettings {
   const available: LoopCandidate[] = profiles.map(p => ({ agent: p.agent, profileId: p.id, label: p.label, enabled: false, configDir: p.configDir, authMethod: p.authMethod === 'setup-token' ? 'setup-token' : 'oauth', env: p.env }));

@@ -11,7 +11,7 @@ use crate::{
         runtime_monitor::{AgentRuntimeState, RuntimeStatus},
         spawn_session,
     },
-    usage::UsageWindow,
+    usage::{UsageError, UsageWindow},
 };
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use rusqlite::OptionalExtension;
@@ -66,6 +66,16 @@ struct Quota {
     error: Option<String>,
     fetched_at: u64,
     requested_at: u64,
+    /// Consecutive failed fetches (any error, reset to 0 on success). Drives
+    /// [`next_fetch_at`](Self::next_fetch_at) backoff — see `backoff_delay_ms`.
+    consecutive_failures: u32,
+    /// Earliest time the scheduler should fetch this candidate again, purely
+    /// for pacing (distinct from `blocked_until`, which gates *eligibility*).
+    /// Set by backoff after a failure and by the reset-aware skip after a
+    /// successful fetch that found the candidate exhausted with a known
+    /// reset time. A guard-forced check (activation, safe-boundary
+    /// re-verification, explicit resume) bypasses this — see `usage_targets`.
+    next_fetch_at: u64,
 }
 impl Quota {
     fn runtime_usage_fallback(&self, settings: &Settings, candidate: &Candidate) -> bool {
@@ -78,6 +88,21 @@ impl Quota {
         }).cloned().collect();
         unavailable && !over_limit(settings, candidate, &unexpired)
     }
+}
+/// `0.0..1.0` derived from the wall clock — good enough to spread out backoff
+/// and reset-skip retries without a `rand` dependency; not for security use.
+fn jitter_unit() -> f64 {
+    (now() % 1000) as f64 / 1000.0
+}
+fn jittered(base_ms: u64, min: f64, max: f64) -> u64 {
+    (base_ms as f64 * (min + jitter_unit() * (max - min))) as u64
+}
+/// Exponential backoff for consecutive failed usage fetches, in milliseconds.
+fn backoff_delay_ms(consecutive_failures: u32) -> u64 {
+    let doublings = consecutive_failures.saturating_sub(1).min(4); // 60,120,240,480,900(capped)
+    let base = polling::BACKOFF_BASE_SECS.saturating_mul(1u64 << doublings);
+    let capped = base.min(polling::BACKOFF_MAX_SECS) * 1000;
+    jittered(capped, polling::BACKOFF_JITTER_MIN, polling::BACKOFF_JITTER_MAX)
 }
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -180,7 +205,19 @@ impl Engine {
                 }
                 g.active_session_id = None; g.runtime = AgentRuntimeState::default();
                 if !matches!(g.status.as_str(), "stopped" | "paused" | "waiting_for_usage_reset" | "idle") {
-                    g.state(LoopStatus::Idle, Some("이전 프로세스가 없습니다. 터미널에서 Agent를 실행하세요."));
+                    // A prior Session (this Group's own, or handed off from another
+                    // Profile) must never be abandoned just because the daemon
+                    // restarted. Land on Paused, not Idle: typing the Agent command
+                    // directly in the terminal starts a brand-new, unmanaged Session
+                    // and discards the resume pointer below. Only Resume replays the
+                    // interrupt → handoff → resume pipeline that carries it forward.
+                    let has_session_to_resume = g.current_agent_session_id.is_some()
+                        || g.attempts.iter().any(|a| a.reference.is_some());
+                    if has_session_to_resume {
+                        g.state(LoopStatus::Paused, Some("데몬이 재시작되어 이전 Agent 프로세스 상태를 확인할 수 없습니다. Resume을 눌러 이전 Session을 안전하게 이어가세요 — 터미널에 직접 Agent 명령을 입력하면 이어가기 정보를 잃습니다."));
+                    } else {
+                        g.state(LoopStatus::Idle, Some("이전 프로세스가 없습니다. 터미널에서 Agent를 실행하세요."));
+                    }
                 }
                 if g.status!="stopped" && g.queued_input.iter().any(|c|c.delivering) {
                     g.state(LoopStatus::Paused,Some("재시작 전 입력 전달 결과가 불확실합니다. 중복 전송을 막기 위해 일시정지했습니다."));
@@ -572,11 +609,33 @@ impl Engine {
         }
         Ok(true)
     }
+    /// Adaptive cadence for one candidate: `base` (that candidate's most
+    /// urgent configured `pollingIntervalSeconds` across participating Loops)
+    /// shortens as its last known usage climbs toward the switch threshold,
+    /// and lengthens when it is not any Loop's active, running profile
+    /// (standby monitoring). This is what keeps a Loop with many enabled
+    /// Profiles from polling all of them on one fixed cadence.
+    fn tier_interval(&self, key: &str, base: u64, active_running: bool) -> u64 {
+        let usage = self.quotas.get(key).map(|q| {
+            q.windows
+                .iter()
+                .filter(|w| matches!(w.kind.as_str(), "short" | "weekly"))
+                .map(|w| w.percent_used)
+                .fold(0.0, f64::max)
+        });
+        match usage {
+            Some(u) if u >= polling::CRITICAL_USAGE_PCT => base.min(polling::CRITICAL_INTERVAL_SECS),
+            Some(u) if u >= polling::HIGH_USAGE_PCT => base.min(polling::HIGH_INTERVAL_SECS),
+            _ if !active_running => base.max(polling::IDLE_INTERVAL_SECS),
+            _ => base,
+        }
+    }
     pub fn usage_targets(&mut self) -> Vec<(String, String, PathBuf, bool, u64)> {
         let stamp = now();
         let mut keys = HashSet::new();
         let mut guards = HashMap::new();
         let mut intervals = HashMap::new();
+        let mut active_running = HashSet::new();
         for g in self.groups.values().filter(|g| {
             matches!(
                 g.status.as_str(),
@@ -585,6 +644,11 @@ impl Engine {
         }) {
             if g.status == "waiting_for_usage_reset" && g.resume_at.is_some_and(|at| at > stamp) {
                 continue;
+            }
+            if g.status == "running" {
+                if let Some(key) = &g.active_profile {
+                    active_running.insert(key.clone());
+                }
             }
             for c in self.candidates(g) {
                 let key = c.key();
@@ -607,28 +671,38 @@ impl Engine {
             }
         }
         let mut targets = vec![];
-        for c in self
+        for key in self
             .settings
             .candidates
             .iter()
             .filter(|c| keys.contains(&c.key()))
+            .map(Candidate::key)
+            .collect::<Vec<_>>()
         {
-            let q = self.quotas.entry(c.key()).or_default();
-            let guard = guards.get(&c.key()).copied().unwrap_or(0);
-            let due = q.fetched_at < guard
-                || stamp.saturating_sub(q.requested_at)
-                    >= intervals
-                        .get(&c.key())
-                        .copied()
-                        .unwrap_or(self.settings.polling_interval_seconds)
-                        * 1000;
+            let Some(c) = self.settings.candidates.iter().find(|c| c.key() == key).cloned() else {
+                continue;
+            };
+            let base = intervals
+                .get(&key)
+                .copied()
+                .unwrap_or(self.settings.polling_interval_seconds);
+            let interval = self.tier_interval(&key, base, active_running.contains(&key));
+            let q = self.quotas.entry(key.clone()).or_default();
+            let guard = guards.get(&key).copied().unwrap_or(0);
+            // A guard bump (activation check, safe-boundary re-verification,
+            // explicit resume) demands a fresh sample now and bypasses
+            // backoff/reset-skip pacing; the passive scheduler never does.
+            let forced = q.fetched_at < guard;
+            let due = forced
+                || (stamp >= q.next_fetch_at
+                    && stamp.saturating_sub(q.requested_at) >= interval * 1000);
             if due
                 && (q.requested_at <= q.fetched_at || stamp.saturating_sub(q.requested_at) > 30_000)
             {
                 q.requested_at = stamp;
-                match profile_dir(c) {
+                match profile_dir(&c) {
                     Ok(dir) => targets.push((
-                        c.key(),
+                        key.clone(),
                         c.agent.clone(),
                         dir,
                         c.auth_method.as_deref() == Some("setup-token"),
@@ -641,18 +715,13 @@ impl Engine {
                 }
             }
         }
-        targets.sort_by_key(|(key, ..)| {
-            !self
-                .groups
-                .values()
-                .any(|g| g.status == "running" && g.active_profile.as_ref() == Some(key))
-        });
+        targets.sort_by_key(|(key, ..)| !active_running.contains(key));
         targets
     }
     pub fn quota(
         &mut self,
         key: String,
-        result: Result<Vec<UsageWindow>, String>,
+        result: Result<Vec<UsageWindow>, UsageError>,
         requested_at: u64,
     ) {
         let q = self.quotas.entry(key.clone()).or_default();
@@ -666,10 +735,87 @@ impl Engine {
         );
         match result {
             Ok(windows) => {
+                if q.consecutive_failures > 0 {
+                    tracing::info!(
+                        "[Usage] profile={key} recovered after {} failed fetch(es)",
+                        q.consecutive_failures
+                    );
+                }
+                q.consecutive_failures = 0;
+                q.next_fetch_at = 0;
                 q.windows = windows;
                 q.error = None;
+                if q.rate_limited && q.blocked_until <= now() {
+                    q.rate_limited = false;
+                }
             }
-            Err(error) => q.error = Some(error),
+            Err(error) => {
+                q.consecutive_failures = q.consecutive_failures.saturating_add(1);
+                if error.rate_limited {
+                    let delay = error
+                        .retry_after_ms
+                        .map(|ms| jittered(ms, 0.95, 1.05))
+                        .unwrap_or_else(|| backoff_delay_ms(q.consecutive_failures));
+                    q.rate_limited = true;
+                    q.blocked_until = q.blocked_until.max(now() + delay);
+                    tracing::warn!("[Usage] profile={key} rate-limited retry={}s", delay / 1000);
+                } else {
+                    // Non-429 failures (network, credentials, ...) still back off the
+                    // *fetch cadence* so a persistent problem cannot spin the scheduler;
+                    // eligibility is separately gated by `q.error.is_some()` in `step`.
+                    tracing::debug!(
+                        "[Usage] profile={key} fetch-error consecutive={}: {}",
+                        q.consecutive_failures,
+                        error.message
+                    );
+                }
+                q.next_fetch_at = q.next_fetch_at.max(now() + backoff_delay_ms(q.consecutive_failures));
+                q.error = Some(error.message);
+            }
+        }
+        if q.error.is_none() {
+            // Reset-aware skip: once every controlling window is at/over its
+            // threshold with a known reset time, there is no point polling
+            // again before that reset is near.
+            if let Some(c) = self.settings.candidates.iter().find(|c| c.key() == key) {
+                if over_limit(&self.settings, c, &q.windows) {
+                    if let Some(reset_at) = q
+                        .windows
+                        .iter()
+                        .filter(|w| {
+                            matches!(w.kind.as_str(), "short" | "weekly")
+                                && w.percent_used >= limit(&self.settings, c, w)
+                        })
+                        .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
+                        .max()
+                    {
+                        let cap = now() + polling::MAX_RESET_SKIP_SECS * 1000;
+                        let target = reset_at
+                            .saturating_sub(jittered(60_000, 0.0, 1.0))
+                            .min(cap)
+                            .max(now());
+                        if target > q.next_fetch_at {
+                            tracing::debug!(
+                                "[Usage] profile={key} exhausted, skipping polling until near reset ({}s)",
+                                target.saturating_sub(now()) / 1000
+                            );
+                            q.next_fetch_at = target;
+                        }
+                    }
+                }
+            }
+            if q.consecutive_failures == 0 {
+                let usage_text = q
+                    .windows
+                    .iter()
+                    .map(|w| format!("{} {:.0}%", w.label, w.percent_used))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                tracing::debug!(
+                    "[Usage] profile={key} fetched usage=[{usage_text}] next={}s",
+                    q.next_fetch_at.saturating_sub(now()) / 1000
+                );
+            }
         }
         let current = (
             q.windows.iter().map(|w| w.percent_used).collect::<Vec<_>>(),
@@ -726,6 +872,10 @@ impl Engine {
         )
     }
     fn interrupt(&self, state: &Arc<DaemonState>, g: &mut Group, live: &mut Live) -> Result<()> {
+        // Any real interrupt (this call) supersedes a soft, not-yet-acted-on
+        // usage-threshold switch request — see the "running" branch of `step`.
+        g.switch_pending = false;
+        g.switch_pending_since = None;
         if live.interrupt_at.is_some() {
             return Ok(());
         }
@@ -1217,16 +1367,37 @@ impl Engine {
                 .candidates
                 .iter()
                 .find(|c| Some(c.key()) == g.active_profile)
+                .cloned()
             {
-                let invalid = !c.enabled
-                    || self.quotas.get(&c.key()).is_none_or(|q| {
-                        q.blocked_until > now() || (!q.runtime_usage_fallback(&self.settings, c)
-                            && (q.error.is_some()
-                                || over_limit(&self.settings, c, &q.windows)
-                                || !crate::usage::usage_windows_are_fresh(&q.windows,
-                                    Duration::from_secs(self.settings.polling_interval_seconds + 30))))
+                let q = self.quotas.get(&c.key());
+                // Hard block: the profile is disabled, explicitly blocked by a
+                // provider-reported limit/rate-limit, or we cannot confirm its
+                // usage at all (errored or stale beyond the freshness window).
+                // None of that is safe to keep running on, so this still
+                // interrupts immediately regardless of any turn in progress —
+                // continuing would just fail against the provider anyway.
+                let hard_invalid = !c.enabled
+                    || q.is_none_or(|q| {
+                        q.blocked_until > now()
+                            || (!q.runtime_usage_fallback(&self.settings, &c)
+                                && (q.error.is_some()
+                                    || !crate::usage::usage_windows_are_fresh(
+                                        &q.windows,
+                                        Duration::from_secs(self.settings.polling_interval_seconds + 30),
+                                    )))
                     });
-                if invalid {
+                // Soft block: our own periodic usage check crossed the
+                // configured threshold, but the profile itself is otherwise
+                // known-good (fresh, no error, not provider-blocked). This is
+                // a *request* to switch, not the switch — see below.
+                let soft_over = !hard_invalid
+                    && q.is_some_and(|q| {
+                        !q.runtime_usage_fallback(&self.settings, &c)
+                            && over_limit(&self.settings, &c, &q.windows)
+                    });
+                if hard_invalid {
+                    g.switch_pending = false;
+                    g.switch_pending_since = None;
                     g.event(
                         "USAGE_THRESHOLD_REACHED",
                         "현재 Profile 사용량이 임계값에 도달했거나 확인할 수 없습니다",
@@ -1237,6 +1408,81 @@ impl Engine {
                     );
                     self.interrupt(state, g, live)?;
                     return Ok(());
+                }
+                if soft_over && !g.switch_pending {
+                    g.switch_pending = true;
+                    g.switch_pending_since = Some(now());
+                    g.event(
+                        "SWITCH_PENDING",
+                        &format!(
+                            "{} 사용량이 임계값을 초과했습니다 — 현재 작업이 끝나면 안전하게 전환합니다",
+                            c.label
+                        ),
+                    );
+                    tracing::info!("[Usage] profile={} switch-pending usage-threshold-reached", c.key());
+                } else if !soft_over && g.switch_pending {
+                    g.switch_pending = false;
+                    g.switch_pending_since = None;
+                    g.event(
+                        "SWITCH_PENDING_CLEARED",
+                        &format!("{} 사용량이 임계값 아래로 회복되어 전환 요청을 취소합니다", c.label),
+                    );
+                }
+                if g.switch_pending {
+                    if g.pending_work {
+                        // Mid-turn (THINKING/TOOL_RUNNING/RUNNING-equivalent for
+                        // this project's binary turn tracker) — never interrupt
+                        // here. Wait for the next Stop/idle boundary; a timeout
+                        // never silently drops switch_pending nor forces either
+                        // extreme (see AGENTS.md notes on safe-boundary switching).
+                        tracing::debug!(
+                            "[Loop] profile={} waiting-safe-boundary state=TOOL_RUNNING pending_since={}",
+                            c.key(),
+                            g.switch_pending_since.unwrap_or(0)
+                        );
+                    } else if let Some(q) = q.filter(|q| {
+                        now().saturating_sub(q.fetched_at) <= polling::CACHE_TTL_SECS * 1000
+                    }) {
+                        // Safe boundary reached (turn completed / idle) and we
+                        // have a fresh-enough sample to trust — re-verify before
+                        // committing to a switch instead of acting on a stale read.
+                        tracing::info!("[Loop] profile={} safe-boundary detected", c.key());
+                        tracing::debug!("[Usage] profile={} verifying-before-switch", c.key());
+                        if over_limit(&self.settings, &c, &q.windows) {
+                            g.switch_pending = false;
+                            g.switch_pending_since = None;
+                            g.event(
+                                "SAFE_BOUNDARY_SWITCH",
+                                &format!(
+                                    "{}: 안전한 경계에서 사용량을 재확인했고 여전히 임계값 이상입니다 — 전환합니다",
+                                    c.label
+                                ),
+                            );
+                            g.state(
+                                LoopStatus::SwitchingProfile,
+                                Some("안전한 경계에서 사용량을 재확인하고 다음 프로필로 전환합니다"),
+                            );
+                            self.interrupt(state, g, live)?;
+                            return Ok(());
+                        }
+                        g.switch_pending = false;
+                        g.switch_pending_since = None;
+                        g.event(
+                            "SWITCH_PENDING_CLEARED",
+                            &format!("{}: 안전한 경계에서 재확인한 사용량이 임계값 아래입니다", c.label),
+                        );
+                    } else {
+                        // Cache is stale (or a verification fetch is still in
+                        // flight, e.g. rate-limited): demand a fresh sample and
+                        // check again next tick. Never guess — switch_pending
+                        // stays set and we neither force a switch nor silently
+                        // resume unbounded execution on this account.
+                        live.guard_at = live.guard_at.max(now());
+                        tracing::debug!(
+                            "[Usage] profile={} verifying-before-switch awaiting-fresh-sample",
+                            c.key()
+                        );
+                    }
                 }
             } else {
                 g.state(

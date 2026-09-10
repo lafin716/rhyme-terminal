@@ -114,7 +114,7 @@ async function save() {
     <section class="card">
     <h3>공통 전환 기준</h3>
     <div class="thresholds"><label>단기 사용량 기준 (%) <input v-model.number="draft.shortThreshold" type="number" min="1" max="100" required /></label><label>주간 사용량 기준 (%) <input v-model.number="draft.weeklyThreshold" type="number" min="1" max="100" required /></label></div>
-    <div class="thresholds"><label>선택 전략<select v-model="draft.strategy"><option>SMART</option><option>LEAST_USAGE</option><option>ROUND_ROBIN</option><option>PRIORITY</option></select></label><label>Usage 조회 간격 (초)<input v-model.number="draft.pollingIntervalSeconds" type="number" min="10" max="300" /></label></div>
+    <div class="thresholds"><label>선택 전략<select v-model="draft.strategy"><option>SMART</option><option>LEAST_USAGE</option><option>ROUND_ROBIN</option><option>PRIORITY</option></select></label><label>기본 Usage 조회 간격 (초)<input v-model.number="draft.pollingIntervalSeconds" type="number" min="10" max="300" /></label></div>
     </section>
     <section class="card profile-board" aria-label="전체 에이전트 프로필">
       <div v-for="zone in zones" :key="String(zone.enabled)" class="profile-zone" :data-enabled="zone.enabled" :class="{ 'drop-end': dropTarget?.enabled === zone.enabled && !dropTarget.before }">

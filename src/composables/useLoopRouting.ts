@@ -6,7 +6,11 @@ import { useWorkspaces } from './useWorkspaces';
 import { addTabToLeaf, findFirstLeaf, findLeafBySession, removeTab } from './useLayout';
 import { loopTabId, mergeLoopProfiles, type LoopGroup, type LoopSettings, type LoopPolicyPatch } from '../lib/loop-routing';
 const KEY = 'winmux:loop-routing:v1';
-const state = reactive({ settings: { strategy: 'SMART', pollingIntervalSeconds: 30, interruptTimeoutSeconds: 5, forceKillTimeoutSeconds: 3, autoResume: true, shortThreshold: 90, weeklyThreshold: 90, agentOrder: ['claude', 'codex'], candidates: [] } as LoopSettings, groups: [] as LoopGroup[], error: '', ready: false });
+// pollingIntervalSeconds is only the "active, usage below HIGH" baseline —
+// the daemon scheduler adapts around it (faster near the switch threshold,
+// slower for standby profiles). Keep this default in sync with the Rust
+// side's DEFAULT_INTERVAL_SECS in loop_routing/model.rs.
+const state = reactive({ settings: { strategy: 'SMART', pollingIntervalSeconds: 120, interruptTimeoutSeconds: 5, forceKillTimeoutSeconds: 3, autoResume: true, shortThreshold: 90, weeklyThreshold: 90, agentOrder: ['claude', 'codex'], candidates: [] } as LoopSettings, groups: [] as LoopGroup[], error: '', ready: false });
 let timer: ReturnType<typeof setTimeout> | undefined;
 let stopProfiles: (() => void) | undefined;
 let closed = false;
