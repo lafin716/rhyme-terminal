@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import { useLoopRouting, saveLoopSettings } from '../composables/useLoopRouting';
-import { mergeLoopProfiles, type LoopSettings, type LoopCandidate } from '../lib/loop-routing';
+import { mergeLoopProfiles, type LoopAgent, type LoopSettings, type LoopCandidate } from '../lib/loop-routing';
 import { useAccountProfiles } from '../composables/useAccountProfiles';
 
 const { state } = useLoopRouting();
@@ -32,8 +32,57 @@ let pointer:
   | { id: number; handle: HTMLElement; candidate: LoopCandidate; startX: number; startY: number; x: number; y: number }
   | null = null;
 let scrollFrame = 0;
-const effortOptions = ['low', 'medium', 'high', 'max'];
-const modeOptions = ['auto', 'plan'];
+/**
+ * Claude's `--effort` levels, verbatim from its own help. Codex has no
+ * `--effort` flag — its reasoning effort lives in `~/.codex/config.toml` — so
+ * the control is not offered for it, and `prepare_launch` no longer sends one.
+ */
+const effortOptions: Record<LoopAgent, string[]> = {
+  claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+  codex: [],
+};
+/**
+ * Claude's `--permission-mode` choices, verbatim from its own help. Codex has
+ * no equivalent flag (it uses `--ask-for-approval` / `--sandbox`), so nothing
+ * is offered there either.
+ */
+const modeOptions: Record<LoopAgent, string[]> = {
+  claude: ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan'],
+  codex: [],
+};
+/**
+ * Known `--model` values per agent, offered as a picker because a typo here
+ * only surfaces later, when the Loop launches the CLI and it exits.
+ *
+ * Claude's values are the ones its own `--model` help documents: an alias for
+ * the latest model in a tier, or a model's full name. Aliases are listed first
+ * since they keep following that tier as new models ship.
+ *
+ * Codex has no list: its `--model` is documented only as "Model the agent
+ * should use", with no enumerated values, so anything here would be a guess.
+ * Its picker therefore offers 기본, whatever is already saved, and 직접 입력.
+ */
+const modelOptions: Record<LoopAgent, string[]> = {
+  claude: ['fable', 'opus', 'sonnet', 'haiku', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+  codex: [],
+};
+/** Keeps a value the list does not know — an older pin, or a Codex model — selectable. */
+const modelChoices = (candidate: LoopCandidate) => {
+  const known = modelOptions[candidate.agent] ?? [];
+  return candidate.model && !known.includes(candidate.model) ? [...known, candidate.model] : known;
+};
+// Profiles switched to free text, so a value the picker cannot offer stays reachable.
+const customModel = ref<Record<string, boolean>>({});
+/** Sentinel option value. Not a possible model id, so it cannot collide. */
+const MODEL_CUSTOM = '__custom__';
+function onModelSelect(candidate: LoopCandidate, event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  if (value === MODEL_CUSTOM) {
+    customModel.value = { ...customModel.value, [key(candidate)]: true };
+    return;
+  }
+  candidate.model = normalizeOptional(value);
+}
 
 function normalizeOptional(value: string | null | undefined) {
   const normalized = value?.trim();
@@ -271,31 +320,48 @@ async function save() {
                 <label>우선순위 <input v-model.number="candidate.priority" type="number" /></label>
                 <label
                   >모델
-                  <input
-                    v-model="candidate.model"
-                    type="text"
-                    :placeholder="`${candidate.agent} 기본`"
-                    @change="candidate.model = normalizeOptional(candidate.model)"
-                  />
+                  <select
+                    v-if="!customModel[key(candidate)]"
+                    :value="candidate.model ?? ''"
+                    @change="onModelSelect(candidate, $event)"
+                  >
+                    <option value="">{{ candidate.agent }} 기본</option>
+                    <option v-for="model in modelChoices(candidate)" :key="model" :value="model">{{ model }}</option>
+                    <option :value="MODEL_CUSTOM">직접 입력…</option>
+                  </select>
+                  <span v-else class="model-custom">
+                    <input
+                      v-model="candidate.model"
+                      type="text"
+                      :placeholder="`${candidate.agent} 기본`"
+                      @change="candidate.model = normalizeOptional(candidate.model)"
+                    />
+                    <button
+                      type="button"
+                      title="목록에서 선택"
+                      aria-label="모델을 목록에서 선택"
+                      @click="customModel = { ...customModel, [key(candidate)]: false }"
+                    ><Icon icon="lucide:list" /></button>
+                  </span>
                 </label>
-                <label
+                <label v-if="effortOptions[candidate.agent].length"
                   >노력치
                   <select
                     v-model="candidate.effort"
                     @change="candidate.effort = normalizeOptional(candidate.effort)"
                   >
                     <option value="">기본</option>
-                    <option v-for="effort in effortOptions" :key="effort" :value="effort">{{ effort }}</option>
+                    <option v-for="effort in effortOptions[candidate.agent]" :key="effort" :value="effort">{{ effort }}</option>
                   </select>
                 </label>
-                <label
+                <label v-if="modeOptions[candidate.agent].length"
                   >모드
                   <select
                     v-model="candidate.mode"
                     @change="candidate.mode = normalizeOptional(candidate.mode)"
                   >
                     <option value="">기본</option>
-                    <option v-for="mode in modeOptions" :key="mode" :value="mode">{{ mode }}</option>
+                    <option v-for="mode in modeOptions[candidate.agent]" :key="mode" :value="mode">{{ mode }}</option>
                   </select>
                 </label>
               </div>
@@ -607,5 +673,28 @@ summary {
 }
 .drop-end .profile-list::after {
   bottom: -5px;
+}
+.model-custom {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+.model-custom input {
+  flex: 1;
+  min-width: 0;
+}
+.model-custom button {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  color: inherit;
+  background: #ffffff08;
+  border: 1px solid #ffffff30;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.model-custom button:hover {
+  background: #ffffff14;
 }
 </style>

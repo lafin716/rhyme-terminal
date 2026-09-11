@@ -90,6 +90,35 @@ const EVENTS: &[&str] = &[
 ];
 const MAX_TRANSCRIPT: u64 = 64 * 1024 * 1024;
 
+/// CLI flags for one candidate's pinned model, effort and permission mode.
+///
+/// Only flags the target CLI actually accepts. An unknown flag is not a
+/// degraded launch — the CLI exits on it, so the Loop never starts at all.
+/// Both providers take `--model`. `--effort` and `--permission-mode` are
+/// Claude's alone: Codex has neither, setting reasoning effort in
+/// `~/.codex/config.toml` and using `--ask-for-approval`/`--sandbox` in place
+/// of a mode flag. A Codex effort/mode value stored by an earlier build is
+/// therefore ignored rather than breaking the run.
+fn provider_flags(
+    agent: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    mode: Option<&str>,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    let mut push = |flag: &str, value: Option<&str>| {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            flags.extend([flag.to_owned(), value.to_owned()]);
+        }
+    };
+    push("--model", model);
+    if agent == "claude" {
+        push("--effort", effort);
+        push("--permission-mode", mode);
+    }
+    flags
+}
+
 pub fn prepare_launch(
     agent: &str,
     config_dir: &Path,
@@ -190,25 +219,7 @@ pub fn prepare_launch(
             config_dir.to_string_lossy().into_owned(),
         );
     }
-    if let Some(value) = model {
-        if !value.is_empty() {
-            args.extend(["--model".into(), value.to_owned()]);
-        }
-    }
-    if let Some(value) = effort {
-        if !value.is_empty() {
-            args.extend(["--effort".into(), value.to_owned()]);
-        }
-    }
-    if let Some(value) = mode {
-        if !value.is_empty() {
-            if agent == "claude" {
-                args.extend(["--permission-mode".into(), value.to_owned()]);
-            } else if agent == "codex" {
-                args.extend(["--mode".into(), value.to_owned()]);
-            }
-        }
-    }
+    args.extend(provider_flags(agent, model, effort, mode));
     env.insert(
         "RHYME_LOOP_ATTEMPT_DIR".into(),
         attempt_dir.to_string_lossy().into_owned(),
@@ -915,6 +926,24 @@ fn sanitize_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_flags_the_target_cli_accepts_reach_the_launch() {
+        // `codex --help` lists `-m/--model` but no `--effort` and no `--mode`;
+        // sending either made the CLI exit instead of starting the Loop.
+        assert_eq!(
+            provider_flags("codex", Some("gpt-5.6-luna"), Some("high"), Some("plan")),
+            vec!["--model", "gpt-5.6-luna"],
+        );
+        assert_eq!(
+            provider_flags("claude", Some("opus"), Some("xhigh"), Some("acceptEdits")),
+            vec!["--model", "opus", "--effort", "xhigh", "--permission-mode", "acceptEdits"],
+        );
+        // Nothing pinned, and an empty string, both add no arguments at all —
+        // a bare `--model` with no value would fail the same way.
+        assert!(provider_flags("claude", None, None, None).is_empty());
+        assert!(provider_flags("claude", Some(""), Some(""), Some("")).is_empty());
+    }
+
     fn fixture(agent: &str) -> (PathBuf, SessionReference) {
         let root =
             std::env::temp_dir().join(format!("rhyme-loop-adapter-{}", uuid::Uuid::new_v4()));
