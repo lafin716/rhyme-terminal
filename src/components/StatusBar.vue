@@ -5,13 +5,15 @@ import { Icon } from "@iconify/vue";
 import { useSessions, displayName } from "../composables/useSessions";
 import { useWorkspaces } from "../composables/useWorkspaces";
 import { useUsage, usageKey } from "../composables/useUsage";
+import { useLoopRouting } from "../composables/useLoopRouting";
 import { CLI_AGENTS } from "../composables/useAccountProfiles";
 import { sessionAgentIcon } from "../lib/session-agent-icon";
 import { formatUsagePercent, formatUsageReset } from "../lib/usage-status";
+import { activeUsageProfiles } from "../lib/usage-active";
 import type { CliAgentKind } from "../lib/persistence";
 
-const { focusedSession } = useSessions();
-const { activeWorkspace } = useWorkspaces();
+const { focusedSession, state: sessionState } = useSessions();
+const { activeWorkspace, state: workspaceState } = useWorkspaces();
 const { usage, records, targets, selected, selectToolbarProfile, summary, refresh, loading } = useUsage();
 const { t, locale } = useI18n();
 const now = ref(Date.now());
@@ -24,6 +26,27 @@ let timer: number | undefined;
 let polling: number | undefined;
 let sessionPolling: number | undefined;
 const count = (agent: CliAgentKind) => targets.value.filter(p => p.agent === agent).length;
+const snapshotProfile = (sessionId: string) => workspaceState.workspaces
+  .find(ws => ws.terminalSnapshots[sessionId])?.terminalSnapshots[sessionId]?.accountProfile;
+/**
+ * Only profiles with a live agent process are refreshed on a timer — an idle
+ * profile spends no quota, so polling it would just burn the provider's rate
+ * limit. Everything else is refreshed on demand from this dialog.
+ */
+const activeKeys = computed(() => new Set(activeUsageProfiles(
+  sessionState.sessions,
+  snapshotProfile,
+  useLoopRouting().state.groups.map(group => ({
+    activeProfile: group.activeProfile,
+    live: group.runtime?.pid != null,
+    sessionIds: [group.activeSessionId, ...group.attempts.map(a => a.sessionId)]
+      .filter((id): id is string => id !== null),
+  })),
+).map(p => usageKey(p.agent, p.id))));
+const isActive = (agent: CliAgentKind, id: string | null) => activeKeys.value.has(usageKey(agent, id));
+const refreshActive = (sessionOnly = false) => void refresh({ sessionOnly, keys: activeKeys.value });
+const refreshProfile = (agent: CliAgentKind, id: string | null) =>
+  void refresh({ keys: new Set([usageKey(agent, id)]), force: true });
 const tone = (percent: number | null) => percent !== null && percent >= 90 ? "danger" : percent !== null && percent >= 70 ? "warning" : "";
 const stamp = (value: number) => {
   const date = new Date(value);
@@ -35,7 +58,7 @@ async function show(agent: CliAgentKind, event: MouseEvent) {
   trigger = event.currentTarget as HTMLElement;
   highlighted.value = agent;
   open.value = true;
-  void refresh();
+  refreshActive();
   await nextTick();
   dialog.value?.focus();
 }
@@ -58,12 +81,14 @@ function onKey(event: KeyboardEvent) {
     }
   }
 }
-watch(() => targets.value.map(p => usageKey(p.agent, p.id)).join("|"), () => void refresh());
+// A profile that just started running has no sample yet: fetch it immediately
+// rather than waiting out the five-minute tick.
+watch(() => [...activeKeys.value].sort().join("|"), () => refreshActive());
 onMounted(() => {
-  void refresh();
+  refreshActive();
   timer = window.setInterval(() => { now.value = Date.now(); }, 30_000);
-  polling = window.setInterval(() => { if (!document.hidden) void refresh(); }, 300_000);
-  sessionPolling = window.setInterval(() => { if (!document.hidden) void refresh(true); }, 10_000);
+  polling = window.setInterval(() => { if (!document.hidden) refreshActive(); }, 300_000);
+  sessionPolling = window.setInterval(() => { if (!document.hidden) refreshActive(true); }, 10_000);
   window.addEventListener("keydown", onKey, true);
 });
 onUnmounted(() => {
@@ -101,26 +126,27 @@ onUnmounted(() => {
       <section id="usage-dialog" ref="dialog" class="usage-dialog" role="dialog" aria-modal="true" aria-labelledby="usage-title" tabindex="-1">
         <header class="dialog-header">
           <div><h2 id="usage-title">{{ t('Account usage') }}</h2><p>{{ t('Compare usage across all profiles') }}</p></div>
-          <button class="icon-button" :title="t('Refresh usage')" :aria-label="t('Refresh usage')" :disabled="loading" @click="refresh()"><Icon :class="{ spinning: loading }" icon="lucide:refresh-cw" /></button>
+          <button class="icon-button" :title="t('Refresh every profile')" :aria-label="t('Refresh every profile')" :disabled="loading" @click="refresh({ force: true })"><Icon :class="{ spinning: loading }" icon="lucide:refresh-cw" /></button>
           <button class="icon-button" :aria-label="t('Close')" @click="close"><Icon icon="lucide:x" /></button>
         </header>
         <div class="providers">
           <section v-for="agent in CLI_AGENTS" :key="agent.id" class="provider" :class="[agent.id, { highlighted: highlighted === agent.id }]">
             <div class="provider-heading"><Icon :icon="sessionAgentIcon(agent.id)" /><h3>{{ agent.label }}</h3><span>{{ count(agent.id) }}</span></div>
             <article v-for="profile in targets.filter(p => p.agent === agent.id)" :key="usageKey(agent.id, profile.id)" class="profile-card">
-              <div class="profile-heading"><span class="profile-name" :title="profile.label">{{ profile.id ? profile.label : t('System') }}</span><button v-if="count(agent.id) > 1" type="button" class="toolbar-select" :class="{ selected: selected(agent.id).id === profile.id }" :aria-pressed="selected(agent.id).id === profile.id" :aria-label="t('Show {profile} in toolbar', { profile: profile.id ? profile.label : t('System') })" @click="selectToolbarProfile(agent.id, profile.id)"><Icon :icon="selected(agent.id).id === profile.id ? 'lucide:check' : 'lucide:pin'" />{{ t(selected(agent.id).id === profile.id ? 'Shown in toolbar' : 'Show in toolbar') }}</button><span v-else class="default-tag">{{ t('Toolbar') }}</span></div>
+              <div class="profile-heading"><span class="profile-name" :title="profile.label">{{ profile.id ? profile.label : t('System') }}</span><span v-if="isActive(agent.id, profile.id)" class="live-tag" :title="t('An agent is running on this profile · refreshed automatically')"><Icon icon="lucide:activity" />{{ t('In use') }}</span><button v-if="count(agent.id) > 1" type="button" class="toolbar-select" :class="{ selected: selected(agent.id).id === profile.id }" :aria-pressed="selected(agent.id).id === profile.id" :aria-label="t('Show {profile} in toolbar', { profile: profile.id ? profile.label : t('System') })" @click="selectToolbarProfile(agent.id, profile.id)"><Icon :icon="selected(agent.id).id === profile.id ? 'lucide:check' : 'lucide:pin'" />{{ t(selected(agent.id).id === profile.id ? 'Shown in toolbar' : 'Show in toolbar') }}</button><span v-else class="default-tag">{{ t('Toolbar') }}</span><button type="button" class="icon-button card-refresh" :title="t('Refresh {profile} usage', { profile: profile.id ? profile.label : t('System') })" :aria-label="t('Refresh {profile} usage', { profile: profile.id ? profile.label : t('System') })" :disabled="records[usageKey(agent.id, profile.id)]?.loading" @click="refreshProfile(agent.id, profile.id)"><Icon :class="{ spinning: records[usageKey(agent.id, profile.id)]?.loading }" icon="lucide:refresh-cw" /></button></div>
               <div v-for="window in records[usageKey(agent.id, profile.id)]?.windows ?? []" :key="window.label" class="window" :class="tone(window.percentUsed)">
                 <div class="window-heading"><span>{{ t(window.label) }}</span><strong>{{ formatUsagePercent(window) }} <small>{{ t('used') }}</small></strong></div>
                 <div class="meter" role="progressbar" :aria-label="`${profile.id ? profile.label : t('System')} · ${t(window.label)}`" :aria-valuenow="window.percentUsed ?? 0" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: `${window.percentUsed ?? 0}%` }" /></div>
                 <div class="reset">{{ window.resetsAt === null ? t('Reset time unavailable') : formatUsageReset(window, now, locale) }}</div>
               </div>
               <div v-if="records[usageKey(agent.id, profile.id)]?.error" class="error-message"><Icon icon="lucide:info" /><span>{{ t(records[usageKey(agent.id, profile.id)]!.error!) }}</span></div>
-              <div v-else-if="!records[usageKey(agent.id, profile.id)]?.windows.length" class="empty-state">{{ t('Loading usage…') }}</div>
+              <div v-else-if="records[usageKey(agent.id, profile.id)]?.loading" class="empty-state">{{ t('Loading usage…') }}</div>
+              <div v-else-if="!records[usageKey(agent.id, profile.id)]?.windows.length" class="empty-state">{{ t('Not checked yet — use the refresh button') }}</div>
               <div v-if="records[usageKey(agent.id, profile.id)]?.updatedAt" class="updated">{{ t(records[usageKey(agent.id, profile.id)]?.error ? 'Last successful update: {time}' : profile.sessionUsage ? 'Last session update: {time}' : 'Updated {time}', { time: stamp(records[usageKey(agent.id, profile.id)]!.updatedAt!) }) }}</div>
             </article>
           </section>
         </div>
-        <footer>{{ t('Toolbar shows the selected profile · Auto-refresh every 5 minutes') }}<span>{{ t('Session data is checked every 10 seconds; API requests are limited to once per minute') }}</span></footer>
+        <footer>{{ t('Toolbar shows the selected profile · Only profiles in use are refreshed automatically') }}<span>{{ t('Refresh any other profile with its own button; session data of a running profile is checked every 10 seconds') }}</span></footer>
       </section>
     </div>
   </Teleport>
@@ -148,8 +174,12 @@ onUnmounted(() => {
 .provider-heading { display:flex; align-items:center; gap:8px; margin:0 0 12px; color:var(--accent); font-size:19px; } h3 { font-size:13px; font-weight:600; margin:0; color:#dcdde2; } .provider-heading > span { margin-left:auto; font-size:11px; color:#93959e; }
 .profile-card { border:1px solid #ffffff10; background:#28292d; border-radius:8px; padding:14px; margin-bottom:10px; }
 .highlighted .profile-card { border-color:color-mix(in srgb,var(--accent) 28%,transparent); }
-.profile-heading { display:flex; align-items:center; gap:8px; margin-bottom:16px; } .profile-name { font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.toolbar-select { margin-left:auto; flex-shrink:0; display:inline-flex; align-items:center; gap:4px; padding:4px 7px; border:1px solid #ffffff20; border-radius:5px; background:transparent; color:#a8abb5; font:inherit; font-size:10px; cursor:pointer; }
+.profile-heading { display:flex; align-items:center; gap:8px; margin-bottom:16px; } /* `margin-right:auto` keeps the tags and the refresh button right-aligned
+   whether or not the "in use" tag and the toolbar picker are rendered. */
+.profile-name { margin-right:auto; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.live-tag { flex-shrink:0; display:inline-flex; align-items:center; gap:3px; font-size:10px; color:#79cab4; border:1px solid #79cab440; background:#79cab414; border-radius:4px; padding:2px 5px; }
+.card-refresh { flex-shrink:0; width:24px; height:24px; font-size:13px; }
+.toolbar-select { flex-shrink:0; display:inline-flex; align-items:center; gap:4px; padding:4px 7px; border:1px solid #ffffff20; border-radius:5px; background:transparent; color:#a8abb5; font:inherit; font-size:10px; cursor:pointer; }
 .toolbar-select:hover { color:var(--accent); border-color:var(--accent); background:#ffffff06; }
 .toolbar-select.selected { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 35%,transparent); background:color-mix(in srgb,var(--accent) 10%,transparent); }
 .toolbar-select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }

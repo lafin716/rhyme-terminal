@@ -23,15 +23,36 @@ const targets = computed(() => CLI_AGENTS.flatMap(agent => [
 ]));
 const empty: UsageStat = { percentUsed: null, resetsAt: null };
 
-async function refresh(sessionOnly = false) {
+export interface RefreshOptions {
+  /** Only poll profiles whose usage comes from a local session sample. */
+  sessionOnly?: boolean;
+  /**
+   * Restrict the sweep to these usage keys. Timed refreshes pass the profiles
+   * with a live agent process (see `lib/usage-active.ts`); omit it to cover
+   * every profile, which only user-initiated refreshes should do.
+   */
+  keys?: ReadonlySet<string>;
+  /**
+   * Skip the client-side throttle for an explicit, user-initiated check. The
+   * daemon still answers from its own one-minute cache, so this cannot reach
+   * the provider more often than a timed refresh would.
+   */
+  force?: boolean;
+}
+
+async function refresh(options: boolean | RefreshOptions = {}) {
+  const { sessionOnly = false, keys, force = false } =
+    typeof options === "boolean" ? { sessionOnly: options } as RefreshOptions : options;
   // Two workers bound concurrent network requests for large profile collections.
-  const queue = targets.value.filter(target => !sessionOnly || target.sessionUsage);
+  const queue = targets.value.filter(target => (!sessionOnly || target.sessionUsage)
+    && (!keys || keys.has(usageKey(target.agent, target.id))));
   const worker = async () => {
     for (let target = queue.shift(); target; target = queue.shift()) {
       const key = usageKey(target.agent, target.id);
       records[key] ??= { windows: [], loading: false, error: null, updatedAt: null, attemptedAt: 0 };
       const record = records[key];
-      if (record.loading || Date.now() - record.attemptedAt < (target.sessionUsage ? 5_000 : 60_000)) continue;
+      if (record.loading) continue;
+      if (!force && Date.now() - record.attemptedAt < (target.sessionUsage ? 5_000 : 60_000)) continue;
       record.attemptedAt = Date.now();
 
       record.loading = true;
