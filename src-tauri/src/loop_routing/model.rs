@@ -64,6 +64,12 @@ pub struct Candidate {
     pub enabled: bool,
     pub short_threshold: Option<f64>,
     pub weekly_threshold: Option<f64>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
     pub config_dir: Option<String>,
     pub auth_method: Option<String>,
     #[serde(default, skip_serializing)]
@@ -133,7 +139,7 @@ impl Settings {
         let valid = |n: f64| n.is_finite() && (1.0..=100.0).contains(&n);
         ensure!(
             valid(self.short_threshold) && valid(self.weekly_threshold),
-            "임계값은 1~100%여야 합니다"
+            "Thresholds must be between 1 and 100."
         );
         ensure!(
             self.agent_order.len() == 2
@@ -144,15 +150,18 @@ impl Settings {
         ensure!(self.candidates.len() <= 100, "프로필이 너무 많습니다");
         let mut seen = HashSet::new();
         for c in &self.candidates {
+            Self::validate_text_option(&c.model, "model")?;
+            Self::validate_text_option(&c.effort, "effort")?;
+            Self::validate_text_option(&c.mode, "mode")?;
             ensure!(
                 matches!(c.agent.as_str(), "claude" | "codex") && seen.insert(c.key()),
                 "지원하지 않거나 중복된 프로필입니다"
             );
             ensure!(
                 c.short_threshold.map_or(true, valid) && c.weekly_threshold.map_or(true, valid),
-                "프로필 임계값은 1~100%여야 합니다"
+                "Candidate threshold must be between 1 and 100."
             );
-            ensure!(c.label.len() <= 256, "프로필 이름이 너무 깁니다");
+            ensure!(c.label.len() <= 256, "Candidate label is too long");
             for (key, value) in &c.env {
                 ensure!(
                     !key.is_empty()
@@ -165,9 +174,17 @@ impl Settings {
                         key.to_ascii_uppercase().as_str(),
                         "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "RHYME_LOOP_ATTEMPT_DIR"
                     ),
-                    "프로필 격리 환경변수는 자동 설정됩니다"
+                    "Profile environment variable name is reserved"
                 );
             }
+        }
+        Ok(())
+    }
+    fn validate_text_option(value: &Option<String>, field: &str) -> Result<()> {
+        if let Some(value) = value {
+            ensure!(!value.is_empty(), "{field} cannot be empty");
+            ensure!(value.len() <= 64, "{field} is too long");
+            ensure!(!value.chars().any(char::is_control), "{field} contains invalid control characters");
         }
         Ok(())
     }
@@ -418,6 +435,9 @@ mod tests {
             enabled: true,
             short_threshold: None,
             weekly_threshold: None,
+            model: None,
+            effort: None,
+            mode: None,
             config_dir: None,
             auth_method: None,
             env: HashMap::new(),
@@ -488,4 +508,7 @@ pub struct ProfilePolicyPatch {
     pub short_threshold: Option<f64>,
     pub weekly_threshold: Option<f64>,
     pub priority: Option<i32>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
 }

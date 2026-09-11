@@ -98,6 +98,9 @@ pub fn prepare_launch(
     mut env: HashMap<String, String>,
     resume: Option<&SessionReference>,
     prompt: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    mode: Option<&str>,
 ) -> Result<Launch> {
     if !matches!(agent, "claude" | "codex") {
         bail!("Unsupported loop provider");
@@ -186,6 +189,25 @@ pub fn prepare_launch(
             "CODEX_HOME".into(),
             config_dir.to_string_lossy().into_owned(),
         );
+    }
+    if let Some(value) = model {
+        if !value.is_empty() {
+            args.extend(["--model".into(), value.to_owned()]);
+        }
+    }
+    if let Some(value) = effort {
+        if !value.is_empty() {
+            args.extend(["--effort".into(), value.to_owned()]);
+        }
+    }
+    if let Some(value) = mode {
+        if !value.is_empty() {
+            if agent == "claude" {
+                args.extend(["--permission-mode".into(), value.to_owned()]);
+            } else if agent == "codex" {
+                args.extend(["--mode".into(), value.to_owned()]);
+            }
+        }
     }
     env.insert(
         "RHYME_LOOP_ATTEMPT_DIR".into(),
@@ -1161,6 +1183,9 @@ mod tests {
             &root.join("attempt"),
             &root,
             HashMap::new(),
+            None,
+            None,
+            None,
             None,
             None,
         )
