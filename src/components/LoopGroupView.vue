@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import TerminalView from './Terminal.vue';
 import { useLoopRouting } from '../composables/useLoopRouting';
@@ -32,6 +32,7 @@ const countdown = computed(() => {
 });
 const date = (value: number) => new Date(value).toLocaleTimeString('ko-KR', { hour12: false });
 const candidatePolicy = (key: string) => props.group.policy?.candidates.find(c => c.agent + ':' + (c.profileId ?? 'system') === key);
+/** Loop-wide settings still save on change; per-profile settings use 적용. */
 async function updatePolicy(patch: LoopPolicyPatch, event: Event) {
   const input = event.target as HTMLInputElement | HTMLSelectElement;
   if (!input.checkValidity()) { input.reportValidity(); return; }
@@ -43,21 +44,88 @@ async function updatePolicy(patch: LoopPolicyPatch, event: Event) {
     // Restore the authoritative value after success, validation races or a rejected request.
     const policy = props.group.policy;
     if (policy) {
-      if (patch.profile) {
-        const candidate = candidatePolicy(patch.profile.key);
-        if (patch.profile.shortThreshold != null) input.value = String(candidate?.shortThreshold ?? policy.shortThreshold);
-        else if (patch.profile.weeklyThreshold != null) input.value = String(candidate?.weeklyThreshold ?? policy.weeklyThreshold);
-        else input.value = String(candidate?.priority ?? 0);
-      } else if (patch.strategy != null) input.value = policy.strategy ?? 'SMART';
+      if (patch.strategy != null) input.value = policy.strategy ?? 'SMART';
       else if (patch.pollingIntervalSeconds != null) input.value = String(policy.pollingIntervalSeconds ?? 120);
       else if (input instanceof HTMLInputElement) input.checked = policy.autoResume ?? true;
     }
     busy.value = false;
   }
 }
-function updateProfile(key: string, field: 'shortThreshold' | 'weeklyThreshold' | 'priority', event: Event) {
-  const input = event.target as HTMLInputElement;
-  void updatePolicy({ profile: { key, [field]: input.valueAsNumber } }, event);
+/**
+ * Per-profile settings are edited as a local draft and only sent when the
+ * profile's own 적용 button is pressed. Saving on `change` (blur) meant a
+ * rejected edit — a locked active profile, a value the daemon refused —
+ * snapped the field back with the reason buried in the single truncated
+ * status line, which read as the change simply not taking effect.
+ */
+interface ProfileDraft { shortThreshold: number; weeklyThreshold: number; priority: number }
+const drafts = reactive<Record<string, ProfileDraft>>({});
+const draftErrors = reactive<Record<string, string>>({});
+const appliedKey = ref('');
+let appliedTimer: ReturnType<typeof setTimeout> | undefined;
+onUnmounted(() => clearTimeout(appliedTimer));
+
+function savedDraft(key: string): ProfileDraft | undefined {
+  const policy = props.group.policy;
+  const candidate = candidatePolicy(key);
+  if (!policy || !candidate) return undefined;
+  return {
+    shortThreshold: candidate.shortThreshold ?? policy.shortThreshold,
+    weeklyThreshold: candidate.weeklyThreshold ?? policy.weeklyThreshold,
+    priority: candidate.priority ?? 0,
+  };
+}
+const dirty = (key: string) => {
+  const draft = drafts[key];
+  const saved = savedDraft(key);
+  return !!draft && !!saved && (['shortThreshold', 'weeklyThreshold', 'priority'] as const)
+    .some(field => draft[field] !== saved[field]);
+};
+// Adopt the daemon's values for every profile that has no unapplied edit, so a
+// change made elsewhere shows up without ever discarding what is being typed.
+watch(() => [props.group.policy?.shortThreshold, props.group.policy?.weeklyThreshold,
+  JSON.stringify(props.group.policy?.candidates ?? []), (props.group.profiles ?? []).map(p => p.key).join('|')],
+() => {
+  const keys = (props.group.profiles ?? []).map(p => p.key);
+  for (const key of keys) {
+    const saved = savedDraft(key);
+    if (saved && (!drafts[key] || !dirty(key))) drafts[key] = saved;
+  }
+  for (const key of Object.keys(drafts)) if (!keys.includes(key)) delete drafts[key];
+}, { immediate: true, deep: true });
+
+async function applyProfile(key: string, event: Event) {
+  const settings = (event.currentTarget as HTMLElement).closest('.profile-settings');
+  const invalid = settings?.querySelector<HTMLInputElement>('input:invalid');
+  if (invalid) { invalid.reportValidity(); return; }
+  const draft = drafts[key];
+  const saved = savedDraft(key);
+  if (!draft || !saved) return;
+  // Only the changed fields travel. That also keeps a locked active profile
+  // editable for its priority without tripping the daemon's threshold guard.
+  const profile: NonNullable<LoopPolicyPatch['profile']> = { key };
+  if (draft.shortThreshold !== saved.shortThreshold) profile.shortThreshold = draft.shortThreshold;
+  if (draft.weeklyThreshold !== saved.weeklyThreshold) profile.weeklyThreshold = draft.weeklyThreshold;
+  if (draft.priority !== saved.priority) profile.priority = draft.priority;
+  busy.value = true; draftErrors[key] = '';
+  try {
+    await loops.updatePolicy(props.group.id, { profile });
+    await nextTick();
+    const applied = savedDraft(key);
+    if (applied) drafts[key] = applied;
+    appliedKey.value = key;
+    clearTimeout(appliedTimer);
+    appliedTimer = setTimeout(() => { appliedKey.value = ''; }, 4000);
+  } catch (e) {
+    draftErrors[key] = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+function revertProfile(key: string) {
+  const saved = savedDraft(key);
+  if (saved) drafts[key] = saved;
+  draftErrors[key] = '';
 }
 const percent = (value: number | null | undefined) => value == null ? '확인 전' : `${Math.round(value)}%`;
 async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
@@ -87,11 +155,18 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
         <header><strong>{{ p.agent === 'codex' ? 'Codex' : 'Claude Code' }} · {{ p.label }}</strong><span>{{ p.status }}</span></header>
         <div class="meter" role="progressbar" :aria-label="`${p.label} 사용량`" :aria-valuenow="p.usage ?? undefined" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: `${p.usage ?? 0}%` }" /><i :style="{ left: `${p.threshold}%` }" :title="`임계값 ${p.threshold}%`" /></div>
         <div class="profile-meta"><span>{{ percent(p.usage) }} · 임계값 {{ p.threshold }}%</span><span>잔여 {{ percent(p.remaining) }}</span><span v-if="p.resetAt">Reset {{ date(p.resetAt) }}</span></div>
-        <div v-if="group.policy && candidatePolicy(p.key)" class="profile-settings">
-          <label>단기 임계값 (%)<input type="number" min="1" max="100" required :aria-label="p.label + ' 단기 임계값'" :value="candidatePolicy(p.key)?.shortThreshold ?? group.policy.shortThreshold" :disabled="busy || p.key === group.activeProfile" @change="updateProfile(p.key, 'shortThreshold', $event)" /></label>
-          <label>주간 임계값 (%)<input type="number" min="1" max="100" required :aria-label="p.label + ' 주간 임계값'" :value="candidatePolicy(p.key)?.weeklyThreshold ?? group.policy.weeklyThreshold" :disabled="busy || p.key === group.activeProfile" @change="updateProfile(p.key, 'weeklyThreshold', $event)" /></label>
-          <label>우선순위<input type="number" min="-2147483648" max="2147483647" required :aria-label="p.label + ' 우선순위'" :value="candidatePolicy(p.key)?.priority ?? 0" :disabled="busy" @change="updateProfile(p.key, 'priority', $event)" /></label>
-          <span v-if="p.key === group.activeProfile" class="locked"><Icon icon="lucide:lock-keyhole" />활성 계정의 임계값은 변경할 수 없습니다.</span>
+        <div v-if="group.policy && candidatePolicy(p.key) && drafts[p.key]" class="profile-settings">
+          <label>단기 임계값 (%)<input v-model.number="drafts[p.key].shortThreshold" type="number" min="1" max="100" required :aria-label="p.label + ' 단기 임계값'" :disabled="busy || p.key === group.activeProfile" /></label>
+          <label>주간 임계값 (%)<input v-model.number="drafts[p.key].weeklyThreshold" type="number" min="1" max="100" required :aria-label="p.label + ' 주간 임계값'" :disabled="busy || p.key === group.activeProfile" /></label>
+          <label>우선순위<input v-model.number="drafts[p.key].priority" type="number" min="-2147483648" max="2147483647" required :aria-label="p.label + ' 우선순위'" :disabled="busy" /></label>
+          <span v-if="p.key === group.activeProfile" class="locked"><Icon icon="lucide:lock-keyhole" />활성 계정의 임계값은 변경할 수 없습니다. 우선순위는 바꿀 수 있습니다.</span>
+          <div class="apply-row">
+            <button type="button" :disabled="busy || !dirty(p.key)" :aria-label="p.label + ' 설정 적용'" @click="applyProfile(p.key, $event)">적용</button>
+            <button v-if="dirty(p.key)" type="button" class="ghost" :aria-label="p.label + ' 설정 되돌리기'" @click="revertProfile(p.key)">되돌리기</button>
+            <span v-if="dirty(p.key)" class="draft-note" role="status">적용하지 않은 변경이 있습니다</span>
+            <span v-else-if="appliedKey === p.key" class="applied-note" role="status"><Icon icon="lucide:check" />적용했습니다</span>
+          </div>
+          <p v-if="draftErrors[p.key]" class="profile-error" role="alert">{{ draftErrors[p.key] }}</p>
         </div>
         <p v-if="p.usagePending" class="usage-pending">Claude 실행 후 사용량 확인 · 실제 한도 오류 감지 시 자동 전환</p>
         <p v-if="p.error" class="profile-error">{{ p.error }}</p>
@@ -118,6 +193,11 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
 .profile-settings input, .session-policy :is(input[type=number], select) { box-sizing: border-box; min-width: 0; width: 100%; padding: 6px; border: 1px solid #ffffff30; border-radius: 4px; background: var(--bg-primary, #202225); color: var(--text-primary, #e6e8eb); font: inherit; }
 .profile-settings input:disabled { opacity: .45; cursor: not-allowed; }
 .locked { grid-column: 1 / -1; display: flex; align-items: center; gap: 5px; color: var(--text-secondary, #aeb3ba); font-size: 11px; }
+.apply-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.apply-row .ghost { background: transparent; border-color: #ffffff20; }
+.draft-note { font-size: 11px; color: #eac47e; }
+.applied-note { display: flex; align-items: center; gap: 3px; font-size: 11px; color: var(--accent); }
+.profile-settings .profile-error { grid-column: 1 / -1; margin: 0; font-size: 11px; }
 .session-policy { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; border: 1px solid #ffffff20; border-radius: 6px; padding: 12px; }
 .session-policy .auto-resume { flex-direction: row; align-items: center; }
 .session-policy small { font-size: 10px; color: var(--text-secondary, #aeb3ba); font-weight: 400; }

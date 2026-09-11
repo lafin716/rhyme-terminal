@@ -864,6 +864,18 @@ fn active_threshold_changes_are_rejected_atomically_even_without_a_runtime_snaps
     assert!(f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:b","shortThreshold":95}}})).is_err());
 }
 #[test]
+fn a_loop_without_an_explicit_participant_list_still_accepts_profile_edits() {
+    let mut f = Fixture::new();
+    // An empty list means "every candidate" everywhere else, including the
+    // `profiles` list this editor is rendered from — a Loop saved before the
+    // field existed used to have every per-profile edit refused.
+    f.engine.groups.get_mut(&f.id).unwrap().participants.clear();
+    f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:b","shortThreshold":70}}})).unwrap();
+    assert_eq!(f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[1].short_threshold, Some(70.0));
+    // A key that is not a candidate at all is still refused.
+    assert!(f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:missing","shortThreshold":70}}})).is_err());
+}
+#[test]
 fn live_policy_rejects_invalid_or_nonparticipant_changes_without_mutation() {
     let mut f = Fixture::new();
     for patch in [json!({"profile":{"key":"codex:b","shortThreshold":101}}), json!({"shortThreshold":95}), json!({"profile":{"key":"codex:missing","priority":1}}), json!({"pollingIntervalSeconds":0})] {

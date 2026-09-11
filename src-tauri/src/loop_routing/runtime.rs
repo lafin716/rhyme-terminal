@@ -344,7 +344,15 @@ impl Engine {
                 let mut g = self.groups.get(&id).context("Loop not found")?.clone();
                 let mut policy = g.policy.clone().context("이 Loop에는 편집 가능한 설정이 없습니다")?;
                 if let Some(profile) = patch.profile {
-                    ensure!(g.participants.contains(&profile.key), "이 Loop에 참여하지 않는 프로필입니다");
+                    // An empty participant list means "every candidate", the
+                    // way `candidates`, `profiles` and `tick_for_profile` all
+                    // read it. Without that escape a Loop saved before this
+                    // field existed rejected every per-profile edit while
+                    // still rendering those profiles with editable inputs.
+                    ensure!(
+                        g.participants.is_empty() || g.participants.contains(&profile.key),
+                        "이 Loop에 참여하지 않는 프로필입니다"
+                    );
                     ensure!(g.active_profile.as_deref() != Some(profile.key.as_str())
                         || (profile.short_threshold.is_none() && profile.weekly_threshold.is_none()),
                         "현재 활성 계정의 임계값은 변경할 수 없습니다");
