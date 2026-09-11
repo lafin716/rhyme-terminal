@@ -1,0 +1,15 @@
+{
+  "errors": [],
+  "overflow": false,
+  "checks": [
+    "settings-per-account-picker",
+    "default-5h",
+    "non-basis-dimmed",
+    "persisted-per-account",
+    "loop-live-basis-change",
+    "active-account-locked",
+    "window-tag-follows-basis",
+    "global-defaults-isolated",
+    "1440-and-390"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "errors": [],
+  "overflow": false,
+  "checks": [
+    "no-session-selector",
+    "unified-profile-lists",
+    "provider-tags",
+    "codex-first-row",
+    "drag-reorder",
+    "active-only",
+    "auto-start-terminal",
+    "collapsed-by-default",
+    "active-profile",
+    "usage-bars",
+    "countdown",
+    "desktop-and-narrow"
+  ]
+}

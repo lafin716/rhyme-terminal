@@ -1,0 +1,17 @@
+{
+  "header": {
+    "text": "Project",
+    "left": 18,
+    "plus": 177,
+    "width": 24
+  },
+  "menu": [
+    "새 터미널",
+    "이름 변경",
+    "삭제"
+  ],
+  "expanded": "true",
+  "created": true,
+  "projects": 2,
+  "errors": []
+}

@@ -1,0 +1,16 @@
+{
+  "errors": [],
+  "loopCalls": [
+    "configure",
+    "list",
+    "list",
+    "configure",
+    "list",
+    "configure",
+    "create",
+    "list",
+    "rename",
+    "list",
+    "list"
+  ]
+}
