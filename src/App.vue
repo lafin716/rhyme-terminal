@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { initializeLoopRouting, disposeLoopRouting, useLoopRouting } from './composables/useLoopRouting';
-import { loopTabId } from './lib/loop-routing';
+import { loopManagedSessionIds, loopTabId } from './lib/loop-routing';
 import { t } from "./composables/useI18n";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -171,12 +171,17 @@ async function bootstrap() {
   const validIds = new Set(sessState.sessions.map((s) => s.id));
   const loopGroups = useLoopRouting().state.groups;
   for (const group of loopGroups) validIds.add(loopTabId(group.id));
-  const managedSessions = new Set(loopGroups.flatMap(group => group.attempts.flatMap(a => a.sessionId ? [a.sessionId] : [])));
+  const managedSessions = loopManagedSessionIds(loopGroups);
   await restorePersistedSessions(validIds);
 
-  // Prune missing sessions from every workspace layout.
+  // Prune missing sessions from every workspace layout, and Loop-owned PTYs
+  // along with them: the daemon respawns the Loop's shell under a new id after
+  // a restart, and the Loop's own tab — re-added by `refreshLoopGroups` — is
+  // what represents it. A tab left pointing at that shell cannot be closed,
+  // because killing it just makes the daemon spawn a replacement.
+  const layoutIds = new Set([...validIds].filter(id => !managedSessions.has(id)));
   for (const ws of wsState.workspaces) {
-    const newRoot = pruneMissing(ws.layout, validIds);
+    const newRoot = pruneMissing(ws.layout, layoutIds);
     if (newRoot !== ws.layout) replaceLayout(ws.id, newRoot);
   }
 

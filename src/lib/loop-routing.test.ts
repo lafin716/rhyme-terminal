@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeLeaf } from './layout-types';
-import { loopNavigatorSessions, type LoopGroup, loopTabId, mergeLoopProfiles, type LoopSettings } from './loop-routing';
+import { loopManagedSessionIds, loopNavigatorSessions, type LoopGroup, loopTabId, mergeLoopProfiles, type LoopSettings } from './loop-routing';
 const settings: LoopSettings = { shortThreshold: 90, weeklyThreshold: 90, agentOrder: ['claude', 'codex'], candidates: [] };
 const profile = (id: string) => ({ id, agent: 'claude' as const, label: id, configDir: `C:/profiles/${id}`, createdAt: 0, authMethod: 'oauth' as const });
 describe('loop routing profile membership', () => {
@@ -30,5 +30,12 @@ describe('loop navigator rows', () => {
   });
   it('does not resurrect a closed group as a navigator row', () => {
     expect(loopNavigatorSessions([], [{ ...group, status: 'stopped' }], [{ id: 'w2', index: 2, layout: makeLeaf('leaf') }])).toEqual([]);
+  });
+  it('counts the live shell among the managed PTYs, not just finished attempts', () => {
+    // App.vue keeps these out of the layout: the shell is respawned by the
+    // daemon whenever it is missing, so a tab holding it cannot be closed.
+    expect(loopManagedSessionIds([group])).toEqual(new Set(['live', 'old']));
+    expect(loopManagedSessionIds([{ ...group, activeSessionId: null }])).toEqual(new Set(['old']));
+    expect(loopManagedSessionIds([{ activeSessionId: null, attempts: [] }])).toEqual(new Set());
   });
 });

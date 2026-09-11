@@ -189,17 +189,30 @@ export const loopStatusLabel = (status: string) =>
     recovery: '복구 중',
   }[status] ?? status);
 
+/**
+ * Every PTY an Agent Loop owns: the shell it runs in now plus each historical
+ * attempt. None of them may sit in a layout as an ordinary terminal. The
+ * Loop's own `loopTabId` tab already represents it; the daemon respawns the
+ * shell whenever it is missing and the group is not stopped, so such a tab
+ * cannot be closed; and after a restart the shell returns under a new id,
+ * leaving any tab persisted for the old one stale.
+ */
+export function loopManagedSessionIds(
+  groups: Pick<LoopGroup, 'activeSessionId' | 'attempts'>[],
+): Set<string> {
+  return new Set(
+    groups
+      .flatMap(group => [group.activeSessionId, ...group.attempts.map(attempt => attempt.sessionId)])
+      .filter((id): id is string => id !== null),
+  );
+}
+
 export function loopNavigatorSessions(
   sessions: Pick<SessionInfo, 'id' | 'name' | 'agent'>[],
   groups: LoopGroup[],
   workspaces: Pick<Workspace, 'id' | 'index' | 'layout'>[],
 ): Pick<SessionInfo, 'id' | 'name' | 'agent'>[] {
-  const managedIds = new Set(
-    groups.flatMap(group =>
-      [group.activeSessionId, ...group.attempts.map(attempt => attempt.sessionId)]
-        .filter((id): id is string => id !== null),
-    ),
-  );
+  const managedIds = loopManagedSessionIds(groups);
   const result = sessions.filter(session => !managedIds.has(session.id));
   for (const group of groups) {
     const ws = workspaces.find(ws => ws.id === group.workspaceId);
