@@ -3,7 +3,7 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import TerminalView from './Terminal.vue';
 import { useLoopRouting } from '../composables/useLoopRouting';
-import { loopStatusLabel, type LoopGroup, type LoopPolicyPatch } from '../lib/loop-routing';
+import { LOOP_THRESHOLD_BASES, loopBasisLabel, loopStatusLabel, loopWindowLabel, type LoopGroup, type LoopPolicyPatch, type LoopThresholdBasis } from '../lib/loop-routing';
 const props = defineProps<{ group: LoopGroup; active: boolean }>();
 const loops = useLoopRouting();
 const expanded = ref(false);
@@ -58,7 +58,8 @@ async function updatePolicy(patch: LoopPolicyPatch, event: Event) {
  * snapped the field back with the reason buried in the single truncated
  * status line, which read as the change simply not taking effect.
  */
-interface ProfileDraft { shortThreshold: number; weeklyThreshold: number; priority: number }
+interface ProfileDraft { shortThreshold: number; weeklyThreshold: number; thresholdBasis: LoopThresholdBasis; priority: number }
+const DRAFT_FIELDS = ['shortThreshold', 'weeklyThreshold', 'thresholdBasis', 'priority'] as const;
 const drafts = reactive<Record<string, ProfileDraft>>({});
 const draftErrors = reactive<Record<string, string>>({});
 const appliedKey = ref('');
@@ -72,14 +73,14 @@ function savedDraft(key: string): ProfileDraft | undefined {
   return {
     shortThreshold: candidate.shortThreshold ?? policy.shortThreshold,
     weeklyThreshold: candidate.weeklyThreshold ?? policy.weeklyThreshold,
+    thresholdBasis: candidate.thresholdBasis ?? 'short',
     priority: candidate.priority ?? 0,
   };
 }
 const dirty = (key: string) => {
   const draft = drafts[key];
   const saved = savedDraft(key);
-  return !!draft && !!saved && (['shortThreshold', 'weeklyThreshold', 'priority'] as const)
-    .some(field => draft[field] !== saved[field]);
+  return !!draft && !!saved && DRAFT_FIELDS.some(field => draft[field] !== saved[field]);
 };
 // Adopt the daemon's values for every profile that has no unapplied edit, so a
 // change made elsewhere shows up without ever discarding what is being typed.
@@ -106,6 +107,7 @@ async function applyProfile(key: string, event: Event) {
   const profile: NonNullable<LoopPolicyPatch['profile']> = { key };
   if (draft.shortThreshold !== saved.shortThreshold) profile.shortThreshold = draft.shortThreshold;
   if (draft.weeklyThreshold !== saved.weeklyThreshold) profile.weeklyThreshold = draft.weeklyThreshold;
+  if (draft.thresholdBasis !== saved.thresholdBasis) profile.thresholdBasis = draft.thresholdBasis;
   if (draft.priority !== saved.priority) profile.priority = draft.priority;
   busy.value = true; draftErrors[key] = '';
   try {
@@ -154,12 +156,19 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
       <div class="profiles"><article v-for="p in group.profiles ?? []" :key="p.key" class="profile" :class="{ selected: p.key === group.activeProfile }">
         <header><strong>{{ p.agent === 'codex' ? 'Codex' : 'Claude Code' }} · {{ p.label }}</strong><span>{{ p.status }}</span></header>
         <div class="meter" role="progressbar" :aria-label="`${p.label} 사용량`" :aria-valuenow="p.usage ?? undefined" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: `${p.usage ?? 0}%` }" /><i :style="{ left: `${p.threshold}%` }" :title="`임계값 ${p.threshold}%`" /></div>
-        <div class="profile-meta"><span>{{ percent(p.usage) }} · 임계값 {{ p.threshold }}%</span><span>잔여 {{ percent(p.remaining) }}</span><span v-if="p.resetAt">Reset {{ date(p.resetAt) }}</span></div>
+        <div class="profile-meta"><span class="window-usage"><span class="window-tag" :title="`${loopWindowLabel(p.thresholdKind)} 사용량`"><Icon :icon="p.thresholdKind === 'short' ? 'lucide:clock' : 'lucide:calendar-range'" />{{ loopWindowLabel(p.thresholdKind) }}</span>{{ percent(p.usage) }} · 임계값 {{ p.threshold }}%</span><span>잔여 {{ percent(p.remaining) }}</span><span v-if="p.resetAt">Reset {{ date(p.resetAt) }}</span></div>
         <div v-if="group.policy && candidatePolicy(p.key) && drafts[p.key]" class="profile-settings">
-          <label>단기 임계값 (%)<input v-model.number="drafts[p.key].shortThreshold" type="number" min="1" max="100" required :aria-label="p.label + ' 단기 임계값'" :disabled="busy || p.key === group.activeProfile" /></label>
-          <label>주간 임계값 (%)<input v-model.number="drafts[p.key].weeklyThreshold" type="number" min="1" max="100" required :aria-label="p.label + ' 주간 임계값'" :disabled="busy || p.key === group.activeProfile" /></label>
+          <div class="basis-field">
+            <span class="basis-label">사용량 기준</span>
+            <div class="basis" role="group" :aria-label="p.label + ' 사용량 기준'">
+              <button v-for="basis in LOOP_THRESHOLD_BASES" :key="basis.value" type="button" :class="{ on: drafts[p.key].thresholdBasis === basis.value }" :aria-pressed="drafts[p.key].thresholdBasis === basis.value" :title="basis.hint" :disabled="busy || p.key === group.activeProfile" @click="drafts[p.key].thresholdBasis = basis.value"><Icon :icon="basis.value === 'weekly' ? 'lucide:calendar-range' : 'lucide:clock'" />{{ basis.label }}</button>
+            </div>
+          </div>
+          <label :class="{ inactive: drafts[p.key].thresholdBasis !== 'short' }">단기 임계값 (%)<input v-model.number="drafts[p.key].shortThreshold" type="number" min="1" max="100" required :aria-label="p.label + ' 단기 임계값'" :disabled="busy || p.key === group.activeProfile" /></label>
+          <label :class="{ inactive: drafts[p.key].thresholdBasis !== 'weekly' }">주간 임계값 (%)<input v-model.number="drafts[p.key].weeklyThreshold" type="number" min="1" max="100" required :aria-label="p.label + ' 주간 임계값'" :disabled="busy || p.key === group.activeProfile" /></label>
           <label>우선순위<input v-model.number="drafts[p.key].priority" type="number" min="-2147483648" max="2147483647" required :aria-label="p.label + ' 우선순위'" :disabled="busy" /></label>
-          <span v-if="p.key === group.activeProfile" class="locked"><Icon icon="lucide:lock-keyhole" />활성 계정의 임계값은 변경할 수 없습니다. 우선순위는 바꿀 수 있습니다.</span>
+          <span class="basis-hint">{{ loopBasisLabel(drafts[p.key].thresholdBasis) }} 사용량이 임계값에 닿으면 전환합니다. 다른 창은 100% 소진에서만 막습니다.</span>
+          <span v-if="p.key === group.activeProfile" class="locked"><Icon icon="lucide:lock-keyhole" />활성 계정의 사용량 기준과 임계값은 변경할 수 없습니다. 우선순위는 바꿀 수 있습니다.</span>
           <div class="apply-row">
             <button type="button" :disabled="busy || !dirty(p.key)" :aria-label="p.label + ' 설정 적용'" @click="applyProfile(p.key, $event)">적용</button>
             <button v-if="dirty(p.key)" type="button" class="ghost" :aria-label="p.label + ' 설정 되돌리기'" @click="revertProfile(p.key)">되돌리기</button>
@@ -173,7 +182,7 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
       </article></div>
       <fieldset v-if="group.policy" class="session-policy" :disabled="busy"><legend>이 Loop 설정 · 변경 즉시 저장</legend>
         <label>선택 전략<select :value="group.policy.strategy" @change="updatePolicy({ strategy: ($event.target as HTMLSelectElement).value as LoopPolicyPatch['strategy'] }, $event)"><option>SMART</option><option>LEAST_USAGE</option><option>ROUND_ROBIN</option><option>PRIORITY</option></select></label>
-        <label>기본 조회 간격 (초)<input type="number" min="10" max="300" required :value="group.policy.pollingIntervalSeconds" @change="updatePolicy({ pollingIntervalSeconds: ($event.target as HTMLInputElement).valueAsNumber }, $event)" /><small>사용량이 높아지면 자동으로 더 자주, 대기 중인 Profile은 덜 자주 확인합니다</small></label>
+        <label>기본 조회 간격 (초)<input type="number" min="60" max="300" required :value="group.policy.pollingIntervalSeconds" @change="updatePolicy({ pollingIntervalSeconds: ($event.target as HTMLInputElement).valueAsNumber }, $event)" /><small>사용량이 높아지면 자동으로 더 자주, 대기 중인 Profile은 덜 자주 확인합니다. Provider 조회 제한 때문에 60초보다 짧게는 확인하지 않습니다</small></label>
         <label class="auto-resume"><input type="checkbox" :checked="group.policy.autoResume" @change="updatePolicy({ autoResume: ($event.target as HTMLInputElement).checked }, $event)" />Usage reset 후 자동 재개</label>
       </fieldset>
       <dl><dt>현재 Agent</dt><dd>{{ group.currentProvider ?? '없음' }} · {{ group.runtime?.status ?? 'IDLE' }}</dd><dt>Session</dt><dd>{{ group.currentAgentSessionId ?? 'Agent 실행 후 확인' }}</dd><dt>작업 폴더</dt><dd>{{ group.cwd }}</dd></dl>
@@ -192,6 +201,21 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
 .profile-settings label, .session-policy label { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary, #aeb3ba); font-size: 11px; }
 .profile-settings input, .session-policy :is(input[type=number], select) { box-sizing: border-box; min-width: 0; width: 100%; padding: 6px; border: 1px solid #ffffff30; border-radius: 4px; background: var(--bg-primary, #202225); color: var(--text-primary, #e6e8eb); font: inherit; }
 .profile-settings input:disabled { opacity: .45; cursor: not-allowed; }
+/*
+ * The window that is not this account's basis keeps its saved value — flipping
+ * the basis back has to bring the number the user had — so it only dims.
+ */
+.profile-settings label.inactive { opacity: .5; }
+.basis-field { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.basis-label { color: var(--text-secondary, #aeb3ba); font-size: 11px; }
+.basis { display: flex; border: 1px solid #ffffff30; border-radius: 5px; overflow: hidden; }
+.basis button { display: flex; align-items: center; gap: 5px; padding: 5px 11px; border: 0; border-radius: 0; background: transparent; color: var(--text-secondary, #aeb3ba); font-size: 11px; }
+.basis button + button { border-left: 1px solid #ffffff20; }
+.basis button.on { background: var(--accent-softer, rgba(90, 155, 255, .22)); color: var(--accent-strong, #82b4ff); font-weight: 600; }
+.basis button:disabled { opacity: .45; cursor: not-allowed; }
+.basis-hint { grid-column: 1 / -1; color: var(--text-secondary, #aeb3ba); font-size: 10px; line-height: 1.5; }
+.window-usage { display: flex; align-items: center; gap: 6px; }
+.window-tag { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border: 1px solid var(--accent-border, rgba(90, 155, 255, .32)); border-radius: 999px; background: var(--accent-soft, rgba(90, 155, 255, .12)); color: var(--accent-strong, #82b4ff); font-size: 10px; }
 .locked { grid-column: 1 / -1; display: flex; align-items: center; gap: 5px; color: var(--text-secondary, #aeb3ba); font-size: 11px; }
 .apply-row { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .apply-row .ghost { background: transparent; border-color: #ffffff20; }

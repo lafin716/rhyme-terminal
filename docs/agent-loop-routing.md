@@ -51,7 +51,7 @@ RUNNING → SWITCHING_PROFILE → 입력 큐 → Ctrl+C → Agent 및 포착한 
 
 ## 7. Profile Scheduler
 
-enabled/executable/fresh Usage/단기·주간 threshold를 우선 검증한다. SMART는 낮은 사용량 → 높은 priority → 오래 사용하지 않은 계정 순이다. LEAST_USAGE/PRIORITY/ROUND_ROBIN도 지원한다. 선택 후 87%에서 91%로 바뀌면 건너뛴다.
+enabled/executable/fresh Usage/threshold를 우선 검증한다. 임계값 판정에 쓰는 창은 **계정마다** 고른다(`Candidate.thresholdBasis`, 기본 `short`). 기준 창만 설정한 임계값으로 막고, 나머지 창은 100% 소진에서만 막는다. SMART는 낮은 사용량 → 높은 priority → 오래 사용하지 않은 계정 순이다. LEAST_USAGE/PRIORITY/ROUND_ROBIN도 지원한다. 선택 후 87%에서 91%로 바뀌면 건너뛴다.
 
 구조화된 rate-limit 이벤트에는 cooldown을 적용한다. Context limit은 같은 Profile의 새 Session continuation이며 Usage/rate limit과 별도 이벤트다. 실행 중 계정의 조회를 우선하고 결과를 해당 계정의 Loop에 즉시 반영한다.
 
@@ -132,8 +132,11 @@ node .scratch/agent-loop-runtime-qa/bridge.mjs
 - Context/rate/usage 구분은 Provider가 구조화된 오류 코드를 보낼 때 가능하다. 임의 터미널 문자열을 quota 오류로 추측하지 않는다.
 - snapshot 사이에 생성되어 즉시 분리된 외부/원격 작업까지 소유권을 보장하지 않는다. 알려진 로컬 자손은 포착해 종료 확인한다.
 - Claude setup-token의 statusline 표본 대기만 실행 후 확인으로 전환한다. 이 프로필은 조회할 Usage endpoint가 없고 실행 중 기록되는 표본에 의존하므로 "표본 없음"이 정상 시작 상태다. 실행 전 refresh 시도는 유지하되 알려진 미초기화 임계값 초과 또는 실제 오류 cooldown이 없으면 실행을 허용하고, 실행 중에도 조회 실패만으로 중단하지 않고 폴링을 계속한다.
-- Claude 구독(OAuth) 및 시스템 로그인은 Usage를 직접 조회할 수 있으므로 Codex와 동일하게 방어한다. 조회 실패나 오래된 표본은 "확인 불가"로 처리해 실행을 거부하고 실행 중이면 전환한다. 이를 setup-token과 함께 실행 후 확인으로 묶으면 조회가 한 번 실패한 뒤 남은 실행 동안 임계값 검사가 조용히 꺼진다.
+- Claude 구독(OAuth) 및 시스템 로그인은 Usage를 직접 조회할 수 있으므로 Codex와 동일하게 방어한다. "확인 불가"의 기준은 freshness 창 안의 표본이 없는 상태다. 조회 실패 자체는 근거가 아니며, 마지막 정상 표본이 창 안에 있는 동안은 그 표본으로 판단한다(`eligible`). 오류만으로 즉시 실격시키면 일시적인 조회 실패 한 번이 실행 중인 Loop를 끊고, 전환한 다음 프로필까지 같은 이유로 끊는다. 창을 벗어나면 실행을 거부하고 실행 중이면 전환한다. 이를 setup-token과 함께 실행 후 확인으로 묶으면 조회가 한 번 실패한 뒤 남은 실행 동안 임계값 검사가 조용히 꺼진다.
 - 표본의 freshness 창은 해당 후보가 실제로 polling되는 주기(`tier_interval`) + `FRESHNESS_GRACE_SECS`로 계산한다. 고정 상수를 쓰면 기본 주기가 창과 같아져 매 주기마다 자기 표본이 만료된 것으로 보인다.
+- Provider는 Usage endpoint 자체에 조회 빈도 제한을 건다. 조회가 막히면 표본이 아예 없어져 Loop가 "확인 불가"로 전환되므로, 성긴 표본보다 나쁘다. 따라서 어떤 tier도 `MIN_INTERVAL_SECS`(60초)보다 자주 조회하지 않고, 사용량 tier는 실행 중인 활성 프로필에만 적용한다. 대기 프로필은 quota를 쓰지 않아 사용량이 움직이지 않으므로 표본이 높더라도 `IDLE_INTERVAL_SECS`를 유지한다(이전에는 임계값 근처에 세워둔 대기 프로필을 30초마다 무한히 조회했다).
+- Provider 요청은 `usage.rs`의 프로필별 슬롯 하나로 모인다. 화면 표시용 조회와 Loop scheduler 조회가 서로의 표본을 재사용하므로 같은 프로필을 두 경로가 따로 조회하지 않고, 429를 받으면 cooldown이 끝날 때까지 수동 새로고침을 포함한 모든 경로가 요청을 멈춘다. 막힌 endpoint를 계속 두드리는 것이 제한을 유지시키는 원인이다.
+- Usage endpoint의 429는 "우리가 너무 자주 물었다"는 뜻이지 계정 quota 소진이 아니다. 다음 조회 시각만 미루고 프로필 자격(`blocked_until`)은 건드리지 않는다. Agent 자신의 트래픽에 대한 Provider 한도 이벤트(`LimitEvent`)는 종전대로 프로필을 차단한다.
 - usagePending은 표본을 한 번도 받지 못한 프로필만 대변한다. 한 번 이라도 사용량을 보고한 뒤 발생한 오류는 감추지 않고 프로필 카드에 노출한다.
 - PTY에는 Provider 공통 durable ACK가 없다. 비정상 종료 경계의 exactly-once는 보관/사용자 확인으로 해결한다.
 - 실제 유료 계정 간 quota→native resume→reset 재개와 Unix native UI는 별도 실환경 검증이 필요하다. 테스트 helper/PTY와 mock 브라우저가 이를 대신하지 않는다.
@@ -147,10 +150,17 @@ node .scratch/agent-loop-runtime-qa/bridge.mjs
 - 브라우저 `.scratch/agent-loop-runtime-qa/profiles.mjs`: Provider 두 열, 영역 간 드래그, 전체 순서 저장, 활성 프로필만 생성 창에 표시, 1440px / 390px 레이아웃 및 오류 없음 확인.
 - 사용자 daemon은 중단하지 않았다. 새 자동 시작 capability를 적용하려면 기존 작업 종료 후 daemon을 새 바이너리로 재시작해야 한다. 실제 계정 인증 및 과금 Usage를 사용하는 실행은 이번 검증에 포함하지 않았다.
 
+계정별 사용량 기준(5시간 / 주간):
+- 한 계정을 언제 넘길지는 5시간 창과 주간 창 중 하나로 판정한다. 구독마다 소진 방식이 다르므로 Loop 단위가 아니라 **계정 단위** 설정이며, 설정 → 에이전트 루프 → 각 프로필의 `개별 기준 → 사용량 기준`에서 고른다. 기본값은 5시간이다.
+- 기준이 아닌 창은 무시하지 않는다. 100%로 소진되면 Provider가 실행 자체를 거부하므로 그 창의 한도는 100%로 유지한다(`runtime.rs`의 `limit`). 임계값 입력은 값을 지우지 않고 흐리게만 처리해, 기준을 되돌리면 쓰던 숫자가 그대로 돌아온다.
+- 프로필 카드의 사용량/임계값은 "지금 이 계정을 가장 먼저 막을 창"을 표시한다(`limit` 대비 비율이 가장 큰 창, `ProfileSnapshot.thresholdKind`). 그래서 기준이 주간이어도 5시간 창이 95%면 그 숫자를 보여주고, 카드의 창 배지가 어느 창인지 밝힌다.
+- 상세 패널에서 실시간으로 바꿀 수 있으나 **활성 계정은 잠근다**. 임계값과 같은 이유다 — 진행 중인 turn 아래에서 판정 기준이 바뀐다. 대기 계정은 다른 계정이 실행 중이어도 편집할 수 있다.
+- `.scratch/loop-threshold-basis-qa/basis.mjs`로 설정/패널 양쪽의 선택, 기본값, 비기준 창 흐리기, 활성 잠금, 전역 기본값 격리, 1440px/390px를 검증했다.
+
 루프별 실시간 설정:
-- 상세 패널에서 참여 프로필의 단기/주간 임계값과 우선순위를 수정하며, 변경 시 해당 Loop 정책만 저장한다.
+- 상세 패널에서 참여 프로필의 사용량 기준, 단기/주간 임계값과 우선순위를 수정하며, 변경 시 해당 Loop 정책만 저장한다.
 - 선택 전략, 사용량 조회 간격, reset 후 자동 재개 역시 Loop별로 수정한다. 전역 기본 설정과 다른 Loop에는 전파하지 않는다.
-- `update_policy`는 허용 필드만 받으며, Engine lock 안에서 현재 `activeProfile`의 임계값 변경을 거부한다. UI도 두 임계값을 잠금 처리한다. 계정 전환과 경합해 요청이 거부되면 화면 입력은 저장된 값으로 복원한다.
+- `update_policy`는 허용 필드만 받으며, Engine lock 안에서 현재 `activeProfile`의 사용량 기준과 임계값 변경을 거부한다. UI도 세 입력을 함께 잠금 처리한다. 계정 전환과 경합해 요청이 거부되면 화면 입력은 저장된 값으로 복원한다.
 - WAITING 중 수정은 재검증 일정을 앞당기되 실제 Usage Guard를 통과해야 재개된다. PAUSED/STOPPED 상태는 유지한다.
 - 정책과 이벤트를 기존 SQLite에 저장하고 `livePolicy` capability가 없는 daemon에는 재시작 안내를 표시한다.
 - `.scratch/agent-loop-runtime-qa/live-policy.mjs`로 임계값 수정/그래프 갱신, 활성 잠금, 전역 기본값 격리, 좁은 화면을 검증했다.

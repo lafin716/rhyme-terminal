@@ -185,14 +185,18 @@ fn codex_and_resume_use_the_same_start_gate() {
     }
 }
 #[test]
-fn threshold_is_inclusive_and_independent_for_each_window() {
-    let c = candidate("a");
+fn threshold_is_inclusive_and_applies_to_the_basis_window() {
+    let mut c = candidate("a");
     let s = Settings::default();
     assert!(!over_limit(&s, &c, &[window(89.0, 0)]));
     assert!(over_limit(&s, &c, &[window(90.0, 0)]));
     assert!(over_limit(&s, &c, &[window(91.0, 0)]));
     let mut weekly = window(95.0, 0);
     weekly.kind = "weekly".into();
+    // Each window keeps its own threshold, but only this account's basis
+    // window switches it — see `each_accounts_own_basis_decides_...`.
+    assert!(!over_limit(&s, &c, &[window(1.0, 0), weekly.clone()]));
+    c.threshold_basis = ThresholdBasis::Weekly;
     assert!(over_limit(&s, &c, &[window(1.0, 0), weekly]));
 }
 #[test]
@@ -323,7 +327,7 @@ fn backoff_grows_exponentially_with_jitter_and_caps() {
     assert!(d10 <= polling::BACKOFF_MAX_SECS * 1200);
 }
 #[test]
-fn rate_limited_fetch_keeps_cached_usage_and_respects_retry_after() {
+fn a_throttled_usage_query_slows_polling_without_disqualifying_the_profile() {
     let mut f = Fixture::new();
     f.engine
         .quota("codex:a".into(), Ok(vec![window(42.0, now() + 60_000)]), now());
@@ -333,7 +337,7 @@ fn rate_limited_fetch_keeps_cached_usage_and_respects_retry_after() {
         Err(UsageError {
             message: "429 Too many requests. Try again later".into(),
             rate_limited: true,
-            retry_after_ms: Some(5_000),
+            retry_after_ms: Some(600_000),
         }),
         before + 1,
     );
@@ -341,12 +345,21 @@ fn rate_limited_fetch_keeps_cached_usage_and_respects_retry_after() {
     // Cached usage from the last success is never discarded on 429.
     assert_eq!(q.windows.len(), 1);
     assert_eq!(q.windows[0].percent_used, 42.0);
-    assert!(q.rate_limited);
     assert_eq!(q.consecutive_failures, 1);
     assert!(q.error.as_deref().unwrap().contains("429"));
-    // The server's Retry-After wins over our own exponential estimate.
-    let retry_in = q.blocked_until.saturating_sub(before);
-    assert!((4_500..=5_500).contains(&retry_in), "retry_in={retry_in}");
+    // Being told we ask too often paces the next query. It says nothing about
+    // the account's own quota, so it must not block the profile, and the
+    // sample we already hold is still good enough to keep running on.
+    assert_eq!(q.blocked_until, 0);
+    assert!(!q.rate_limited);
+    // The server's own cooldown is honoured when it is longer than our
+    // exponential estimate; a shorter one never buys back a faster retry.
+    let retry_in = q.next_fetch_at.saturating_sub(before);
+    assert!((570_000..=630_000).contains(&retry_in), "retry_in={retry_in}");
+    assert!(crate::usage::usage_windows_are_fresh(
+        &q.windows,
+        Duration::from_secs(polling::DEFAULT_INTERVAL_SECS)
+    ));
 }
 #[test]
 fn repeated_failures_without_retry_after_back_off_the_fetch_cadence_not_just_eligibility() {
@@ -423,6 +436,21 @@ fn tier_interval_speeds_up_near_threshold_and_slows_down_when_not_active() {
     assert_eq!(
         f.engine.tier_interval("codex:a", base, false),
         polling::IDLE_INTERVAL_SECS
+    );
+    // A standby profile spends no quota, so a high sample does not pull it
+    // back onto the fast tiers — that combination is what used to poll an
+    // idle, near-threshold profile every CRITICAL_INTERVAL_SECS indefinitely.
+    f.engine
+        .quota("codex:a".into(), Ok(vec![window(88.0, now() + 60_000)]), now());
+    assert_eq!(
+        f.engine.tier_interval("codex:a", base, false),
+        polling::IDLE_INTERVAL_SECS
+    );
+    // Nothing is ever polled faster than the provider-imposed floor, even if
+    // an older configuration named a shorter baseline.
+    assert_eq!(
+        f.engine.tier_interval("codex:a", 10, true),
+        polling::MIN_INTERVAL_SECS
     );
 }
 #[test]
@@ -532,7 +560,9 @@ fn switching_queues_input_and_flushes_it_once() {
 fn reset_uses_latest_exhausted_window_and_earliest_profile() {
     let mut f = Fixture::new();
     let at = now() + 120_000;
-    let mut weekly = window(99.0, at + 60_000);
+    // Fully spent, so it blocks the profile even though the 5h window is the
+    // basis here — and its later reset is the one the Loop has to wait for.
+    let mut weekly = window(100.0, at + 60_000);
     weekly.kind = "weekly".into();
     f.engine
         .quota("codex:a".into(), Ok(vec![window(90.0, at), weekly]), now());
@@ -567,16 +597,26 @@ fn reset_deadline_requires_new_usage_evidence() {
     assert!(f.engine.live[&f.id].guard_at > 0);
 }
 #[test]
-fn stale_or_failed_usage_never_approves_a_launch() {
+fn stale_or_unconfirmable_usage_never_approves_a_launch() {
     let mut f = Fixture::new();
     let stamp = now();
     let c = candidate("a");
     f.engine
         .quota(c.key(), Ok(vec![window(1.0, stamp + 100_000)]), stamp);
+    // A sample older than the guard does not answer the guard's question.
     assert!(!f.engine.eligible(&c, stamp + 1));
+    // A failed refresh is not itself evidence: whatever the guard decided with
+    // the sample in hand, it still decides.
+    let with_sample = f.engine.eligible(&c, stamp);
     f.engine
         .quota(c.key(), Err("429 rate limited".into()), stamp + 2);
-    assert!(!f.engine.eligible(&c, stamp + 1));
+    assert_eq!(f.engine.eligible(&c, stamp), with_sample);
+    // Once that sample ages out of its freshness window, usage really is
+    // unconfirmable and nothing launches on it.
+    let max_age = sample_max_age(f.engine.settings.polling_interval_seconds).as_millis() as u64;
+    f.engine.quotas.get_mut(&c.key()).unwrap().windows[0].received_at =
+        Some(now().saturating_sub(max_age + 1_000));
+    assert!(!f.engine.eligible(&c, stamp));
 }
 
 #[test]
@@ -837,7 +877,7 @@ fn live_policy_is_scoped_persisted_and_used_by_usage_guard() {
     let mut other = f.engine.groups[&f.id].clone();
     other.id = other_id;
     f.engine.groups.insert(other_id, other);
-    let response = f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"strategy":"PRIORITY","pollingIntervalSeconds":10,"autoResume":false,"profile":{"key":"codex:b","shortThreshold":70,"weeklyThreshold":80,"priority":5}}})).unwrap();
+    let response = f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"strategy":"PRIORITY","pollingIntervalSeconds":60,"autoResume":false,"profile":{"key":"codex:b","shortThreshold":70,"weeklyThreshold":80,"priority":5}}})).unwrap();
     assert_eq!(response["policy"]["candidates"][1]["shortThreshold"], 70.0);
     assert_eq!(f.engine.settings.short_threshold, 90.0);
     assert!(f.engine.settings.candidates[1].short_threshold.is_none());
@@ -847,6 +887,89 @@ fn live_policy_is_scoped_persisted_and_used_by_usage_guard() {
     assert_eq!(policy.candidates[1].priority, 5);
     assert!(!policy.auto_resume);
     assert!(over_limit(policy, &policy.candidates[1], &[window(75.0, now()+60000)]));
+}
+fn weekly_window(usage: f64) -> UsageWindow {
+    UsageWindow {
+        label: "Weekly".into(),
+        kind: "weekly".into(),
+        percent_used: usage,
+        resets_at: Some(json!(now() + 60_000)),
+        received_at: Some(now()),
+    }
+}
+#[test]
+fn each_accounts_own_basis_decides_which_window_switches_it() {
+    let settings = Settings::default();
+    let mut c = candidate("a");
+    let short = window(95.0, now() + 60_000);
+    let weekly = weekly_window(95.0);
+    // 5h basis (the default): only the 5h window is held to the 90% threshold.
+    assert_eq!(c.threshold_basis, ThresholdBasis::Short);
+    assert!(over_limit(&settings, &c, &[short.clone()]));
+    assert!(!over_limit(&settings, &c, &[weekly.clone()]));
+    // A window that is not the basis is still not ignored — once it is fully
+    // spent the provider refuses the run whatever the basis says.
+    assert!(over_limit(&settings, &c, &[UsageWindow { percent_used: 100.0, ..weekly.clone() }]));
+    c.threshold_basis = ThresholdBasis::Weekly;
+    assert!(over_limit(&settings, &c, &[weekly]));
+    assert!(!over_limit(&settings, &c, &[short.clone()]));
+    assert!(over_limit(&settings, &c, &[UsageWindow { percent_used: 100.0, ..short }]));
+    // Per-account: the next profile keeps deciding on its own window.
+    assert!(!over_limit(&settings, &candidate("b"), &[weekly_window(95.0)]));
+    // A per-profile threshold override still applies, to the basis window.
+    c.weekly_threshold = Some(30.0);
+    assert!(over_limit(&settings, &c, &[weekly_window(31.0)]));
+    c.threshold_basis = ThresholdBasis::Short;
+    assert!(!over_limit(&settings, &c, &[weekly_window(31.0)]));
+}
+#[test]
+fn an_accounts_basis_is_live_editable_per_loop_and_locked_while_it_is_active() {
+    let mut f = Fixture::new();
+    f.engine.quota(
+        "codex:b".into(),
+        Ok(vec![window(20.0, now() + 60_000), weekly_window(93.0)]),
+        now(),
+    );
+    f.engine
+        .request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:b","thresholdBasis":"weekly"}}}))
+        .unwrap();
+    let g = &f.engine.groups[&f.id];
+    assert_eq!(g.policy.as_ref().unwrap().candidates[1].threshold_basis, ThresholdBasis::Weekly);
+    // Scoped: neither the global defaults nor the other account moved.
+    assert_eq!(f.engine.settings.candidates[1].threshold_basis, ThresholdBasis::Short);
+    assert_eq!(g.policy.as_ref().unwrap().candidates[0].threshold_basis, ThresholdBasis::Short);
+    // The card now reports the weekly window, over its 90% threshold.
+    let profile = g.profiles.iter().find(|p| p.key == "codex:b").unwrap();
+    assert_eq!(profile.threshold_kind, "weekly");
+    assert_eq!(profile.threshold, 90.0);
+    assert_eq!(profile.usage, Some(93.0));
+    assert_eq!(
+        Engine::open_at(f.engine.root.clone()).unwrap().groups[&f.id]
+            .policy
+            .as_ref()
+            .unwrap()
+            .candidates[1]
+            .threshold_basis,
+        ThresholdBasis::Weekly
+    );
+    // Active account: refused, and the rest of the same patch is refused too.
+    f.engine.groups.get_mut(&f.id).unwrap().active_profile = Some("codex:b".into());
+    let error = f
+        .engine
+        .request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"strategy":"PRIORITY","profile":{"key":"codex:b","thresholdBasis":"short"}}}))
+        .unwrap_err();
+    assert!(error.to_string().contains("활성 계정"), "{error}");
+    let policy = f.engine.groups[&f.id].policy.as_ref().unwrap();
+    assert_eq!(policy.candidates[1].threshold_basis, ThresholdBasis::Weekly);
+    assert_eq!(policy.strategy, "SMART");
+    // A standby account stays editable while another one runs.
+    f.engine
+        .request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:a","thresholdBasis":"weekly"}}}))
+        .unwrap();
+    assert_eq!(
+        f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[0].threshold_basis,
+        ThresholdBasis::Weekly
+    );
 }
 #[test]
 fn active_threshold_changes_are_rejected_atomically_even_without_a_runtime_snapshot() {
@@ -878,7 +1001,7 @@ fn a_loop_without_an_explicit_participant_list_still_accepts_profile_edits() {
 #[test]
 fn live_policy_rejects_invalid_or_nonparticipant_changes_without_mutation() {
     let mut f = Fixture::new();
-    for patch in [json!({"profile":{"key":"codex:b","shortThreshold":101}}), json!({"shortThreshold":95}), json!({"profile":{"key":"codex:missing","priority":1}}), json!({"pollingIntervalSeconds":0})] {
+    for patch in [json!({"profile":{"key":"codex:b","shortThreshold":101}}), json!({"shortThreshold":95}), json!({"profile":{"key":"codex:missing","priority":1}}), json!({"pollingIntervalSeconds":0}), json!({"pollingIntervalSeconds":30})] {
         assert!(f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":patch})).is_err());
         assert!(f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[1].short_threshold.is_none());
     }
@@ -1027,6 +1150,40 @@ fn a_usage_failure_after_a_first_sample_is_reported_instead_of_hidden() {
     let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
     assert!(p.usage_pending, "a setup-token profile is still runnable");
     assert_eq!(p.error.as_deref(), Some("Unable to read session usage"));
+    f.engine.groups.insert(f.id, g);
+}
+#[test]
+fn a_throttled_refresh_does_not_turn_a_healthy_profile_into_an_error_card() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    let mut g = f.engine.groups.remove(&f.id).unwrap();
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(20.0, now() + 3_600_000)]),
+        now(),
+    );
+    f.engine.quota(
+        "codex:a".into(),
+        Err(UsageError {
+            message: "429 Too many requests. Try again later".into(),
+            rate_limited: true,
+            retry_after_ms: Some(60_000),
+        }),
+        now() + 1,
+    );
+    f.engine.profiles(&mut g);
+    let p = g.profiles.iter().find(|p| p.key == "codex:a").unwrap();
+    // Our own status query was throttled; the account was not. With a sample
+    // still in hand the card shows the profile as it is, and the 20% reading
+    // stays on screen instead of being replaced by an error state.
+    assert!(
+        !matches!(p.status, ProfileStatus::RateLimited | ProfileStatus::Error),
+        "status={:?}",
+        p.status
+    );
+    assert_eq!(p.usage, Some(20.0));
+    // The reason the number stopped moving still reaches the user.
+    assert!(p.error.as_deref().unwrap().contains("429"));
     f.engine.groups.insert(f.id, g);
 }
 #[test]

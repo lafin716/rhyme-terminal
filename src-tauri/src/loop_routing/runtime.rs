@@ -164,12 +164,35 @@ fn profile_dir(c: &Candidate) -> Result<PathBuf> {
 fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key].as_str().ok_or_else(|| anyhow!("Missing {key}"))
 }
+/// The percentage at which `w` stops this candidate.
+///
+/// Only the window this account's own `threshold_basis` names is held to the
+/// configured threshold. The other window keeps a limit of 100%: it is not the
+/// criterion the user chose for this account, but a Provider with that quota
+/// fully spent refuses the run regardless, so letting it through at 100% would
+/// just hand the Loop a profile that cannot work.
 fn limit(settings: &Settings, c: &Candidate, w: &UsageWindow) -> f64 {
-    if w.kind == "weekly" {
-        c.weekly_threshold.unwrap_or(settings.weekly_threshold)
+    if c.threshold_basis.governs(&w.kind) {
+        settings.threshold_of(c, c.threshold_basis)
     } else {
-        c.short_threshold.unwrap_or(settings.short_threshold)
+        100.0
     }
+}
+/// The window that is closest to stopping this candidate, each measured
+/// against its own [`limit`] — normally the basis window, but the other one
+/// once it approaches the 100% that blocks the profile anyway. What the
+/// profile card reports.
+fn controlling<'a>(
+    settings: &Settings,
+    c: &Candidate,
+    windows: &'a [UsageWindow],
+) -> Option<&'a UsageWindow> {
+    windows
+        .iter()
+        .filter(|w| matches!(w.kind.as_str(), "short" | "weekly"))
+        .max_by(|a, b| {
+            (a.percent_used / limit(settings, c, a)).total_cmp(&(b.percent_used / limit(settings, c, b)))
+        })
 }
 fn over_limit(settings: &Settings, c: &Candidate, windows: &[UsageWindow]) -> bool {
     windows
@@ -353,12 +376,18 @@ impl Engine {
                         g.participants.is_empty() || g.participants.contains(&profile.key),
                         "이 Loop에 참여하지 않는 프로필입니다"
                     );
+                    // The basis joins the two thresholds under the same lock:
+                    // it decides which window the running account is measured
+                    // by, so swapping it mid-run re-decides that account from
+                    // under a turn already in flight.
                     ensure!(g.active_profile.as_deref() != Some(profile.key.as_str())
-                        || (profile.short_threshold.is_none() && profile.weekly_threshold.is_none()),
-                        "현재 활성 계정의 임계값은 변경할 수 없습니다");
+                        || (profile.short_threshold.is_none() && profile.weekly_threshold.is_none()
+                            && profile.threshold_basis.is_none()),
+                        "현재 활성 계정의 사용량 기준과 임계값은 변경할 수 없습니다");
                     let candidate = policy.candidates.iter_mut().find(|c| c.key() == profile.key).context("Profile not found")?;
                     if let Some(value) = profile.short_threshold { candidate.short_threshold = Some(value); }
                     if let Some(value) = profile.weekly_threshold { candidate.weekly_threshold = Some(value); }
+                    if let Some(value) = profile.threshold_basis { candidate.threshold_basis = value; }
                     if let Some(value) = profile.priority { candidate.priority = value; }
                     if let Some(value) = profile.model { candidate.model = Some(value); }
                     if let Some(value) = profile.effort { candidate.effort = Some(value); }
@@ -651,6 +680,16 @@ impl Engine {
     /// (standby monitoring). This is what keeps a Loop with many enabled
     /// Profiles from polling all of them on one fixed cadence.
     fn tier_interval(&self, key: &str, base: u64, active_running: bool) -> u64 {
+        // A standby candidate spends no quota, so its usage cannot move and a
+        // high last sample is no reason to watch it closely: the tiers below
+        // apply only to the profile actually running. They used to be checked
+        // first, which left a standby profile parked just under its threshold
+        // being polled every CRITICAL_INTERVAL_SECS for as long as the Loop
+        // lived — with a few enabled Profiles, that alone is what ran the
+        // provider's usage endpoint into a 429.
+        if !active_running {
+            return base.max(polling::IDLE_INTERVAL_SECS);
+        }
         let usage = self.quotas.get(key).map(|q| {
             q.windows
                 .iter()
@@ -661,9 +700,11 @@ impl Engine {
         match usage {
             Some(u) if u >= polling::CRITICAL_USAGE_PCT => base.min(polling::CRITICAL_INTERVAL_SECS),
             Some(u) if u >= polling::HIGH_USAGE_PCT => base.min(polling::HIGH_INTERVAL_SECS),
-            _ if !active_running => base.max(polling::IDLE_INTERVAL_SECS),
             _ => base,
         }
+        // Configurations saved before the floor existed can still name a
+        // shorter baseline than `validate` now accepts.
+        .max(polling::MIN_INTERVAL_SECS)
     }
     pub fn usage_targets(&mut self) -> Vec<(String, String, PathBuf, bool, u64)> {
         let stamp = now();
@@ -787,13 +828,23 @@ impl Engine {
             Err(error) => {
                 q.consecutive_failures = q.consecutive_failures.saturating_add(1);
                 if error.rate_limited {
+                    // A 429 from the *usage endpoint* means we asked for the
+                    // numbers too often, not that the account is out of quota.
+                    // It paces the next fetch and nothing else: blocking the
+                    // profile here tore down a healthy Loop over a throttled
+                    // status query, and then did the same to whichever profile
+                    // it switched to. Provider-reported limits on the agent's
+                    // own traffic still set `blocked_until` — see the
+                    // `LimitEvent` handling in `events`.
                     let delay = error
                         .retry_after_ms
                         .map(|ms| jittered(ms, 0.95, 1.05))
                         .unwrap_or_else(|| backoff_delay_ms(q.consecutive_failures));
-                    q.rate_limited = true;
-                    q.blocked_until = q.blocked_until.max(now() + delay);
-                    tracing::warn!("[Usage] profile={key} rate-limited retry={}s", delay / 1000);
+                    q.next_fetch_at = q.next_fetch_at.max(now() + delay);
+                    tracing::warn!(
+                        "[Usage] profile={key} usage endpoint rate-limited retry={}s",
+                        delay / 1000
+                    );
                 } else {
                     // Non-429 failures (network, credentials, ...) still back off the
                     // *fetch cadence* so a persistent problem cannot spin the scheduler;
@@ -898,8 +949,14 @@ impl Engine {
                         // Selection always forces a fresh fetch first (see the
                         // guard in `usage_targets`), so this window only has to
                         // outlast that round-trip, never the standby cadence.
-                        || (q.error.is_none()
-                            && crate::usage::usage_windows_are_fresh(&q.windows, sample_max_age(self.settings.polling_interval_seconds))
+                        //
+                        // A failed refresh is not itself evidence: the last
+                        // good sample stands until it ages out of that window,
+                        // which is what genuinely makes usage unconfirmable.
+                        // Disqualifying on `error` alone meant one throttled
+                        // or dropped status query took the profile down while
+                        // a seconds-old reading was still in hand.
+                        || (crate::usage::usage_windows_are_fresh(&q.windows, sample_max_age(self.settings.polling_interval_seconds))
                             && !over_limit(&self.settings, c, &q.windows)))
             })
     }
@@ -953,11 +1010,12 @@ impl Engine {
                 if !self.quotas.contains_key(&c.key()) {
                     if let Some(previous) = saved.iter().find(|p| p.key == c.key()) {
                         let mut previous = previous.clone();
-                        previous.threshold = previous.windows.iter()
-                            .filter(|w| matches!(w.kind.as_str(), "short" | "weekly"))
-                            .max_by(|a, b| (a.percent_used / limit(&self.settings, c, a)).total_cmp(&(b.percent_used / limit(&self.settings, c, b))))
+                        let controlling = controlling(&self.settings, c, &previous.windows);
+                        previous.threshold = controlling
                             .map(|w| limit(&self.settings, c, w))
-                            .unwrap_or(c.short_threshold.unwrap_or(self.settings.short_threshold));
+                            .unwrap_or_else(|| self.settings.threshold_of(c, c.threshold_basis));
+                        previous.threshold_kind = controlling
+                            .map_or_else(|| c.threshold_basis.kind().to_owned(), |w| w.kind.clone());
                         previous.status = ProfileStatus::Error;
                         previous.error =
                             Some("저장된 사용량입니다. 실행 전 새로 조회합니다.".into());
@@ -966,17 +1024,13 @@ impl Engine {
                 }
                 let q = self.quotas.get(&c.key());
                 let windows = q.map(|q| q.windows.clone()).unwrap_or_default();
-                let controlling_window = windows
-                    .iter()
-                    .filter(|w| matches!(w.kind.as_str(), "short" | "weekly"))
-                    .max_by(|a, b| {
-                        (a.percent_used / limit(&self.settings, c, a))
-                            .total_cmp(&(b.percent_used / limit(&self.settings, c, b)))
-                    });
+                let controlling_window = controlling(&self.settings, c, &windows);
                 let usage = controlling_window.map(|w| w.percent_used);
                 let threshold = controlling_window
                     .map(|w| limit(&self.settings, c, w))
-                    .unwrap_or(c.short_threshold.unwrap_or(self.settings.short_threshold));
+                    .unwrap_or_else(|| self.settings.threshold_of(c, c.threshold_basis));
+                let threshold_kind = controlling_window
+                    .map_or_else(|| c.threshold_basis.kind().to_owned(), |w| w.kind.clone());
                 // All exhausted windows must reset before this profile is eligible.
                 let reset_at = windows
                     .iter()
@@ -1006,22 +1060,34 @@ impl Engine {
                 // used to be swallowed here, leaving a profile showing neither
                 // a number nor a reason.
                 let waiting_for_first_sample = q.is_some_and(|q| q.windows.is_empty());
+                let missing_native = executable_error.is_some();
                 let error = executable_error.or_else(|| {
                     if usage_pending && waiting_for_first_sample { None } else { q.and_then(|q| q.error.clone()) }
                 });
+                // A refresh that failed while the last sample is still inside
+                // its freshness window does not change what this profile is:
+                // the Loop keeps running on that sample (see `eligible`), so
+                // the card keeps showing its real state rather than flipping
+                // to an error. The reason the number stopped moving still
+                // reaches the user through `error`.
+                let unconfirmed = error.is_some()
+                    && !crate::usage::usage_windows_are_fresh(
+                        &windows,
+                        sample_max_age(self.settings.polling_interval_seconds),
+                    );
                 let status = if !c.enabled {
                     ProfileStatus::Disabled
                 } else if g.status == "waiting_for_usage_reset"
                     && g.waiting_profile_id.as_deref() == Some(c.key().as_str())
                 {
                     ProfileStatus::WaitingReset
-                } else if error.as_ref().is_some_and(|e| e.contains("429"))
+                } else if (unconfirmed && error.as_ref().is_some_and(|e| e.contains("429")))
                     || q.is_some_and(|q| q.blocked_until > now() && q.rate_limited)
                 {
                     ProfileStatus::RateLimited
                 } else if usage_pending {
                     if Some(c.key()) == g.active_profile && g.runtime.pid.is_some() { ProfileStatus::Active } else { ProfileStatus::Available }
-                } else if error.is_some() || usage.is_none() {
+                } else if missing_native || unconfirmed || usage.is_none() {
                     ProfileStatus::Error
                 } else if over_limit(&self.settings, c, &windows)
                     || q.is_some_and(|q| q.blocked_until > now())
@@ -1044,6 +1110,7 @@ impl Engine {
                     status,
                     usage,
                     threshold,
+                    threshold_kind,
                     remaining: usage.map(|n| (100.0 - n).max(0.0)),
                     reset_at,
                     error,
@@ -1085,6 +1152,7 @@ impl Engine {
                                 let mut c = current.clone();
                                 c.short_threshold = saved.short_threshold;
                                 c.weekly_threshold = saved.weekly_threshold;
+                                c.threshold_basis = saved.threshold_basis;
                                 c.priority = saved.priority;
                                 c.enabled &= saved.enabled;
                                 c
@@ -1430,16 +1498,17 @@ impl Engine {
                 ));
                 // Hard block: the profile is disabled, explicitly blocked by a
                 // provider-reported limit/rate-limit, or we cannot confirm its
-                // usage at all (errored or stale beyond the freshness window).
-                // None of that is safe to keep running on, so this still
-                // interrupts immediately regardless of any turn in progress —
-                // continuing would just fail against the provider anyway.
+                // usage at all (no sample inside the freshness window). None of
+                // that is safe to keep running on, so this still interrupts
+                // immediately regardless of any turn in progress — continuing
+                // would just fail against the provider anyway. A failed refresh
+                // on its own is not that: it only counts once the last good
+                // sample has aged out (see `eligible`).
                 let hard_invalid = !c.enabled
                     || q.is_none_or(|q| {
                         q.blocked_until > now()
                             || (!q.runtime_usage_fallback(&self.settings, &c)
-                                && (q.error.is_some()
-                                    || !crate::usage::usage_windows_are_fresh(&q.windows, max_age)))
+                                && !crate::usage::usage_windows_are_fresh(&q.windows, max_age))
                     });
                 // Soft block: our own periodic usage check crossed the
                 // configured threshold, but the profile itself is otherwise

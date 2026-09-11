@@ -15,6 +15,36 @@ fn threshold() -> f64 {
     90.0
 }
 
+/// Which usage window one account is switched away on.
+///
+/// A Provider reports two quota windows — a short (5h) one and a weekly one —
+/// and which of them matters is a property of the account, not of the Loop:
+/// one subscription is spent in 5-hour bursts, the next has to make a weekly
+/// allowance last. The window that is *not* the basis is never ignored
+/// outright: it still blocks the profile once it is fully consumed (100%),
+/// because a Provider with no quota left in that window refuses the run
+/// whatever this setting says. See [`super::runtime`]'s `limit`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThresholdBasis {
+    /// The 5-hour window — the default, and the one that moves within a session.
+    #[default]
+    Short,
+    Weekly,
+}
+impl ThresholdBasis {
+    /// The window kind (`UsageWindow::kind`) this basis governs.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Short => "short",
+            Self::Weekly => "weekly",
+        }
+    }
+    pub fn governs(self, kind: &str) -> bool {
+        self.kind() == kind
+    }
+}
+
 /// Central, named usage-polling/backoff policy. Nothing here is a per-loop
 /// setting — `Settings::polling_interval_seconds` remains the one
 /// user-configurable knob (the "active, usage below HIGH" baseline); the
@@ -29,12 +59,17 @@ pub mod polling {
     /// Cadence for a candidate that is not currently any Loop's active,
     /// running profile (standby monitoring only).
     pub const IDLE_INTERVAL_SECS: u64 = 600;
+    /// Shortest cadence any candidate is ever polled at, whatever the tier or
+    /// the configured baseline says. The providers throttle their usage
+    /// endpoints, and being throttled is strictly worse than a coarser sample:
+    /// a 429 leaves the Loop with no numbers at all.
+    pub const MIN_INTERVAL_SECS: u64 = 60;
     /// Usage percent at which polling speeds up ahead of the switch threshold.
     pub const HIGH_USAGE_PCT: f64 = 70.0;
-    pub const HIGH_INTERVAL_SECS: u64 = 60;
+    pub const HIGH_INTERVAL_SECS: u64 = 90;
     /// Usage percent at which polling speeds up further.
     pub const CRITICAL_USAGE_PCT: f64 = 85.0;
-    pub const CRITICAL_INTERVAL_SECS: u64 = 30;
+    pub const CRITICAL_INTERVAL_SECS: u64 = MIN_INTERVAL_SECS;
     /// A usage sample this fresh is reused instead of triggering a new fetch
     /// (manual refresh, safe-boundary re-verification, dashboards, ...).
     pub const CACHE_TTL_SECS: u64 = 30;
@@ -72,6 +107,11 @@ pub struct Candidate {
     pub enabled: bool,
     pub short_threshold: Option<f64>,
     pub weekly_threshold: Option<f64>,
+    /// Which of the two thresholds above decides a switch away from this
+    /// account. Absent in profiles saved before it existed, which is why it
+    /// defaults to the 5h window — the behaviour those were configured for.
+    #[serde(default)]
+    pub threshold_basis: ThresholdBasis,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -139,7 +179,7 @@ impl Settings {
             "Invalid selection strategy"
         );
         ensure!(
-            (10..=300).contains(&self.polling_interval_seconds)
+            (polling::MIN_INTERVAL_SECS..=300).contains(&self.polling_interval_seconds)
                 && (1..=10).contains(&self.interrupt_timeout_seconds)
                 && (1..=5).contains(&self.force_kill_timeout_seconds),
             "Invalid loop timeouts"
@@ -195,6 +235,14 @@ impl Settings {
             ensure!(!value.chars().any(char::is_control), "{field} contains invalid control characters");
         }
         Ok(())
+    }
+    /// The configured switch threshold for one window kind, taking the
+    /// candidate's own override over the Loop-wide default.
+    pub fn threshold_of(&self, c: &Candidate, basis: ThresholdBasis) -> f64 {
+        match basis {
+            ThresholdBasis::Weekly => c.weekly_threshold.unwrap_or(self.weekly_threshold),
+            ThresholdBasis::Short => c.short_threshold.unwrap_or(self.short_threshold),
+        }
     }
     pub fn ordered(&self) -> Vec<Candidate> {
         self.candidates.iter().filter(|c| c.enabled).cloned().collect()
@@ -397,6 +445,10 @@ pub struct ProfileSnapshot {
     pub status: ProfileStatus,
     pub usage: Option<f64>,
     pub threshold: f64,
+    /// Which window `usage`/`threshold` above were read from — the basis
+    /// window in the ordinary case, the other one when that one is the closer
+    /// of the two to blocking this profile.
+    pub threshold_kind: String,
     pub remaining: Option<f64>,
     pub reset_at: Option<u64>,
     pub error: Option<String>,
@@ -443,6 +495,7 @@ mod tests {
             enabled: true,
             short_threshold: None,
             weekly_threshold: None,
+            threshold_basis: ThresholdBasis::default(),
             model: None,
             effort: None,
             mode: None,
@@ -515,6 +568,7 @@ pub struct ProfilePolicyPatch {
     pub key: String,
     pub short_threshold: Option<f64>,
     pub weekly_threshold: Option<f64>,
+    pub threshold_basis: Option<ThresholdBasis>,
     pub priority: Option<i32>,
     pub model: Option<String>,
     pub effort: Option<String>,

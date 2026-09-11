@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { makeLeaf } from './layout-types';
-import { loopManagedSessionIds, loopNavigatorSessions, type LoopGroup, loopTabId, mergeLoopProfiles, type LoopSettings } from './loop-routing';
+import { loopBasisLabel, loopManagedSessionIds, loopNavigatorSessions, type LoopGroup, loopTabId, loopWindowLabel, mergeLoopProfiles, type LoopSettings } from './loop-routing';
 const settings: LoopSettings = { shortThreshold: 90, weeklyThreshold: 90, agentOrder: ['claude', 'codex'], candidates: [] };
 const profile = (id: string) => ({ id, agent: 'claude' as const, label: id, configDir: `C:/profiles/${id}`, createdAt: 0, authMethod: 'oauth' as const });
 describe('loop routing profile membership', () => {
@@ -14,6 +14,16 @@ describe('loop routing profile membership', () => {
     expect(merged.candidates.map(p => p.profileId)).toEqual(['b', 'a', 'c', null, null]);
     expect(merged.candidates[0]).toMatchObject({ label: 'b', shortThreshold: 80, enabled: true });
     expect(merged.candidates[2].enabled).toBe(false);
+  });
+  it('keeps each account on the usage window it was given and starts new ones on 5h', () => {
+    const merged = mergeLoopProfiles(
+      { ...settings, candidates: [{ agent: 'claude', profileId: 'b', label: 'b', enabled: true, thresholdBasis: 'weekly' }] },
+      [profile('a'), profile('b')],
+    );
+    expect(merged.candidates[0]).toMatchObject({ profileId: 'b', thresholdBasis: 'weekly' });
+    expect(merged.candidates.slice(1).every(p => p.thresholdBasis === 'short')).toBe(true);
+    expect(loopBasisLabel(merged.candidates[0].thresholdBasis)).toBe('주간');
+    expect(loopWindowLabel('short')).toBe('5시간');
   });
   it('removes deleted profiles and keeps stable group IDs separate from PTY IDs', () => {
     const merged = mergeLoopProfiles({ ...settings, candidates: [{ agent: 'claude', profileId: 'deleted', label: 'gone', enabled: true }] }, []);

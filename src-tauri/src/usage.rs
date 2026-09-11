@@ -56,10 +56,32 @@ type CacheKey = (String, PathBuf, bool);
 #[derive(Default)]
 struct CacheEntry {
     fetched_at: Option<Instant>,
-    result: Option<UsageResult>,
+    result: Option<Result<Vec<UsageWindow>, UsageError>>,
+    /// Set when the provider answered 429. Until it passes, nothing reaches
+    /// the provider for this profile — not the loop-routing scheduler, not a
+    /// timed display refresh, not the user's own refresh button. Retrying a
+    /// throttled endpoint is what keeps it throttled.
+    cooldown_until: Option<Instant>,
 }
 type CacheSlot = Arc<tokio::sync::Mutex<CacheEntry>>;
 static USAGE_CACHE: OnceLock<parking_lot::Mutex<HashMap<CacheKey, CacheSlot>>> = OnceLock::new();
+
+/// A display read (status bar, profile dialog) reuses a sample this recent
+/// rather than fetching one of its own.
+const DISPLAY_MAX_AGE: Duration = Duration::from_secs(60);
+/// Hard floor between two provider requests for the same profile, shared by
+/// every caller. The loop-routing scheduler paces itself well above this (its
+/// shortest tier is `loop_routing::model::polling::CRITICAL_INTERVAL_SECS`);
+/// the floor exists so that no *combination* of scheduler polling, display
+/// polling and manual refreshes can beat that pace. It has to stay below the
+/// shortest scheduled cadence, or scheduled polls would start reusing samples
+/// until they age out of their own freshness window.
+const MIN_FETCH_INTERVAL: Duration = Duration::from_secs(45);
+/// Session usage is read from a local file the profile writes while it runs,
+/// so it costs the provider nothing and is refreshed far more freely.
+const SESSION_MAX_AGE: Duration = Duration::from_secs(5);
+/// Cooldown applied after a 429 that carries no usable `Retry-After`.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -100,8 +122,20 @@ fn session_result_at(result: UsageResult, now: u64) -> UsageResult {
     })
 }
 
-/// Coalesces concurrent requests per profile and caches failures as well as success.
-pub async fn query_account_usage(agent: &str, dir: &Path, session_usage: bool) -> UsageResult {
+/// The single choke point in front of the provider's usage endpoint.
+///
+/// Every caller goes through here, so one profile is never fetched twice by
+/// two unrelated code paths: the loop-routing scheduler and the UI's display
+/// polling reuse each other's samples instead of each making their own
+/// request. `max_age` is how old a cached answer the caller will accept;
+/// [`MIN_FETCH_INTERVAL`] is the floor nobody gets below, and a 429 cooldown
+/// suppresses requests entirely until it expires.
+async fn cached_account_usage(
+    agent: &str,
+    dir: &Path,
+    session_usage: bool,
+    max_age: Duration,
+) -> Result<Vec<UsageWindow>, UsageError> {
     if agent != "claude" && agent != "codex" {
         return Err("Unsupported agent".into());
     }
@@ -117,35 +151,86 @@ pub async fn query_account_usage(agent: &str, dir: &Path, session_usage: bool) -
     };
     // This lock deliberately spans the fetch so waiters consume the same result.
     let mut entry = slot.lock().await;
-    let ttl = Duration::from_secs(if session_usage { 5 } else { 60 });
-    if entry.fetched_at.is_some_and(|at| at.elapsed() < ttl) {
+    if let Some(remaining) = entry
+        .cooldown_until
+        .map(|at| at.saturating_duration_since(Instant::now()))
+        .filter(|left| !left.is_zero())
+    {
+        // Reported as the rate limit it is, but with the time actually left —
+        // a caller that re-applies `retry_after_ms` must not keep pushing its
+        // own backoff out by the full original delay on every cooling read.
+        return Err(UsageError {
+            message: "429 Too many requests. Try again later".into(),
+            rate_limited: true,
+            retry_after_ms: Some(remaining.as_millis() as u64),
+        });
+    }
+    let max_age = if session_usage {
+        max_age
+    } else {
+        max_age.max(MIN_FETCH_INTERVAL)
+    };
+    if entry.fetched_at.is_some_and(|at| at.elapsed() < max_age) {
         if let Some(result) = &entry.result {
-            return if session_usage {
-                session_result_at(result.clone(), now_millis())
-            } else {
-                result.clone()
-            };
+            return result.clone();
         }
     }
-    let result: UsageResult = fetch_account_usage(agent, dir, session_usage)
-        .await
-        .map_err(|e| e.message);
+    let result = fetch_account_usage(agent, dir, session_usage).await;
+    if let Err(error) = &result {
+        if error.rate_limited {
+            let cooldown = error
+                .retry_after_ms
+                .map_or(RATE_LIMIT_COOLDOWN, Duration::from_millis)
+                .max(MIN_FETCH_INTERVAL);
+            tracing::warn!(
+                "[Usage] {agent} rate-limited, no further requests for {}s",
+                cooldown.as_secs()
+            );
+            entry.cooldown_until = Some(Instant::now() + cooldown);
+        }
+    }
     entry.fetched_at = Some(Instant::now());
     entry.result = Some(result.clone());
     result
 }
 
-/// Scheduling decisions never consume the display cache (60 seconds). Unlike
-/// [`query_account_usage`], this keeps the rate-limit/backoff detail the
-/// loop-routing scheduler needs and is not itself cached or deduplicated —
-/// callers (the daemon's usage-polling loop) are already responsible for not
-/// calling this more often than a candidate's `next_fetch_at`.
+/// Display path (status bar, profile dialogs). Coalesces concurrent requests
+/// per profile and caches failures as well as successes. A user-forced
+/// refresh reaches this too: it skips the frontend's own throttle, not the
+/// shared cache, so the button cannot be used to hammer the provider.
+pub async fn query_account_usage(agent: &str, dir: &Path, session_usage: bool) -> UsageResult {
+    let max_age = if session_usage {
+        SESSION_MAX_AGE
+    } else {
+        DISPLAY_MAX_AGE
+    };
+    let result = cached_account_usage(agent, dir, session_usage, max_age)
+        .await
+        .map_err(|e| e.message);
+    if session_usage {
+        session_result_at(result, now_millis())
+    } else {
+        result
+    }
+}
+
+/// Scheduling path. Unlike [`query_account_usage`] this keeps the
+/// rate-limit/backoff detail the loop-routing scheduler needs, and accepts
+/// only a near-fresh sample ([`MIN_FETCH_INTERVAL`]) — the scheduler is
+/// already responsible for not asking more often than a candidate's
+/// `next_fetch_at`, so in practice it reuses a cached answer only when a
+/// display refresh happened to fetch one moments earlier.
 pub async fn refresh_account_usage(
     agent: &str,
     dir: &Path,
     session_usage: bool,
 ) -> Result<Vec<UsageWindow>, UsageError> {
-    fetch_account_usage(agent, dir, session_usage).await
+    let max_age = if session_usage {
+        SESSION_MAX_AGE
+    } else {
+        MIN_FETCH_INTERVAL
+    };
+    cached_account_usage(agent, dir, session_usage, max_age).await
 }
 
 fn parse_windows(agent: &str, body: &Value) -> Vec<UsageWindow> {
@@ -516,5 +601,55 @@ mod tests {
             .unwrap()
             .lock()
             .remove(&("codex".into(), dir, false));
+    }
+
+    fn slot_for(key: &CacheKey) -> CacheSlot {
+        USAGE_CACHE
+            .get_or_init(Default::default)
+            .lock()
+            .entry(key.clone())
+            .or_default()
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_reuses_a_sample_the_display_just_fetched() {
+        let dir = std::env::temp_dir().join(format!("winmux-usage-test-{}", uuid::Uuid::new_v4()));
+        let key: CacheKey = ("codex".into(), dir.clone(), false);
+        assert!(query_account_usage("codex", &dir, false).await.is_err());
+        let slot = slot_for(&key);
+        let display_fetch = slot.lock().await.fetched_at;
+        assert!(refresh_account_usage("codex", &dir, false).await.is_err());
+        assert_eq!(
+            slot.lock().await.fetched_at,
+            display_fetch,
+            "polling for the Loop must not re-ask what the status bar just asked"
+        );
+        USAGE_CACHE.get().unwrap().lock().remove(&key);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_cooldown_stops_every_caller_from_reaching_the_provider() {
+        let dir = std::env::temp_dir().join(format!("winmux-usage-test-{}", uuid::Uuid::new_v4()));
+        let key: CacheKey = ("codex".into(), dir.clone(), false);
+        let slot = slot_for(&key);
+        slot.lock().await.cooldown_until = Some(Instant::now() + Duration::from_secs(30));
+        // This directory holds no credentials, so an actual fetch would answer
+        // "Sign in through the CLI to view usage": the 429 can only come from
+        // the cooldown gate, and neither caller got past it.
+        assert_eq!(
+            query_account_usage("codex", &dir, false).await.unwrap_err(),
+            "429 Too many requests. Try again later"
+        );
+        let scheduled = refresh_account_usage("codex", &dir, false)
+            .await
+            .unwrap_err();
+        assert!(scheduled.rate_limited);
+        // Reported with the time actually left, so a caller re-applying it
+        // cannot keep pushing its own backoff out by the full original delay.
+        let remaining = scheduled.retry_after_ms.unwrap();
+        assert!((29_000..=30_000).contains(&remaining), "remaining={remaining}");
+        assert!(slot.lock().await.fetched_at.is_none());
+        USAGE_CACHE.get().unwrap().lock().remove(&key);
     }
 }

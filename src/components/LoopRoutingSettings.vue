@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import { useLoopRouting, saveLoopSettings } from '../composables/useLoopRouting';
-import { mergeLoopProfiles, type LoopAgent, type LoopSettings, type LoopCandidate } from '../lib/loop-routing';
+import { LOOP_THRESHOLD_BASES, mergeLoopProfiles, type LoopAgent, type LoopSettings, type LoopCandidate } from '../lib/loop-routing';
 import { useAccountProfiles } from '../composables/useAccountProfiles';
 
 const { state } = useLoopRouting();
@@ -235,6 +235,10 @@ async function save() {
           <input v-model.number="draft.weeklyThreshold" type="number" min="1" max="100" required />
         </label>
       </div>
+      <p class="basis-note">
+        전환에 쓰는 창은 계정마다 고릅니다 — 각 프로필의 <strong>개별 기준 → 사용량 기준</strong>에서 5시간과 주간 중 하나를 선택하세요.
+        기본값은 5시간이고, 기준이 아닌 창은 100% 소진에서만 막습니다.
+      </p>
       <div class="thresholds">
         <label
           >선택 전략
@@ -247,7 +251,7 @@ async function save() {
         </label>
         <label
           >기본 Usage 조회 간격 (초)
-          <input v-model.number="draft.pollingIntervalSeconds" type="number" min="10" max="300" />
+          <input v-model.number="draft.pollingIntervalSeconds" type="number" min="60" max="300" />
         </label>
       </div>
     </section>
@@ -295,7 +299,24 @@ async function save() {
             <details>
               <summary>개별 기준</summary>
               <div class="profile-options">
-                <label
+                <div class="basis-field">
+                  <span class="basis-label">사용량 기준</span>
+                  <div class="basis" role="group" :aria-label="candidate.label + ' 사용량 기준'">
+                    <button
+                      v-for="basis in LOOP_THRESHOLD_BASES"
+                      :key="basis.value"
+                      type="button"
+                      :class="{ on: (candidate.thresholdBasis ?? 'short') === basis.value }"
+                      :aria-pressed="(candidate.thresholdBasis ?? 'short') === basis.value"
+                      :title="basis.hint"
+                      @click="candidate.thresholdBasis = basis.value"
+                    >
+                      <Icon :icon="basis.value === 'weekly' ? 'lucide:calendar-range' : 'lucide:clock'" />{{ basis.label }}
+                    </button>
+                  </div>
+                  <small>이 계정을 전환할 창입니다. 나머지 창은 100% 소진에서만 막습니다</small>
+                </div>
+                <label :class="{ inactive: (candidate.thresholdBasis ?? 'short') !== 'short' }"
                   >단기 (%)
                   <input
                     v-model.number="candidate.shortThreshold"
@@ -306,7 +327,7 @@ async function save() {
                     @change="candidate.shortThreshold = candidate.shortThreshold || null"
                   />
                 </label>
-                <label
+                <label :class="{ inactive: (candidate.thresholdBasis ?? 'short') !== 'weekly' }"
                   >주간 (%)
                   <input
                     v-model.number="candidate.weeklyThreshold"
@@ -620,6 +641,69 @@ summary {
   display: grid;
   gap: 4px;
   font-size: 11px;
+}
+/*
+ * The window that is not this account's basis keeps its saved value — flipping
+ * the basis back has to bring the number the user had — so it dims rather than
+ * disappearing, and the note under the control says what it still does.
+ */
+.profile-options label.inactive {
+  opacity: 0.5;
+}
+.basis-note {
+  margin: 0;
+  color: #888;
+  font-size: 11px;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+.basis-note strong {
+  color: #aaa;
+  font-weight: 600;
+}
+.basis-field {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  font-size: 11px;
+}
+.basis-label {
+  color: #aaa;
+}
+.basis {
+  display: flex;
+  border: 1px solid #ffffff30;
+  border-radius: 5px;
+  overflow: hidden;
+  width: fit-content;
+}
+.basis button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary, #aeb3ba);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.basis button + button {
+  border-left: 1px solid #ffffff20;
+}
+.basis button.on {
+  background: var(--accent-softer, rgba(90, 155, 255, 0.22));
+  color: var(--accent-strong, #82b4ff);
+  font-weight: 600;
+}
+.basis-field small {
+  max-width: 250px;
+  color: #888;
+  font-size: 10px;
+  line-height: 1.5;
 }
 .profile-options input,
 .profile-options select {

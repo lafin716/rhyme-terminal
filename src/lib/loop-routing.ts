@@ -5,6 +5,23 @@ import type { AccountProfile } from './persistence';
 
 export type LoopAgent = 'claude' | 'codex';
 
+/**
+ * Which usage window one account is switched away on. The window that is not
+ * the basis still blocks the profile once it is fully spent (100%) — the
+ * Provider refuses the run either way — so this picks the criterion for that
+ * account, not its only limit.
+ */
+export type LoopThresholdBasis = 'short' | 'weekly';
+export const LOOP_THRESHOLD_BASES: { value: LoopThresholdBasis; label: string; hint: string }[] = [
+  { value: 'short', label: '5시간', hint: '세션 중에 움직이는 단기 창' },
+  { value: 'weekly', label: '주간', hint: '7일 한도를 아껴 쓸 때' },
+];
+export const loopBasisLabel = (basis: LoopThresholdBasis | undefined) =>
+  basis === 'weekly' ? '주간' : '5시간';
+/** `LoopProfileSnapshot.thresholdKind` reads the same way, window kind for window kind. */
+export const loopWindowLabel = (kind: string | undefined) =>
+  kind === 'weekly' ? '주간' : kind === 'model_weekly' ? '모델 주간' : '5시간';
+
 export interface LoopCandidate {
   priority?: number;
   agent: LoopAgent;
@@ -13,6 +30,7 @@ export interface LoopCandidate {
   enabled: boolean;
   shortThreshold?: number | null;
   weeklyThreshold?: number | null;
+  thresholdBasis?: LoopThresholdBasis;
   model?: string | null;
   effort?: string | null;
   mode?: string | null;
@@ -68,6 +86,8 @@ export interface LoopProfileSnapshot {
     | 'ERROR';
   usage: number | null;
   threshold: number;
+  /** Which window `usage`/`threshold` were read from — see `loopWindowLabel`. */
+  thresholdKind?: string;
   remaining: number | null;
   resetAt: number | null;
   error: string | null;
@@ -81,6 +101,7 @@ export type LoopPolicyPatch = Partial<
     key: string;
     shortThreshold?: number;
     weeklyThreshold?: number;
+    thresholdBasis?: LoopThresholdBasis;
     priority?: number;
     model?: string | null;
     effort?: string | null;
@@ -134,6 +155,7 @@ export function mergeLoopProfiles(
     profileId: p.id,
     label: p.label,
     enabled: false,
+    thresholdBasis: 'short',
     configDir: p.configDir,
     authMethod: p.authMethod === 'setup-token' ? 'setup-token' : 'oauth',
     env: p.env,
@@ -144,6 +166,7 @@ export function mergeLoopProfiles(
       profileId: null,
       label: '시스템 기본',
       enabled: false,
+      thresholdBasis: 'short' as const,
     })),
   );
 
@@ -158,6 +181,7 @@ export function mergeLoopProfiles(
             priority: old.priority ?? 0,
             shortThreshold: old.shortThreshold,
             weeklyThreshold: old.weeklyThreshold,
+            thresholdBasis: old.thresholdBasis ?? 'short',
             model: old.model,
             effort: old.effort,
             mode: old.mode,
