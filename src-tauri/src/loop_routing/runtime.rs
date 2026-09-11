@@ -328,6 +328,9 @@ impl Engine {
                     if let Some(value) = profile.short_threshold { candidate.short_threshold = Some(value); }
                     if let Some(value) = profile.weekly_threshold { candidate.weekly_threshold = Some(value); }
                     if let Some(value) = profile.priority { candidate.priority = value; }
+                    if let Some(value) = profile.model { candidate.model = Some(value); }
+                    if let Some(value) = profile.effort { candidate.effort = Some(value); }
+                    if let Some(value) = profile.mode { candidate.mode = Some(value); }
                 }
                 if let Some(value) = patch.strategy { policy.strategy = value; }
                 if let Some(value) = patch.polling_interval_seconds { policy.polling_interval_seconds = value; }
@@ -1747,6 +1750,9 @@ impl Engine {
             env.clone(),
             resume,
             None,
+            c.model.as_deref(),
+            c.effort.as_deref(),
+            c.mode.as_deref(),
         );
         let (mut launch, native) = match prepared {
             Ok(launch) => (launch, resume.is_some()),
@@ -1764,6 +1770,9 @@ impl Engine {
                         env,
                         None,
                         None,
+                        c.model.as_deref(),
+                        c.effort.as_deref(),
+                        c.mode.as_deref(),
                     )?,
                     false,
                 )
