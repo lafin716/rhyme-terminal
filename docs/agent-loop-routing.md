@@ -131,7 +131,10 @@ node .scratch/agent-loop-runtime-qa/bridge.mjs
 - native resume는 CLI hook/대화 형식과 계정 ownership에 의존한다. UUID 없는 picker는 선택된 Profile에서 동작한다.
 - Context/rate/usage 구분은 Provider가 구조화된 오류 코드를 보낼 때 가능하다. 임의 터미널 문자열을 quota 오류로 추측하지 않는다.
 - snapshot 사이에 생성되어 즉시 분리된 외부/원격 작업까지 소유권을 보장하지 않는다. 알려진 로컬 자손은 포착해 종료 확인한다.
-- Claude setup-token의 statusline 표본 대기 및 Claude Usage 조회 실패는 실행 후 확인으로 전환한다. 실행 전 refresh 시도는 유지하되 알려진 미초기화 임계값 초과 또는 실제 오류 cooldown이 없으면 실행을 허용한다. 실행 중에도 조회 실패만으로 중단하지 않고 폴링을 계속한다. Codex의 기존 조회 방어는 유지한다.
+- Claude setup-token의 statusline 표본 대기만 실행 후 확인으로 전환한다. 이 프로필은 조회할 Usage endpoint가 없고 실행 중 기록되는 표본에 의존하므로 "표본 없음"이 정상 시작 상태다. 실행 전 refresh 시도는 유지하되 알려진 미초기화 임계값 초과 또는 실제 오류 cooldown이 없으면 실행을 허용하고, 실행 중에도 조회 실패만으로 중단하지 않고 폴링을 계속한다.
+- Claude 구독(OAuth) 및 시스템 로그인은 Usage를 직접 조회할 수 있으므로 Codex와 동일하게 방어한다. 조회 실패나 오래된 표본은 "확인 불가"로 처리해 실행을 거부하고 실행 중이면 전환한다. 이를 setup-token과 함께 실행 후 확인으로 묶으면 조회가 한 번 실패한 뒤 남은 실행 동안 임계값 검사가 조용히 꺼진다.
+- 표본의 freshness 창은 해당 후보가 실제로 polling되는 주기(`tier_interval`) + `FRESHNESS_GRACE_SECS`로 계산한다. 고정 상수를 쓰면 기본 주기가 창과 같아져 매 주기마다 자기 표본이 만료된 것으로 보인다.
+- usagePending은 표본을 한 번도 받지 못한 프로필만 대변한다. 한 번 이라도 사용량을 보고한 뒤 발생한 오류는 감추지 않고 프로필 카드에 노출한다.
 - PTY에는 Provider 공통 durable ACK가 없다. 비정상 종료 경계의 exactly-once는 보관/사용자 확인으로 해결한다.
 - 실제 유료 계정 간 quota→native resume→reset 재개와 Unix native UI는 별도 실환경 검증이 필요하다. 테스트 helper/PTY와 mock 브라우저가 이를 대신하지 않는다.
 - 기존 daemon을 자동 교체하지 않는다. 새 runtime capability가 없는 daemon에는 안내를 표시한다.

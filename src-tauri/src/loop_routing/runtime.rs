@@ -78,16 +78,40 @@ struct Quota {
     next_fetch_at: u64,
 }
 impl Quota {
+    /// Whether this candidate's usage may be confirmed *after* it starts
+    /// instead of before.
+    ///
+    /// This only ever applies to a Claude `setup-token` profile: it has no
+    /// usage endpoint of its own, so its numbers arrive from the statusline
+    /// sample the profile writes while it runs, and "no sample yet" is a
+    /// normal startup state rather than a fault. Every other profile —
+    /// including a Claude OAuth/subscription login and the system login —
+    /// answers a usage query directly, so a failed or stale read there means
+    /// the usage is genuinely unconfirmable and has to be treated as such.
+    /// Granting those the deferred check silently disabled the threshold
+    /// guard for the rest of a run whenever a query failed.
     fn runtime_usage_fallback(&self, settings: &Settings, candidate: &Candidate) -> bool {
-        if candidate.agent != "claude" || self.blocked_until > now() { return false; }
+        if candidate.agent != "claude"
+            || candidate.auth_method.as_deref() != Some("setup-token")
+            || self.blocked_until > now()
+        {
+            return false;
+        }
         let unavailable = self.error.is_some()
-            || !crate::usage::usage_windows_are_fresh(&self.windows, Duration::from_secs((settings.polling_interval_seconds + 30).min(120)));
+            || !crate::usage::usage_windows_are_fresh(&self.windows, sample_max_age(settings.polling_interval_seconds));
         // Failed refreshes do not erase known limits before their reset.
         let unexpired: Vec<_> = self.windows.iter().filter(|w| {
             w.resets_at.as_ref().and_then(reset_millis).is_none_or(|at| at > now())
         }).cloned().collect();
         unavailable && !over_limit(settings, candidate, &unexpired)
     }
+}
+/// How old a usage sample may be and still count as evidence, for a candidate
+/// polled every `interval_seconds`. Callers pass the cadence that candidate is
+/// actually scheduled at — see [`Engine::tier_interval`], which shortens it as
+/// usage climbs — so the window always outlasts one on-time poll.
+fn sample_max_age(interval_seconds: u64) -> Duration {
+    Duration::from_secs(interval_seconds.saturating_add(polling::FRESHNESS_GRACE_SECS))
 }
 /// `0.0..1.0` derived from the wall clock — good enough to spread out backoff
 /// and reset-skip retries without a `rand` dependency; not for security use.
@@ -863,8 +887,11 @@ impl Engine {
                 q.fetched_at >= guard
                     && q.blocked_until <= now()
                     && (q.runtime_usage_fallback(&self.settings, c)
+                        // Selection always forces a fresh fetch first (see the
+                        // guard in `usage_targets`), so this window only has to
+                        // outlast that round-trip, never the standby cadence.
                         || (q.error.is_none()
-                            && crate::usage::usage_windows_are_fresh(&q.windows, Duration::from_secs(120))
+                            && crate::usage::usage_windows_are_fresh(&q.windows, sample_max_age(self.settings.polling_interval_seconds))
                             && !over_limit(&self.settings, c, &q.windows)))
             })
     }
@@ -962,7 +989,18 @@ impl Engine {
                     });
                 let executable_error = adapter::resolve_native(&c.agent).err().map(|e| e.to_string());
                 let usage_pending = executable_error.is_none() && q.is_some_and(|q| q.runtime_usage_fallback(&self.settings, c));
-                let error = executable_error.or_else(|| if usage_pending { None } else { q.and_then(|q| q.error.clone()) });
+                // `usage_pending` only speaks for a profile that has never
+                // produced a sample — that one really is just waiting, and the
+                // pending note already says so. Once a profile has reported
+                // usage at least once (`quota` keeps the last windows through
+                // a failure), any later message is news the user needs: an
+                // expired login, a refused request, an unreadable sample. It
+                // used to be swallowed here, leaving a profile showing neither
+                // a number nor a reason.
+                let waiting_for_first_sample = q.is_some_and(|q| q.windows.is_empty());
+                let error = executable_error.or_else(|| {
+                    if usage_pending && waiting_for_first_sample { None } else { q.and_then(|q| q.error.clone()) }
+                });
                 let status = if !c.enabled {
                     ProfileStatus::Disabled
                 } else if g.status == "waiting_for_usage_reset"
@@ -1373,6 +1411,15 @@ impl Engine {
                 .cloned()
             {
                 let q = self.quotas.get(&c.key());
+                // The active, running profile is polled at its own adaptive
+                // cadence, so the window its sample has to stay inside is that
+                // cadence — not the configured baseline, which the tiers
+                // shorten as usage climbs.
+                let max_age = sample_max_age(self.tier_interval(
+                    &c.key(),
+                    self.settings.polling_interval_seconds,
+                    true,
+                ));
                 // Hard block: the profile is disabled, explicitly blocked by a
                 // provider-reported limit/rate-limit, or we cannot confirm its
                 // usage at all (errored or stale beyond the freshness window).
@@ -1384,10 +1431,7 @@ impl Engine {
                         q.blocked_until > now()
                             || (!q.runtime_usage_fallback(&self.settings, &c)
                                 && (q.error.is_some()
-                                    || !crate::usage::usage_windows_are_fresh(
-                                        &q.windows,
-                                        Duration::from_secs(self.settings.polling_interval_seconds + 30),
-                                    )))
+                                    || !crate::usage::usage_windows_are_fresh(&q.windows, max_age)))
                     });
                 // Soft block: our own periodic usage check crossed the
                 // configured threshold, but the profile itself is otherwise

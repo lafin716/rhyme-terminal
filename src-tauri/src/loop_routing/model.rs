@@ -48,6 +48,14 @@ pub mod polling {
     /// reset time by more than this, even if that reset is far out — guards
     /// against ever wrong/stale reset estimates permanently starving a check.
     pub const MAX_RESET_SKIP_SECS: u64 = 3600;
+    /// Added to a candidate's own polling cadence to decide how old its last
+    /// usage sample may be and still count as evidence. It has to cover one
+    /// fetch round-trip (the daemon allows a candidate 20s per request) plus
+    /// the scheduler's one-second tick, or an on-time poll would leave a
+    /// window in which its own previous sample has already expired — which is
+    /// what happened when this margin was a flat 30s capped at 120s while
+    /// [`DEFAULT_INTERVAL_SECS`] was also 120.
+    pub const FRESHNESS_GRACE_SECS: u64 = 45;
 }
 fn agent_order() -> Vec<String> {
     vec!["claude".into(), "codex".into()]

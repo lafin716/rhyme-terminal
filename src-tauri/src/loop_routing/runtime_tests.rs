@@ -885,8 +885,17 @@ fn waiting_policy_edit_schedules_usage_revalidation_without_starting_an_agent() 
 }
 
 fn claude_running(f: &mut Fixture) {
+    claude_running_with(f, "setup-token");
+}
+/// A subscription (OAuth) login, unlike `setup-token`, can be asked for its
+/// usage directly — so it must never get the deferred, check-after-launch
+/// treatment.
+fn claude_oauth_running(f: &mut Fixture) {
+    claude_running_with(f, "oauth");
+}
+fn claude_running_with(f: &mut Fixture, auth_method: &str) {
     running(f);
-    for c in &mut f.engine.settings.candidates { c.agent = "claude".into(); c.auth_method = Some("setup-token".into()); }
+    for c in &mut f.engine.settings.candidates { c.agent = "claude".into(); c.auth_method = Some(auth_method.into()); }
     let g = f.engine.groups.get_mut(&f.id).unwrap();
     g.policy = Some(f.engine.settings.clone());
     g.participants = f.engine.settings.candidates.iter().map(Candidate::key).collect();
@@ -932,6 +941,81 @@ fn runtime_usage_fallback_keeps_known_limits_and_actual_cooldowns() {
     q.blocked_until = 0;
     c.agent = "codex".into();
     assert!(!q.runtime_usage_fallback(&settings, &c));
+}
+#[test]
+fn only_setup_token_claude_defers_its_usage_check_to_after_launch() {
+    let settings = Settings::default();
+    let q = Quota { error: Some("Login expired. Sign in again through the CLI".into()), ..Quota::default() };
+    let with = |auth: Option<&str>| {
+        let mut c = candidate("a");
+        c.agent = "claude".into();
+        c.auth_method = auth.map(str::to_owned);
+        c
+    };
+    assert!(q.runtime_usage_fallback(&settings, &with(Some("setup-token"))));
+    // A subscription login and the system login both answer a usage query, so
+    // a failure there is unconfirmable usage, not a profile still warming up.
+    assert!(!q.runtime_usage_fallback(&settings, &with(Some("oauth"))));
+    assert!(!q.runtime_usage_fallback(&settings, &with(None)));
+}
+#[test]
+fn a_sample_one_polling_cycle_old_is_still_fresh_enough_to_act_on() {
+    let settings = Settings::default();
+    let mut c = candidate("a");
+    c.agent = "claude".into();
+    c.auth_method = Some("setup-token".into());
+    let aged = |seconds: u64| {
+        let mut w = window(40.0, now() + 3_600_000);
+        w.received_at = Some(now() - seconds * 1000);
+        Quota { windows: vec![w], ..Quota::default() }
+    };
+    // One full cycle at the default cadence: the next poll has only just come
+    // due, so this is the freshest sample that can exist at that moment. The
+    // window used to be capped at 120s — the same as the cadence — which made
+    // every profile look unconfirmable once per cycle.
+    let cycle = settings.polling_interval_seconds;
+    assert!(!aged(cycle + 1).runtime_usage_fallback(&settings, &c));
+    assert!(!aged(cycle + polling::FRESHNESS_GRACE_SECS - 1).runtime_usage_fallback(&settings, &c));
+    // Beyond one cycle plus the round-trip grace, it really is too old.
+    assert!(aged(cycle + polling::FRESHNESS_GRACE_SECS + 5).runtime_usage_fallback(&settings, &c));
+}
+#[test]
+fn oauth_claude_switches_away_when_its_usage_cannot_be_confirmed() {
+    let mut f = Fixture::new();
+    claude_oauth_running(&mut f);
+    f.engine.quota("claude:a".into(), Err("Login expired. Sign in again through the CLI".into()), now());
+    let c = f.engine.settings.candidates[0].clone();
+    assert!(!f.engine.eligible(&c, 0), "an unreadable subscription profile is not launchable");
+    f.engine.tick(&f.state).unwrap();
+    let g = &f.engine.groups[&f.id];
+    assert_eq!(g.status, "switching_profile");
+    assert!(f.engine.live[&f.id].interrupt_at.is_some());
+    let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
+    assert!(!p.usage_pending, "a subscription profile never defers its check");
+    assert_eq!(p.error.as_deref(), Some("Login expired. Sign in again through the CLI"));
+}
+#[test]
+fn a_usage_failure_after_a_first_sample_is_reported_instead_of_hidden() {
+    let mut f = Fixture::new();
+    claude_running(&mut f); // setup-token: the only kind that defers its check
+    let mut g = f.engine.groups.remove(&f.id).unwrap();
+
+    // Never sampled: the pending note is the whole story, so no error is shown.
+    f.engine.quota("claude:a".into(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
+    f.engine.profiles(&mut g);
+    let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
+    assert!(p.usage_pending);
+    assert!(p.error.is_none());
+
+    // Sampled once, then the reads start failing. The profile may keep running,
+    // but the reason its number is missing has to reach the user.
+    f.engine.quota("claude:a".into(), Ok(vec![window(20.0, now() + 3_600_000)]), now());
+    f.engine.quota("claude:a".into(), Err("Unable to read session usage".into()), now() + 1);
+    f.engine.profiles(&mut g);
+    let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
+    assert!(p.usage_pending, "a setup-token profile is still runnable");
+    assert_eq!(p.error.as_deref(), Some("Unable to read session usage"));
+    f.engine.groups.insert(f.id, g);
 }
 #[test]
 fn claude_stop_failure_switches_even_when_usage_cannot_be_read() {
