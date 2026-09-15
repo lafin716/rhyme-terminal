@@ -1,6 +1,6 @@
 [package]
 name = "rhyme-terminal"
-version = "0.1.0"
+version = "0.0.1"
 description = "Rhyme Terminal - Windows terminal multiplexer"
 authors = ["you"]
 edition = "2021"

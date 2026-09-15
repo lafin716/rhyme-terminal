@@ -18,20 +18,51 @@ pub struct Service {
 }
 
 pub async fn daemon_supports_routing(client: &DaemonClient) -> bool {
-    static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    *SUPPORTED.get_or_init(|| async {
-        matches!(tokio::time::timeout(std::time::Duration::from_secs(3),
-            client.request_raw(Method::LoopRequest {request: serde_json::json!({"op":"capabilities"})})).await,
-            Ok(Ok(value)) if value["version"] == 1)
-    }).await
+    routing_capabilities(client).await.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capabilities_do_not_lock_or_initialize_engine() {
+        let state = Arc::new(DaemonState::new());
+        let guard = state.routing.engine.lock().await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state
+                .routing
+                .request(&state, serde_json::json!({"op":"capabilities"})),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["version"], 1);
+        assert!(guard.is_none());
+    }
+}
+
+async fn routing_capabilities(client: &DaemonClient) -> Result<bool, String> {
+    // A failed probe must not disable routing for the lifetime of the GUI.
+    let value = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.request_raw(Method::LoopRequest {
+            request: serde_json::json!({"op":"capabilities"}),
+        }),
+    )
+    .await
+    .map_err(|_| "데몬의 루프 기능 확인 시간이 초과되었습니다. 다시 시도하세요. 계속 실패하면 기존 작업을 마친 뒤 트레이의 ‘서버 종료’를 선택하고 최신 앱을 다시 실행하세요. 서버 종료 시 모든 터미널 세션이 종료됩니다.".to_string())?
+    .map_err(|e| format!("데몬의 루프 기능을 확인하지 못했습니다: {e}"))?;
+    Ok(value["version"] == 1)
 }
 #[tauri::command]
 pub async fn loop_request(
     client: tauri::State<'_, Arc<DaemonClient>>,
     request: Value,
 ) -> Result<Value, String> {
-    if !daemon_supports_routing(&client).await {
-        return Err("현재 데몬은 루프 라우팅을 지원하지 않습니다. 기존 작업을 마친 뒤 트레이에서 종료하고 새 버전 앱을 실행하세요. 일반 터미널은 계속 사용할 수 있습니다.".into());
+    if !routing_capabilities(&client).await? {
+        return Err("현재 데몬은 루프 라우팅을 지원하지 않습니다. 기존 작업을 마친 뒤 트레이의 ‘서버 종료’를 선택하고 최신 앱을 다시 실행하세요. ‘종료 (데몬 유지)’로는 업데이트되지 않습니다. 서버 종료 시 모든 터미널 세션이 종료됩니다.".into());
     }
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -45,6 +76,12 @@ pub async fn loop_request(
 }
 impl Service {
     pub async fn request(&self, state: &Arc<DaemonState>, request: Value) -> Result<Value> {
+        // Discovery must not depend on persisted state or the engine lock.
+        if request["op"] == "capabilities" {
+            return Ok(
+                serde_json::json!({"version":1,"runtimeMonitor":true,"autoStart":true,"livePolicy":true}),
+            );
+        }
         let mut guard = self.engine.lock().await;
         if guard.is_none() {
             *guard = Some(runtime::Engine::open()?);

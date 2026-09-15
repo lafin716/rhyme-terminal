@@ -1,13 +1,14 @@
 {
   "name": "rhyme-terminal",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.1",
   "type": "module",
   "packageManager": "pnpm@8.15.0",
   "engines": {
     "node": ">=22.14.0"
   },
   "scripts": {
+    "version:set": "node scripts/set-version.mjs",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "vue-tsc --noEmit",
     "dev": "pnpm run build:mobile && vite",

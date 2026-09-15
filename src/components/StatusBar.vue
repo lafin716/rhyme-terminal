@@ -11,6 +11,7 @@ import { sessionAgentIcon } from "../lib/session-agent-icon";
 import { formatUsagePercent, formatUsageReset } from "../lib/usage-status";
 import { activeUsageProfiles } from "../lib/usage-active";
 import type { CliAgentKind } from "../lib/persistence";
+import { version } from "../../package.json";
 
 const { focusedSession, state: sessionState } = useSessions();
 const { activeWorkspace, state: workspaceState } = useWorkspaces();
@@ -119,7 +120,7 @@ onUnmounted(() => {
         <Icon class="chevron" icon="lucide:chevron-up" />
       </button>
     </div>
-    <div class="right">{{ time }}</div>
+    <div class="right"><span>{{ time }}</span><span class="app-version">{{ version }}</span></div>
   </div>
   <Teleport to="body">
     <div v-if="open" class="usage-backdrop" @mousedown.self="close">
@@ -162,7 +163,8 @@ onUnmounted(() => {
 .usage-item:focus-visible { outline:2px solid #17483f; outline-offset:-2px; }
 .usage-ico { font-size:14px; } .chevron { font-size:11px; opacity:.65; }
 .profile-count { font-size:10px; padding:0 4px; border-radius:3px; background:#00000012; }
-.status-dot { font-weight:800; color:#743411; } .right { margin-left:auto; flex-shrink:0; }
+.status-dot { font-weight:800; color:#743411; } .right { margin-left:auto; flex-shrink:0; display:flex; align-items:center; gap:10px; white-space:nowrap; }
+.app-version { border-left:1px solid currentColor; padding-left:10px; font-variant-numeric:tabular-nums; }
 .usage-backdrop { position:fixed; inset:0; background:#0005; z-index:1200; display:flex; align-items:flex-end; justify-content:center; padding:16px 16px 32px; }
 .usage-dialog { width:760px; max-width:100%; max-height:calc(100dvh - 64px); display:flex; flex-direction:column; border:1px solid #444; border-radius:12px; background:#202124; color:#e8e8eb; box-shadow:0 20px 70px #0009; font-family:Segoe UI,sans-serif; outline:none; overflow:hidden; }
 .dialog-header { display:flex; gap:8px; align-items:center; padding:20px 22px 18px; border-bottom:1px solid #ffffff0d; }

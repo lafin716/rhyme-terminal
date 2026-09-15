@@ -360,7 +360,6 @@ impl Engine {
             "Routing request too large"
         );
         match string(&r, "op")? {
-            "capabilities" => Ok(json!({"version":1,"runtimeMonitor":true,"autoStart":true,"livePolicy":true})),
             "update_policy" => {
                 let id = Uuid::parse_str(string(&r, "id")?)?;
                 let patch: PolicyPatch = serde_json::from_value(r["patch"].clone())?;

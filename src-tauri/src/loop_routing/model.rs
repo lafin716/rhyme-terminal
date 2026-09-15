@@ -232,7 +232,10 @@ impl Settings {
         if let Some(value) = value {
             ensure!(!value.is_empty(), "{field} cannot be empty");
             ensure!(value.len() <= 64, "{field} is too long");
-            ensure!(!value.chars().any(char::is_control), "{field} contains invalid control characters");
+            ensure!(
+                !value.chars().any(char::is_control),
+                "{field} contains invalid control characters"
+            );
         }
         Ok(())
     }
@@ -245,7 +248,11 @@ impl Settings {
         }
     }
     pub fn ordered(&self) -> Vec<Candidate> {
-        self.candidates.iter().filter(|c| c.enabled).cloned().collect()
+        self.candidates
+            .iter()
+            .filter(|c| c.enabled)
+            .cloned()
+            .collect()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -448,6 +455,7 @@ pub struct ProfileSnapshot {
     /// Which window `usage`/`threshold` above were read from — the basis
     /// window in the ordinary case, the other one when that one is the closer
     /// of the two to blocking this profile.
+    #[serde(default = "default_threshold_kind")]
     pub threshold_kind: String,
     pub remaining: Option<f64>,
     pub reset_at: Option<u64>,
@@ -459,6 +467,10 @@ pub struct SystemEvent {
     pub at: u64,
     pub kind: String,
     pub message: String,
+}
+
+fn default_threshold_kind() -> String {
+    "short".into()
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputChunk {
@@ -486,6 +498,23 @@ pub fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_profile_snapshot_without_threshold_kind_loads() {
+        let mut saved = serde_json::json!({
+            "key":"codex:system", "agent":"codex", "label":"System",
+            "status":"AVAILABLE", "usage":25.0, "threshold":90.0,
+            "remaining":75.0, "resetAt":null, "error":null, "windows":[]
+        });
+        let legacy: ProfileSnapshot = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(legacy.threshold_kind, "short");
+        assert_eq!(legacy.usage, Some(25.0));
+        for kind in ["short", "weekly", "model_weekly"] {
+            saved["thresholdKind"] = serde_json::json!(kind);
+            let current: ProfileSnapshot = serde_json::from_value(saved.clone()).unwrap();
+            assert_eq!(current.threshold_kind, kind);
+        }
+    }
+
     fn c(id: &str) -> Candidate {
         Candidate {
             priority: 0,
@@ -541,7 +570,14 @@ mod tests {
         let mut waiting = c("waiting");
         waiting.enabled = false;
         settings.candidates = vec![waiting, codex, c("second")];
-        assert_eq!(settings.ordered().iter().map(Candidate::key).collect::<Vec<_>>(), vec!["codex:first", "claude:second"]);
+        assert_eq!(
+            settings
+                .ordered()
+                .iter()
+                .map(Candidate::key)
+                .collect::<Vec<_>>(),
+            vec!["codex:first", "claude:second"]
+        );
     }
     #[test]
     fn persisted_settings_never_include_environment_values() {

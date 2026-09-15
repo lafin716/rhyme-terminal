@@ -224,6 +224,20 @@ fn spawn_daemon_detached() -> Result<()> {
 
 fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
     let current = std::env::current_exe()?;
+    daemon_command_for(current)
+}
+
+fn daemon_command_for(current: PathBuf) -> Result<(PathBuf, Option<&'static str>)> {
+    // Prefer the embedded daemon from the same GUI build over a stale sidecar.
+    let current_name = current
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if current_name.eq_ignore_ascii_case("rhyme-terminal")
+        || current_name.eq_ignore_ascii_case("winmux")
+    {
+        return Ok((current, Some(crate::DAEMON_ARG)));
+    }
     let dir = current
         .parent()
         .ok_or_else(|| anyhow!("current exe has no parent dir"))?;
@@ -238,16 +252,6 @@ fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
         return Ok((standalone_daemon, None));
     }
 
-    let current_name = current
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if current_name.eq_ignore_ascii_case("rhyme-terminal")
-        || current_name.eq_ignore_ascii_case("winmux")
-    {
-        return Ok((current, Some(crate::DAEMON_ARG)));
-    }
-
     bail!(
         "winmuxd executable not found at {}",
         standalone_daemon.display()
@@ -258,6 +262,55 @@ fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
 mod mobile_lifetime_tests {
     use super::*;
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    #[test]
+    fn gui_uses_embedded_daemon_even_with_standalone_present() {
+        let dir = std::env::temp_dir().join(format!("winmux-daemon-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let standalone = dir.join("winmuxd.exe");
+        std::fs::write(&standalone, b"old build").unwrap();
+        for name in ["rhyme-terminal.exe", "winmux.exe"] {
+            let gui = dir.join(name);
+            assert_eq!(
+                daemon_command_for(gui.clone()).unwrap(),
+                (gui, Some(crate::DAEMON_ARG))
+            );
+        }
+        assert_eq!(
+            daemon_command_for(dir.join("winmuxctl.exe")).unwrap(),
+            (standalone.clone(), None)
+        );
+        std::fs::remove_file(standalone).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn routing_probe_retries_after_failure() {
+        let (client, mut server) = pair().await;
+        let task = tokio::spawn(async move {
+            for success in [false, true] {
+                let request: Request =
+                    serde_json::from_slice(&read_frame(&mut server).await.unwrap()).unwrap();
+                let reply = if success {
+                    ServerMsg::Response {
+                        id: request.id,
+                        result: serde_json::json!({"version":1}),
+                    }
+                } else {
+                    ServerMsg::Error {
+                        id: request.id,
+                        message: "temporary failure".into(),
+                    }
+                };
+                write_frame(&mut server, &serde_json::to_vec(&reply).unwrap())
+                    .await
+                    .unwrap();
+            }
+        });
+        assert!(!crate::loop_routing::daemon_supports_routing(&client).await);
+        assert!(crate::loop_routing::daemon_supports_routing(&client).await);
+        task.await.unwrap();
+    }
+
     async fn pair() -> (
         Arc<DaemonClient>,
         tokio::net::windows::named_pipe::NamedPipeServer,
