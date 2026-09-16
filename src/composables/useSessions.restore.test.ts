@@ -25,11 +25,46 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-it.each(["claude", "codex"] as const)("restores %s with the saved account and cwd through shell fallback", async (agent) => {
+type Agent = "claude" | "codex";
+type TerminalPreset = "windows-powershell" | "zsh";
+type RestoreFixture = {
+  agent: Agent;
+  savedPreset: TerminalPreset;
+  hostPlatform: string;
+  fallbackPreset: TerminalPreset;
+};
+
+function agentCommand(agent: Agent): string {
+  return agent === "claude" ? "claude --permission-mode auto" : "codex --approve-for-me";
+}
+
+function expectLaunchArgs(shellArgs: string[], agent: Agent, preset: TerminalPreset) {
+  const command = agentCommand(agent);
+  if (preset === "windows-powershell") {
+    const lastArg = shellArgs.slice(-1)[0];
+    expect(shellArgs.slice(0, 2)).toEqual(["-NoExit", "-Command"]);
+    expect(lastArg).toContain("function global:prompt");
+    expect(lastArg).toMatch(new RegExp(`; ${command.replace(/ /g, "\\s")}$`));
+    return;
+  }
+  expect(shellArgs).toEqual(["-l", "-i", "-c", `${command}; exec /bin/zsh -l -i`]);
+}
+
+it.each([
+  { agent: "claude", savedPreset: "windows-powershell", hostPlatform: "Win32", fallbackPreset: "windows-powershell" },
+  { agent: "codex", savedPreset: "windows-powershell", hostPlatform: "Win32", fallbackPreset: "windows-powershell" },
+  { agent: "claude", savedPreset: "windows-powershell", hostPlatform: "MacIntel", fallbackPreset: "zsh" },
+  { agent: "codex", savedPreset: "windows-powershell", hostPlatform: "MacIntel", fallbackPreset: "zsh" },
+  { agent: "claude", savedPreset: "zsh", hostPlatform: "MacIntel", fallbackPreset: "zsh" },
+  { agent: "codex", savedPreset: "zsh", hostPlatform: "MacIntel", fallbackPreset: "zsh" },
+] satisfies RestoreFixture[])(
+  "restores $agent with $savedPreset and $hostPlatform fallback through shell fallback",
+  async ({ agent, savedPreset, hostPlatform, fallbackPreset }) => {
+  vi.stubGlobal("navigator", { platform: hostPlatform });
   const { useWorkspaces } = await import("./useWorkspaces");
   const { useSessions } = await import("./useSessions");
   const { useAccountProfiles } = await import("./useAccountProfiles");
-  const { defaultTerminalConfig } = await import("../lib/terminal-config");
+  const { configForPreset } = await import("../lib/terminal-config");
   useAccountProfiles().profiles.push({
     id: "work", agent, label: "Work", configDir: "C:\\accounts\\work", createdAt: 1,
     authMethod: "setup-token", env: { HTTP_PROXY: "http://localhost:8080" },
@@ -46,14 +81,16 @@ it.each(["claude", "codex"] as const)("restores %s with the saved account and cw
   const sessions = useSessions();
   const ws = useWorkspaces().activeWorkspace.value;
   const restored = await sessions.restoreForWorkspace(ws, {
-    name: "project", agent, cwd: "C:\\project", terminal: defaultTerminalConfig(),
+    name: "project", agent, cwd: "C:\\project", terminal: configForPreset(savedPreset),
     accountProfile: { agent, id: "work", label: "Work" },
   });
   expect(restored?.id).toBe("restored");
   expect(createRequests).toHaveLength(2);
   expect(createRequests[0].cwd).toBe("C:\\project");
+  expect(createRequests[1].cwd).toBeUndefined();
+  expectLaunchArgs(createRequests[0].shellArgs as string[], agent, savedPreset);
+  expectLaunchArgs(createRequests[1].shellArgs as string[], agent, fallbackPreset);
   for (const request of createRequests) {
-    expect((request.shellArgs as string[]).slice(-1)[0]).toMatch(agent === "claude" ? /; claude --permission-mode auto$/ : /; codex --approve-for-me$/);
     expect(request.env).toMatchObject({
       [agent === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"]: "C:\\accounts\\work",
       HTTP_PROXY: "http://localhost:8080",
@@ -67,15 +104,15 @@ it.each(["claude", "codex"] as const)("restores %s with the saved account and cw
 it("restores legacy profile snapshots but respects an explicit terminal state", async () => {
   const { useWorkspaces } = await import("./useWorkspaces");
   const { useSessions } = await import("./useSessions");
-  const { defaultTerminalConfig } = await import("../lib/terminal-config");
+  const { configForPreset } = await import("../lib/terminal-config");
   const sessions = useSessions();
   const ws = useWorkspaces().activeWorkspace.value;
   const snapshot = {
-    name: "old", terminal: defaultTerminalConfig(),
+    name: "old", terminal: configForPreset("windows-powershell"),
     accountProfile: { agent: "codex" as const, id: null, label: "" },
   };
   await sessions.restoreForWorkspace(ws, snapshot);
-  expect(bridge.invoke.mock.calls.slice(-1)[0]?.[1].shellArgs.slice(-1)[0]).toMatch(/; codex --approve-for-me$/);
+  expectLaunchArgs(bridge.invoke.mock.calls.slice(-1)[0]?.[1].shellArgs, "codex", "windows-powershell");
   await sessions.restoreForWorkspace(ws, { ...snapshot, agent: "terminal" });
   expect(bridge.invoke.mock.calls.slice(-1)[0]?.[1].shellArgs.slice(-1)[0]).not.toContain("codex");
 });

@@ -34,3 +34,11 @@ jobs:
     uses: ./.github/workflows/build-windows.yml
     with:
       run-checks: true
+
+  macos:
+    name: macOS build and packaged helper checks
+    uses: ./.github/workflows/build-macos.yml
+
+  android:
+    name: Android build
+    uses: ./.github/workflows/build-android.yml
