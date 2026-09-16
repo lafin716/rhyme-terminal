@@ -520,7 +520,6 @@ fn list_directory(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>, String> {
     Ok(entries)
 }
 
-
 /// Characters that may never appear in a single file/folder name: the Windows
 /// reserved set plus both path separators. Rejecting the separators is what
 /// keeps a rename or create confined to one directory — see
@@ -934,13 +933,31 @@ mod directory_tests {
     #[test]
     fn rejects_names_that_are_not_plain_leaf_names() {
         for bad in [
-            "", "   ", ".", "..", "a/b", "a\\b", "c:name", "star*", "quote\"", "pipe|", "q?", "lt<",
-            "gt>", "bell\u{7}",
+            "",
+            "   ",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "c:name",
+            "star*",
+            "quote\"",
+            "pipe|",
+            "q?",
+            "lt<",
+            "gt>",
+            "bell\u{7}",
         ] {
             assert!(super::validate_entry_name(bad).is_err(), "{bad:?}");
         }
-        assert_eq!(super::validate_entry_name("  notes.md  ").unwrap(), "notes.md");
-        assert_eq!(super::validate_entry_name(".gitignore").unwrap(), ".gitignore");
+        assert_eq!(
+            super::validate_entry_name("  notes.md  ").unwrap(),
+            "notes.md"
+        );
+        assert_eq!(
+            super::validate_entry_name(".gitignore").unwrap(),
+            ".gitignore"
+        );
     }
 
     #[test]
@@ -949,8 +966,8 @@ mod directory_tests {
         fs::write(dir.join("old.txt"), b"body").unwrap();
         fs::write(dir.join("taken.txt"), b"other").unwrap();
 
-        let renamed = super::rename_path_sync(dir.join("old.txt").to_str().unwrap(), "new.txt")
-            .unwrap();
+        let renamed =
+            super::rename_path_sync(dir.join("old.txt").to_str().unwrap(), "new.txt").unwrap();
         assert!(renamed.ends_with("new.txt"));
         assert_eq!(fs::read_to_string(dir.join("new.txt")).unwrap(), "body");
         assert!(!dir.join("old.txt").exists());

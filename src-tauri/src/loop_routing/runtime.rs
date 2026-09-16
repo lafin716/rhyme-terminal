@@ -110,7 +110,11 @@ fn backoff_delay_ms(consecutive_failures: u32) -> u64 {
     let doublings = consecutive_failures.saturating_sub(1).min(4); // 60,120,240,480,900(capped)
     let base = polling::BACKOFF_BASE_SECS.saturating_mul(1u64 << doublings);
     let capped = base.min(polling::BACKOFF_MAX_SECS) * 1000;
-    jittered(capped, polling::BACKOFF_JITTER_MIN, polling::BACKOFF_JITTER_MAX)
+    jittered(
+        capped,
+        polling::BACKOFF_JITTER_MIN,
+        polling::BACKOFF_JITTER_MAX,
+    )
 }
 #[derive(Serialize, Deserialize)]
 struct Saved {
@@ -179,7 +183,8 @@ fn controlling<'a>(
         .iter()
         .filter(|w| matches!(w.kind.as_str(), "short" | "weekly"))
         .max_by(|a, b| {
-            (a.percent_used / limit(settings, c, a)).total_cmp(&(b.percent_used / limit(settings, c, b)))
+            (a.percent_used / limit(settings, c, a))
+                .total_cmp(&(b.percent_used / limit(settings, c, b)))
         })
 }
 fn over_limit(settings: &Settings, c: &Candidate, windows: &[UsageWindow]) -> bool {
@@ -353,7 +358,10 @@ impl Engine {
                 let id = Uuid::parse_str(string(&r, "id")?)?;
                 let patch: PolicyPatch = serde_json::from_value(r["patch"].clone())?;
                 let mut g = self.groups.get(&id).context("Loop not found")?.clone();
-                let mut policy = g.policy.clone().context("이 Loop에는 편집 가능한 설정이 없습니다")?;
+                let mut policy = g
+                    .policy
+                    .clone()
+                    .context("이 Loop에는 편집 가능한 설정이 없습니다")?;
                 if let Some(profile) = patch.profile {
                     // An empty participant list means "every candidate", the
                     // way `candidates`, `profiles` and `tick_for_profile` all
@@ -368,26 +376,58 @@ impl Engine {
                     // it decides which window the running account is measured
                     // by, so swapping it mid-run re-decides that account from
                     // under a turn already in flight.
-                    ensure!(g.active_profile.as_deref() != Some(profile.key.as_str())
-                        || (profile.short_threshold.is_none() && profile.weekly_threshold.is_none()
-                            && profile.threshold_basis.is_none()),
-                        "현재 활성 계정의 사용량 기준과 임계값은 변경할 수 없습니다");
-                    let candidate = policy.candidates.iter_mut().find(|c| c.key() == profile.key).context("Profile not found")?;
-                    if let Some(value) = profile.short_threshold { candidate.short_threshold = Some(value); }
-                    if let Some(value) = profile.weekly_threshold { candidate.weekly_threshold = Some(value); }
-                    if let Some(value) = profile.threshold_basis { candidate.threshold_basis = value; }
-                    if let Some(value) = profile.priority { candidate.priority = value; }
-                    if let Some(value) = profile.model { candidate.model = Some(value); }
-                    if let Some(value) = profile.effort { candidate.effort = Some(value); }
-                    if let Some(value) = profile.mode { candidate.mode = Some(value); }
+                    ensure!(
+                        g.active_profile.as_deref() != Some(profile.key.as_str())
+                            || (profile.short_threshold.is_none()
+                                && profile.weekly_threshold.is_none()
+                                && profile.threshold_basis.is_none()),
+                        "현재 활성 계정의 사용량 기준과 임계값은 변경할 수 없습니다"
+                    );
+                    let candidate = policy
+                        .candidates
+                        .iter_mut()
+                        .find(|c| c.key() == profile.key)
+                        .context("Profile not found")?;
+                    if let Some(value) = profile.short_threshold {
+                        candidate.short_threshold = Some(value);
+                    }
+                    if let Some(value) = profile.weekly_threshold {
+                        candidate.weekly_threshold = Some(value);
+                    }
+                    if let Some(value) = profile.threshold_basis {
+                        candidate.threshold_basis = value;
+                    }
+                    if let Some(value) = profile.priority {
+                        candidate.priority = value;
+                    }
+                    if let Some(value) = profile.model {
+                        candidate.model = Some(value);
+                    }
+                    if let Some(value) = profile.effort {
+                        candidate.effort = Some(value);
+                    }
+                    if let Some(value) = profile.mode {
+                        candidate.mode = Some(value);
+                    }
                 }
-                if let Some(value) = patch.strategy { policy.strategy = value; }
-                if let Some(value) = patch.polling_interval_seconds { policy.polling_interval_seconds = value; }
-                if let Some(value) = patch.auto_resume { policy.auto_resume = value; }
+                if let Some(value) = patch.strategy {
+                    policy.strategy = value;
+                }
+                if let Some(value) = patch.polling_interval_seconds {
+                    policy.polling_interval_seconds = value;
+                }
+                if let Some(value) = patch.auto_resume {
+                    policy.auto_resume = value;
+                }
                 policy.validate()?;
                 g.policy = Some(policy.clone());
-                if g.status == "waiting_for_usage_reset" { g.resume_at = Some(now()); }
-                g.event("POLICY_UPDATED", "이 Loop의 설정을 변경했습니다. 다음 사용량 확인과 계정 선택부터 적용합니다");
+                if g.status == "waiting_for_usage_reset" {
+                    g.resume_at = Some(now());
+                }
+                g.event(
+                    "POLICY_UPDATED",
+                    "이 Loop의 설정을 변경했습니다. 다음 사용량 확인과 계정 선택부터 적용합니다",
+                );
                 let global = std::mem::replace(&mut self.settings, policy);
                 self.profiles(&mut g);
                 self.settings = global;
@@ -465,10 +505,20 @@ impl Engine {
                 // re-read while this Loop's own first prompt runs.
                 g.usage_evidence_from = now();
                 self.terminal(state, &mut g)?;
-                let first = self.candidates(&g).into_iter().next().context("No active profile")?;
+                let first = self
+                    .candidates(&g)
+                    .into_iter()
+                    .next()
+                    .context("No active profile")?;
                 g.current_provider = Some(first.agent.clone());
-                g.state(LoopStatus::Resuming, Some("첫 번째 활성 프로필의 사용량을 확인하고 Agent를 실행합니다"));
-                g.event("CREATED", &format!("{} 자동 실행을 준비합니다", first.label));
+                g.state(
+                    LoopStatus::Resuming,
+                    Some("첫 번째 활성 프로필의 사용량을 확인하고 Agent를 실행합니다"),
+                );
+                g.event(
+                    "CREATED",
+                    &format!("{} 자동 실행을 준비합니다", first.label),
+                );
                 if self
                     .candidates(&g)
                     .iter()
@@ -480,7 +530,13 @@ impl Engine {
                     );
                 }
                 self.groups.insert(id, g.clone());
-                self.live.insert(id, Live { initial_start: true, ..Live::default() });
+                self.live.insert(
+                    id,
+                    Live {
+                        initial_start: true,
+                        ..Live::default()
+                    },
+                );
                 self.save()?;
                 Ok(json!(g))
             }
@@ -698,7 +754,10 @@ impl Engine {
             }
         }
         if bytes == b"\x03" {
-            if !matches!(g.status.as_str(), "paused" | "stopped" | "completed" | "running") {
+            if !matches!(
+                g.status.as_str(),
+                "paused" | "stopped" | "completed" | "running"
+            ) {
                 g.state(LoopStatus::Idle, Some("사용자 interrupt — Agent 대기 중"));
             }
             g.resume_at = None;
@@ -739,7 +798,9 @@ impl Engine {
                 .fold(0.0, f64::max)
         });
         match usage {
-            Some(u) if u >= polling::CRITICAL_USAGE_PCT => base.min(polling::CRITICAL_INTERVAL_SECS),
+            Some(u) if u >= polling::CRITICAL_USAGE_PCT => {
+                base.min(polling::CRITICAL_INTERVAL_SECS)
+            }
             Some(u) if u >= polling::HIGH_USAGE_PCT => base.min(polling::HIGH_INTERVAL_SECS),
             _ => base,
         }
@@ -772,7 +833,12 @@ impl Engine {
         let stamp = now();
         // key -> (shortest requested cadence, may bypass pacing)
         let mut wanted: HashMap<String, (u64, bool)> = HashMap::new();
-        fn want(wanted: &mut HashMap<String, (u64, bool)>, key: String, interval: u64, forced: bool) {
+        fn want(
+            wanted: &mut HashMap<String, (u64, bool)>,
+            key: String,
+            interval: u64,
+            forced: bool,
+        ) {
             wanted
                 .entry(key)
                 .and_modify(|entry| {
@@ -910,7 +976,9 @@ impl Engine {
                         error.message
                     );
                 }
-                q.next_fetch_at = q.next_fetch_at.max(now() + backoff_delay_ms(q.consecutive_failures));
+                q.next_fetch_at = q
+                    .next_fetch_at
+                    .max(now() + backoff_delay_ms(q.consecutive_failures));
                 q.error = Some(error.message);
             }
         }
@@ -965,7 +1033,9 @@ impl Engine {
                     // computed from the old threshold is what left 지금 확인 with
                     // nothing to change. A provider's own block is not ours to
                     // lift and stands until it expires.
-                    tracing::info!("[Usage] profile={key} threshold block lifted by a fresh sample");
+                    tracing::info!(
+                        "[Usage] profile={key} threshold block lifted by a fresh sample"
+                    );
                     q.blocked_until = 0;
                     q.blocked_at = 0;
                     q.blocked_by_threshold = false;
@@ -1225,8 +1295,9 @@ impl Engine {
                     )
                     .max()
                     .or_else(|| reported.and_then(|w| w.resets_at.as_ref().and_then(reset_millis)));
-                let executable_error =
-                    adapter::resolve_native(&c.agent).err().map(|e| e.to_string());
+                let executable_error = adapter::resolve_native(&c.agent)
+                    .err()
+                    .map(|e| e.to_string());
                 let error = executable_error
                     .clone()
                     .or_else(|| q.and_then(|q| q.error.clone()));
@@ -1395,7 +1466,10 @@ impl Engine {
         // session identity) is read even when this Loop is only observing: it
         // is what the monitor bar reports, and turning monitoring back on must
         // not start from a blank slate.
-        if !matches!(g.status.as_str(), "stopped" | "completed" | "paused" | "error") {
+        if !matches!(
+            g.status.as_str(),
+            "stopped" | "completed" | "paused" | "error"
+        ) {
             self.read_events(g, live)?;
         }
         if g.status == "switching_profile" && live.interrupt_at.is_none() {
@@ -1548,7 +1622,11 @@ impl Engine {
                 Some("사용 가능한 프로필을 선택하는 중"),
             );
         }
-        if matches!(g.status.as_str(), "paused" | "stopped" | "completed" | "error") || !g.monitoring {
+        if matches!(
+            g.status.as_str(),
+            "paused" | "stopped" | "completed" | "error"
+        ) || !g.monitoring
+        {
             return Ok(());
         }
         if live.user_interrupt && runtime.pid.is_none() && !helper_alive {
@@ -1751,8 +1829,7 @@ impl Engine {
             // launching an Agent into it.
             let awaiting_sample = self.candidates(g).into_iter().any(|c| {
                 self.quotas.get(&c.key()).is_some_and(|q| {
-                    q.requested_at > q.fetched_at
-                        && now().saturating_sub(q.requested_at) <= 30_000
+                    q.requested_at > q.fetched_at && now().saturating_sub(q.requested_at) <= 30_000
                 })
             });
             if awaiting_sample {
@@ -1815,7 +1892,11 @@ impl Engine {
                     .map(|a| a.started_at)
                     .unwrap_or(0)
             };
-            match if live.initial_start { "ROUND_ROBIN" } else { self.settings.strategy.as_str() } {
+            match if live.initial_start {
+                "ROUND_ROBIN"
+            } else {
+                self.settings.strategy.as_str()
+            } {
                 "PRIORITY" => ranked.sort_by_key(|c| (std::cmp::Reverse(c.priority), last(c))),
                 "ROUND_ROBIN" => {}
                 _ => ranked.sort_by(|a, b| {
@@ -1825,17 +1906,18 @@ impl Engine {
                         .then(last(a).cmp(&last(b)))
                 }),
             }
-            if !live.initial_start && (!live.continuation || (g.handoff_context.is_none() && g.current_agent_session_id.is_none()))
+            if !live.initial_start
+                && (!live.continuation
+                    || (g.handoff_context.is_none() && g.current_agent_session_id.is_none()))
             {
                 ranked.retain(|c| Some(c.agent.clone()) == g.current_provider);
             }
             if live.context_restart {
                 ranked.retain(|c| Some(c.key()) == g.active_profile);
             }
-            let allowed =
-                |c: &Candidate| {
-                    !live.attempted.contains(&c.key()) && self.eligible(c, g.usage_evidence_from)
-                };
+            let allowed = |c: &Candidate| {
+                !live.attempted.contains(&c.key()) && self.eligible(c, g.usage_evidence_from)
+            };
             // Advance from the account that just stopped rather than re-picking
             // the same one: "switch to the next profile" is the whole contract,
             // and cycling the full list is what decides a cooldown is due.
@@ -2135,7 +2217,10 @@ impl Engine {
                             q.blocked_by_threshold = false;
                             q.rate_limited = false;
                         }
-                        g.event("PROFILE_AUTH_ERROR", "Claude 인증 오류 — 다음 Profile을 확인합니다");
+                        g.event(
+                            "PROFILE_AUTH_ERROR",
+                            "Claude 인증 오류 — 다음 Profile을 확인합니다",
+                        );
                     }
                     adapter::LimitEvent::RateLimited => {
                         if let Some(key) = &g.active_profile {

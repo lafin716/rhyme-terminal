@@ -57,13 +57,33 @@ pub fn hook_error_code(payload: &Value) -> Option<String> {
     if payload["hook_event_name"] != "StopFailure" {
         return payload["error"]["code"].as_str().map(str::to_owned);
     }
-    let code = payload["error"].as_str().or_else(|| payload["error"]["code"].as_str()).unwrap_or("unknown");
-    let diagnostic = ["error_details", "last_assistant_message"].iter()
-        .filter_map(|key| payload[*key].as_str()).collect::<Vec<_>>().join(" ").to_lowercase();
-    let exhausted = ["hit your limit", "usage limit", "usage has been exhausted", "insufficient_quota", "credit balance is too low", "quota exceeded"].iter().any(|text| diagnostic.contains(text));
-    Some(if code == "billing_error" || (matches!(code, "rate_limit" | "unknown") && exhausted) {
-        "usage_limit_reached".into()
-    } else { code.to_owned() })
+    let code = payload["error"]
+        .as_str()
+        .or_else(|| payload["error"]["code"].as_str())
+        .unwrap_or("unknown");
+    let diagnostic = ["error_details", "last_assistant_message"]
+        .iter()
+        .filter_map(|key| payload[*key].as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    let exhausted = [
+        "hit your limit",
+        "usage limit",
+        "usage has been exhausted",
+        "insufficient_quota",
+        "credit balance is too low",
+        "quota exceeded",
+    ]
+    .iter()
+    .any(|text| diagnostic.contains(text));
+    Some(
+        if code == "billing_error" || (matches!(code, "rate_limit" | "unknown") && exhausted) {
+            "usage_limit_reached".into()
+        } else {
+            code.to_owned()
+        },
+    )
 }
 
 /// Provider argument handling belongs to the adapter, not the Loop lifecycle.
@@ -330,7 +350,8 @@ fn vendored_native(dir: &Path, agent: &str) -> Option<String> {
                     scope.join(package),
                 ] {
                     for bin in ["bin", "codex"] {
-                        candidates.push(base.join("vendor").join(target).join(bin).join("codex.exe"));
+                        candidates
+                            .push(base.join("vendor").join(target).join(bin).join("codex.exe"));
                     }
                 }
             }
@@ -1099,8 +1120,11 @@ mod tests {
             binary.to_string_lossy(),
         );
         // A different PATH is a different question, never the cached answer.
-        assert!(cached_native(&agent, &std::env::join_paths([&std::env::temp_dir()]).unwrap())
-            .is_none());
+        assert!(cached_native(
+            &agent,
+            &std::env::join_paths([&std::env::temp_dir()]).unwrap()
+        )
+        .is_none());
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
@@ -1113,7 +1137,14 @@ mod tests {
         );
         assert_eq!(
             provider_flags("claude", Some("opus"), Some("xhigh"), Some("acceptEdits")),
-            vec!["--model", "opus", "--effort", "xhigh", "--permission-mode", "acceptEdits"],
+            vec![
+                "--model",
+                "opus",
+                "--effort",
+                "xhigh",
+                "--permission-mode",
+                "acceptEdits"
+            ],
         );
         // Nothing pinned, and an empty string, both add no arguments at all —
         // a bare `--model` with no value would fail the same way.
@@ -1325,7 +1356,9 @@ mod tests {
             let event = fs::read_to_string(path).unwrap();
             assert!(!event.contains("never persist"));
             assert!(!event.contains("private diagnostic"));
-            if kind == "StopFailure" { assert!(event.contains("usage_limit_reached")); }
+            if kind == "StopFailure" {
+                assert!(event.contains("usage_limit_reached"));
+            }
             if kind == "SessionStart" {
                 assert!(
                     child.try_wait().unwrap().is_none(),

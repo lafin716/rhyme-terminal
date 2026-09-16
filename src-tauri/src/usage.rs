@@ -105,7 +105,8 @@ fn windows_are_fresh_at(windows: &[UsageWindow], now: u64, max_age: Duration) ->
         })
 }
 
-const SESSION_USAGE_UNREAD: &str = "Waiting for session usage. Start this profile and send a message";
+const SESSION_USAGE_UNREAD: &str =
+    "Waiting for session usage. Start this profile and send a message";
 
 /// A rolling window whose reset instant has passed has turned over — it has
 /// not gone away. Dropping it left the sample carrying only the account's
@@ -345,7 +346,9 @@ fn parse_session_windows(sample: &Value, now_seconds: u64) -> Result<Vec<UsageWi
     for (key, label) in [("five_hour", "5h"), ("seven_day", "Weekly")] {
         let window = &sample["rate_limits"][key];
         let percent = window["used_percentage"].as_f64().filter(|v| v.is_finite());
-        let reset = window["resets_at"].as_u64().and_then(|s| s.checked_mul(1000));
+        let reset = window["resets_at"]
+            .as_u64()
+            .and_then(|s| s.checked_mul(1000));
         if let (Some(percent), Some(milliseconds)) = (percent, reset) {
             windows.push(UsageWindow {
                 label: label.into(),
@@ -685,7 +688,10 @@ mod tests {
         // Reported with the time actually left, so a caller re-applying it
         // cannot keep pushing its own backoff out by the full original delay.
         let remaining = scheduled.retry_after_ms.unwrap();
-        assert!((29_000..=30_000).contains(&remaining), "remaining={remaining}");
+        assert!(
+            (29_000..=30_000).contains(&remaining),
+            "remaining={remaining}"
+        );
         assert!(slot.lock().await.fetched_at.is_none());
         USAGE_CACHE.get().unwrap().lock().remove(&key);
     }

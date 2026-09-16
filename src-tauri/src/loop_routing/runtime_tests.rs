@@ -63,13 +63,18 @@ fn stub_native_cli() {
         let dir = std::env::temp_dir().join("rhyme-loop-native-stubs");
         fs::create_dir_all(&dir).unwrap();
         for agent in ["claude", "codex"] {
-            let stub = dir.join(format!("{agent}{}", if cfg!(windows) { ".exe" } else { "" }));
+            let stub = dir.join(format!(
+                "{agent}{}",
+                if cfg!(windows) { ".exe" } else { "" }
+            ));
             if !stub.is_file() {
                 fs::write(&stub, b"").unwrap();
             }
         }
         let mut paths = vec![dir];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
     });
 }
@@ -151,8 +156,14 @@ fn daemon_restart_recovers_an_in_flight_session_to_paused_not_idle() {
     // exactly how a Profile switch loses the ability to resume. Paused forces
     // the explicit Resume action, which replays interrupt → handoff → resume.
     assert_eq!(g.status, "paused");
-    assert_eq!(g.current_agent_session_id.as_deref(), Some(session_id.as_str()));
-    assert_eq!(g.attempts.last().unwrap().reference.as_ref().unwrap().id, session_id);
+    assert_eq!(
+        g.current_agent_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        g.attempts.last().unwrap().reference.as_ref().unwrap().id,
+        session_id
+    );
 }
 #[test]
 fn daemon_restart_with_no_session_history_still_lands_on_idle() {
@@ -285,7 +296,10 @@ fn usage_is_only_read_while_a_prompt_is_running() {
     f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
     let targets = f.engine.usage_targets();
     assert_eq!(
-        targets.iter().map(|(key, ..)| key.clone()).collect::<Vec<_>>(),
+        targets
+            .iter()
+            .map(|(key, ..)| key.clone())
+            .collect::<Vec<_>>(),
         vec!["codex:a".to_string()]
     );
     // Monitoring off means no provider traffic at all.
@@ -321,8 +335,11 @@ fn backoff_grows_exponentially_with_jitter_and_caps() {
 #[test]
 fn a_throttled_usage_query_slows_polling_without_disqualifying_the_profile() {
     let mut f = Fixture::new();
-    f.engine
-        .quota("codex:a".into(), Ok(vec![window(42.0, now() + 60_000)]), now());
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(42.0, now() + 60_000)]),
+        now(),
+    );
     let before = now();
     f.engine.quota(
         "codex:a".into(),
@@ -347,7 +364,10 @@ fn a_throttled_usage_query_slows_polling_without_disqualifying_the_profile() {
     // The server's own cooldown is honoured when it is longer than our
     // exponential estimate; a shorter one never buys back a faster retry.
     let retry_in = q.next_fetch_at.saturating_sub(before);
-    assert!((570_000..=630_000).contains(&retry_in), "retry_in={retry_in}");
+    assert!(
+        (570_000..=630_000).contains(&retry_in),
+        "retry_in={retry_in}"
+    );
     assert!(crate::usage::usage_windows_are_fresh(
         &q.windows,
         Duration::from_secs(polling::DEFAULT_INTERVAL_SECS)
@@ -366,7 +386,10 @@ fn repeated_failures_without_retry_after_back_off_the_fetch_cadence_not_just_eli
     f.engine.quota("codex:a".into(), Err(err()), now() + 1);
     let second = f.engine.quotas["codex:a"].next_fetch_at;
     assert_eq!(f.engine.quotas["codex:a"].consecutive_failures, 2);
-    assert!(second > first, "second backoff should be longer: {first} -> {second}");
+    assert!(
+        second > first,
+        "second backoff should be longer: {first} -> {second}"
+    );
 }
 #[test]
 fn exhausted_profile_with_a_known_reset_skips_polling_until_near_it() {
@@ -408,17 +431,26 @@ fn usage_targets_skips_an_exhausted_candidate_until_near_its_reset() {
 fn poll_interval_speeds_up_near_the_limit_and_never_beats_the_provider_floor() {
     let mut f = Fixture::new();
     let base = 120;
-    f.engine
-        .quota("codex:a".into(), Ok(vec![window(50.0, now() + 60_000)]), now());
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(50.0, now() + 60_000)]),
+        now(),
+    );
     assert_eq!(f.engine.poll_interval("codex:a", base), base);
-    f.engine
-        .quota("codex:a".into(), Ok(vec![window(72.0, now() + 60_000)]), now());
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(72.0, now() + 60_000)]),
+        now(),
+    );
     assert_eq!(
         f.engine.poll_interval("codex:a", base),
         polling::HIGH_INTERVAL_SECS
     );
-    f.engine
-        .quota("codex:a".into(), Ok(vec![window(90.0, now() + 60_000)]), now());
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(90.0, now() + 60_000)]),
+        now(),
+    );
     assert_eq!(
         f.engine.poll_interval("codex:a", base),
         polling::CRITICAL_INTERVAL_SECS
@@ -591,7 +623,8 @@ fn a_stored_reset_gates_the_cooldown_and_releases_it_without_a_new_sample() {
     let mut f = Fixture::new();
     let c = candidate("a");
     let reset = now() + 60_000;
-    f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
+    f.engine
+        .quota(c.key(), Ok(vec![window(95.0, reset)]), now());
     // A spent account is blocked until the reset it reported, and that instant
     // is what the wait is computed from.
     assert!(!f.engine.eligible(&c, 0));
@@ -612,7 +645,8 @@ fn a_new_loop_does_not_inherit_the_limit_that_stopped_the_last_one() {
     let mut f = Fixture::new();
     let c = candidate("a");
     let reset = now() + 3_600_000;
-    f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
+    f.engine
+        .quota(c.key(), Ok(vec![window(95.0, reset)]), now());
     assert!(!f.engine.eligible(&c, 0), "the run that recorded it waits");
     // Date that evidence to the previous run, and the Loop to after it.
     let (previous_run, created) = (1, 2);
@@ -642,7 +676,8 @@ fn a_reading_under_a_raised_threshold_lifts_our_own_block_and_ends_the_wait() {
     let mut f = Fixture::new();
     let c = candidate("a");
     let reset = now() + 3_600_000;
-    f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
+    f.engine
+        .quota(c.key(), Ok(vec![window(95.0, reset)]), now());
     assert!(!f.engine.eligible(&c, 0));
     assert!(f.engine.quotas[&c.key()].blocked_by_threshold);
     {
@@ -656,7 +691,9 @@ fn a_reading_under_a_raised_threshold_lifts_our_own_block_and_ends_the_wait() {
         .quota(c.key(), Ok(vec![window(95.0, reset)]), now() + 1);
     assert_eq!(f.engine.quotas[&c.key()].blocked_until, 0);
     assert!(f.engine.eligible(&c, 0));
-    assert!(f.engine.groups[&f.id].resume_at.is_some_and(|at| at <= now()));
+    assert!(f.engine.groups[&f.id]
+        .resume_at
+        .is_some_and(|at| at <= now()));
 }
 /// The provider's own limit is not ours to argue with: a reading that happens
 /// to sit under our threshold does not lift it.
@@ -969,12 +1006,22 @@ fn live_policy_is_scoped_persisted_and_used_by_usage_guard() {
     assert_eq!(response["policy"]["candidates"][1]["shortThreshold"], 70.0);
     assert_eq!(f.engine.settings.short_threshold, 90.0);
     assert!(f.engine.settings.candidates[1].short_threshold.is_none());
-    assert!(f.engine.groups[&other_id].policy.as_ref().unwrap().candidates[1].short_threshold.is_none());
+    assert!(f.engine.groups[&other_id]
+        .policy
+        .as_ref()
+        .unwrap()
+        .candidates[1]
+        .short_threshold
+        .is_none());
     let restored = Engine::open_at(f.engine.root.clone()).unwrap();
     let policy = restored.groups[&f.id].policy.as_ref().unwrap();
     assert_eq!(policy.candidates[1].priority, 5);
     assert!(!policy.auto_resume);
-    assert!(over_limit(policy, &policy.candidates[1], &[window(75.0, now()+60000)]));
+    assert!(over_limit(
+        policy,
+        &policy.candidates[1],
+        &[window(75.0, now() + 60000)]
+    ));
 }
 fn weekly_window(usage: f64) -> UsageWindow {
     UsageWindow {
@@ -997,13 +1044,31 @@ fn each_accounts_own_basis_decides_which_window_switches_it() {
     assert!(!over_limit(&settings, &c, &[weekly.clone()]));
     // A window that is not the basis is still not ignored — once it is fully
     // spent the provider refuses the run whatever the basis says.
-    assert!(over_limit(&settings, &c, &[UsageWindow { percent_used: 100.0, ..weekly.clone() }]));
+    assert!(over_limit(
+        &settings,
+        &c,
+        &[UsageWindow {
+            percent_used: 100.0,
+            ..weekly.clone()
+        }]
+    ));
     c.threshold_basis = ThresholdBasis::Weekly;
     assert!(over_limit(&settings, &c, &[weekly]));
     assert!(!over_limit(&settings, &c, &[short.clone()]));
-    assert!(over_limit(&settings, &c, &[UsageWindow { percent_used: 100.0, ..short }]));
+    assert!(over_limit(
+        &settings,
+        &c,
+        &[UsageWindow {
+            percent_used: 100.0,
+            ..short
+        }]
+    ));
     // Per-account: the next profile keeps deciding on its own window.
-    assert!(!over_limit(&settings, &candidate("b"), &[weekly_window(95.0)]));
+    assert!(!over_limit(
+        &settings,
+        &candidate("b"),
+        &[weekly_window(95.0)]
+    ));
     // A per-profile threshold override still applies, to the basis window.
     c.weekly_threshold = Some(30.0);
     assert!(over_limit(&settings, &c, &[weekly_window(31.0)]));
@@ -1107,10 +1172,19 @@ fn an_accounts_basis_is_live_editable_per_loop_and_locked_while_it_is_active() {
         .request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:b","thresholdBasis":"weekly"}}}))
         .unwrap();
     let g = &f.engine.groups[&f.id];
-    assert_eq!(g.policy.as_ref().unwrap().candidates[1].threshold_basis, ThresholdBasis::Weekly);
+    assert_eq!(
+        g.policy.as_ref().unwrap().candidates[1].threshold_basis,
+        ThresholdBasis::Weekly
+    );
     // Scoped: neither the global defaults nor the other account moved.
-    assert_eq!(f.engine.settings.candidates[1].threshold_basis, ThresholdBasis::Short);
-    assert_eq!(g.policy.as_ref().unwrap().candidates[0].threshold_basis, ThresholdBasis::Short);
+    assert_eq!(
+        f.engine.settings.candidates[1].threshold_basis,
+        ThresholdBasis::Short
+    );
+    assert_eq!(
+        g.policy.as_ref().unwrap().candidates[0].threshold_basis,
+        ThresholdBasis::Short
+    );
     // The card now reports the weekly window, over its 90% threshold.
     let profile = g.profiles.iter().find(|p| p.key == "codex:b").unwrap();
     assert_eq!(profile.threshold_kind, "weekly");
@@ -1151,9 +1225,15 @@ fn active_threshold_changes_are_rejected_atomically_even_without_a_runtime_snaps
     for field in ["shortThreshold", "weeklyThreshold"] {
         let mut patch = json!({"profile":{"key":"codex:a"},"strategy":"PRIORITY"});
         patch["profile"][field] = json!(95);
-        let result = f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":patch}));
+        let result = f.engine.request(
+            &f.state,
+            json!({"op":"update_policy","id":f.id,"patch":patch}),
+        );
         assert!(result.unwrap_err().to_string().contains("활성 계정"));
-        assert_eq!(f.engine.groups[&f.id].policy.as_ref().unwrap().strategy, "SMART");
+        assert_eq!(
+            f.engine.groups[&f.id].policy.as_ref().unwrap().strategy,
+            "SMART"
+        );
     }
     // A profile which became active after the client opened its editor is also locked.
     f.engine.groups.get_mut(&f.id).unwrap().active_profile = Some("codex:b".into());
@@ -1167,16 +1247,35 @@ fn a_loop_without_an_explicit_participant_list_still_accepts_profile_edits() {
     // field existed used to have every per-profile edit refused.
     f.engine.groups.get_mut(&f.id).unwrap().participants.clear();
     f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:b","shortThreshold":70}}})).unwrap();
-    assert_eq!(f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[1].short_threshold, Some(70.0));
+    assert_eq!(
+        f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[1].short_threshold,
+        Some(70.0)
+    );
     // A key that is not a candidate at all is still refused.
     assert!(f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":{"profile":{"key":"codex:missing","shortThreshold":70}}})).is_err());
 }
 #[test]
 fn live_policy_rejects_invalid_or_nonparticipant_changes_without_mutation() {
     let mut f = Fixture::new();
-    for patch in [json!({"profile":{"key":"codex:b","shortThreshold":101}}), json!({"shortThreshold":95}), json!({"profile":{"key":"codex:missing","priority":1}}), json!({"pollingIntervalSeconds":0}), json!({"pollingIntervalSeconds":30})] {
-        assert!(f.engine.request(&f.state, json!({"op":"update_policy","id":f.id,"patch":patch})).is_err());
-        assert!(f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[1].short_threshold.is_none());
+    for patch in [
+        json!({"profile":{"key":"codex:b","shortThreshold":101}}),
+        json!({"shortThreshold":95}),
+        json!({"profile":{"key":"codex:missing","priority":1}}),
+        json!({"pollingIntervalSeconds":0}),
+        json!({"pollingIntervalSeconds":30}),
+    ] {
+        assert!(f
+            .engine
+            .request(
+                &f.state,
+                json!({"op":"update_policy","id":f.id,"patch":patch})
+            )
+            .is_err());
+        assert!(
+            f.engine.groups[&f.id].policy.as_ref().unwrap().candidates[1]
+                .short_threshold
+                .is_none()
+        );
     }
 }
 #[test]
@@ -1197,10 +1296,19 @@ fn claude_running(f: &mut Fixture) {
 }
 fn claude_running_with(f: &mut Fixture, auth_method: &str) {
     running(f);
-    for c in &mut f.engine.settings.candidates { c.agent = "claude".into(); c.auth_method = Some(auth_method.into()); }
+    for c in &mut f.engine.settings.candidates {
+        c.agent = "claude".into();
+        c.auth_method = Some(auth_method.into());
+    }
     let g = f.engine.groups.get_mut(&f.id).unwrap();
     g.policy = Some(f.engine.settings.clone());
-    g.participants = f.engine.settings.candidates.iter().map(Candidate::key).collect();
+    g.participants = f
+        .engine
+        .settings
+        .candidates
+        .iter()
+        .map(Candidate::key)
+        .collect();
     g.active_profile = Some("claude:a".into());
     g.current_provider = Some("claude".into());
     f.agent(Some("claude"));
@@ -1214,19 +1322,31 @@ fn an_account_with_no_readable_usage_still_runs_until_a_real_limit_arrives() {
     // numbers only appear once it is running. That is a normal startup state,
     // not a fault, and it is no longer special-cased: *any* account with no
     // reading keeps working until something says otherwise.
-    f.engine.quota("claude:a".into(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
+    f.engine.quota(
+        "claude:a".into(),
+        Err("Waiting for session usage. Start this profile and send a message".into()),
+        now(),
+    );
     let c = f.engine.settings.candidates[0].clone();
     assert!(f.engine.eligible(&c, 0));
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "running");
     assert!(f.engine.live[&f.id].interrupt_at.is_none());
     // A first real reading below the limit changes nothing.
-    f.engine.quota("claude:a".into(), Ok(vec![window(89.0, now()+60000)]), now());
+    f.engine.quota(
+        "claude:a".into(),
+        Ok(vec![window(89.0, now() + 60000)]),
+        now(),
+    );
     f.engine.tick(&f.state).unwrap();
     assert!(!f.engine.groups[&f.id].profiles[0].usage_pending);
     assert_eq!(f.engine.groups[&f.id].status, "running");
     // Reaching it switches.
-    f.engine.quota("claude:a".into(), Ok(vec![window(90.0, now()+60000)]), now());
+    f.engine.quota(
+        "claude:a".into(),
+        Ok(vec![window(90.0, now() + 60000)]),
+        now(),
+    );
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
     assert!(f.engine.live[&f.id].interrupt_at.is_some());
@@ -1236,10 +1356,18 @@ fn a_failed_reading_never_interrupts_a_healthy_run() {
     let mut f = Fixture::new();
     claude_running_with(&mut f, "oauth");
     f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
-    f.engine.quota("claude:a".into(), Ok(vec![window(20.0, now() + 3_600_000)]), now());
+    f.engine.quota(
+        "claude:a".into(),
+        Ok(vec![window(20.0, now() + 3_600_000)]),
+        now(),
+    );
     // One dropped or throttled status query used to take the running account
     // down, and then the account it switched to for the same reason.
-    f.engine.quota("claude:a".into(), Err("Login expired. Sign in again through the CLI".into()), now() + 1);
+    f.engine.quota(
+        "claude:a".into(),
+        Err("Login expired. Sign in again through the CLI".into()),
+        now() + 1,
+    );
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "running");
     assert!(f.engine.live[&f.id].interrupt_at.is_none());
@@ -1247,7 +1375,10 @@ fn a_failed_reading_never_interrupts_a_healthy_run() {
     let g = &f.engine.groups[&f.id];
     let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
     assert_eq!(p.usage, Some(20.0));
-    assert_eq!(p.error.as_deref(), Some("Login expired. Sign in again through the CLI"));
+    assert_eq!(
+        p.error.as_deref(),
+        Some("Login expired. Sign in again through the CLI")
+    );
     assert!(!p.usage_pending);
 }
 #[test]
@@ -1298,14 +1429,24 @@ fn a_throttled_refresh_does_not_turn_a_healthy_profile_into_an_error_card() {
 }
 #[test]
 fn claude_stop_failure_switches_even_when_usage_cannot_be_read() {
-    let mut f = Fixture::new(); claude_running(&mut f);
-    f.engine.quota("claude:a".into(), Err("Waiting for session usage".into()), now());
+    let mut f = Fixture::new();
+    claude_running(&mut f);
+    f.engine.quota(
+        "claude:a".into(),
+        Err("Waiting for session usage".into()),
+        now(),
+    );
     let mut g = f.engine.groups[&f.id].clone();
     g.pending_work = true;
     let attempt = Uuid::new_v4().to_string();
     g.attempts.push(serde_json::from_value(json!({"id":attempt,"sessionId":f.sid(),"agent":"claude","profileId":"a","label":"A","status":"running","startedAt":now(),"endedAt":null,"reason":null})).unwrap());
-    let dir = f.engine.dir(&g).join(&attempt).join("events"); fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("1.json"), json!({"kind":"StopFailure","errorCode":"usage_limit_reached"}).to_string()).unwrap();
+    let dir = f.engine.dir(&g).join(&attempt).join("events");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("1.json"),
+        json!({"kind":"StopFailure","errorCode":"usage_limit_reached"}).to_string(),
+    )
+    .unwrap();
     f.engine.groups.insert(f.id, g);
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
@@ -1318,9 +1459,15 @@ fn claude_stop_failure_switches_even_when_usage_cannot_be_read() {
 fn claude_failure_normalization_does_not_scan_regular_conversations() {
     let payload = json!({"hook_event_name":"StopFailure","error":"rate_limit","last_assistant_message":"You've hit your limit"});
     let code = adapter::hook_error_code(&payload).unwrap();
-    assert_eq!(adapter::limit_event(&json!({"errorCode":code})), Some(adapter::LimitEvent::UsageLimitReached));
+    assert_eq!(
+        adapter::limit_event(&json!({"errorCode":code})),
+        Some(adapter::LimitEvent::UsageLimitReached)
+    );
     assert_eq!(adapter::hook_error_code(&json!({"hook_event_name":"StopFailure","error":"rate_limit","last_assistant_message":"API Error: Rate limit reached"})).as_deref(), Some("rate_limit"));
-    assert!(adapter::hook_error_code(&json!({"hook_event_name":"Stop","last_assistant_message":"Tests assert quota exceeded"})).is_none());
+    assert!(adapter::hook_error_code(
+        &json!({"hook_event_name":"Stop","last_assistant_message":"Tests assert quota exceeded"})
+    )
+    .is_none());
 }
 
 /// Drives one launch with two real profile directories and returns the
@@ -1330,11 +1477,16 @@ fn launched_position(spend_first: bool) -> usize {
     let mut f = Fixture::new();
     struct TestProfiles(Vec<PathBuf>);
     impl Drop for TestProfiles {
-        fn drop(&mut self) { for dir in &self.0 { let _ = fs::remove_dir_all(dir); } }
+        fn drop(&mut self) {
+            for dir in &self.0 {
+                let _ = fs::remove_dir_all(dir);
+            }
+        }
     }
     let mut created = TestProfiles(vec![]);
     for c in &mut f.engine.settings.candidates {
-        c.agent = "claude".into(); c.auth_method = Some("setup-token".into());
+        c.agent = "claude".into();
+        c.auth_method = Some("setup-token".into());
         c.profile_id = Some(Uuid::new_v4().to_string());
         let dir = profile_dir(c).unwrap();
         fs::create_dir_all(dir.parent().unwrap()).unwrap();
@@ -1344,30 +1496,76 @@ fn launched_position(spend_first: bool) -> usize {
         fs::write(dir.join("oauth-token.txt"), "test-only-placeholder").unwrap();
         c.config_dir = Some(dir.to_string_lossy().into_owned());
     }
-    let order: Vec<String> = f.engine.settings.candidates.iter().map(Candidate::key).collect();
+    let order: Vec<String> = f
+        .engine
+        .settings
+        .candidates
+        .iter()
+        .map(Candidate::key)
+        .collect();
     let policy = f.engine.settings.clone();
     let g = f.engine.groups.get_mut(&f.id).unwrap();
-    g.policy = Some(policy.clone()); g.participants = order.clone();
-    g.status = LoopStatus::Preparing; g.current_provider = Some("claude".into());
+    g.policy = Some(policy.clone());
+    g.participants = order.clone();
+    g.status = LoopStatus::Preparing;
+    g.current_provider = Some("claude".into());
     let pid = std::process::id();
-    f.state.manager.runtime.lock().processes.push(ProcessEntry { pid, parent_pid: None, image_name: "bridge".into(), command_args: vec![], started_at: 1 });
+    f.state.manager.runtime.lock().processes.push(ProcessEntry {
+        pid,
+        parent_pid: None,
+        image_name: "bridge".into(),
+        command_args: vec![],
+        started_at: 1,
+    });
     let request = Uuid::new_v4().to_string();
     let live = f.engine.live.get_mut(&f.id).unwrap();
     live.initial_start = true;
-    live.dispatch = Some(Dispatch { id: request.clone(), pid, provider: "claude".into(), args: vec![], cwd: f.engine.root.to_string_lossy().into_owned() });
+    live.dispatch = Some(Dispatch {
+        id: request.clone(),
+        pid,
+        provider: "claude".into(),
+        args: vec![],
+        cwd: f.engine.root.to_string_lossy().into_owned(),
+    });
     live.helper_pid = Some(pid);
     if spend_first {
-        f.engine.quota(order[0].clone(), Ok(vec![window(91.0, now() + 60000)]), now());
+        f.engine.quota(
+            order[0].clone(),
+            Ok(vec![window(91.0, now() + 60000)]),
+            now(),
+        );
     }
     // The other account has no usable reading, which is the normal state of one
     // that has never run: it must not stand in the way of starting.
-    f.engine.quota(order[1].clone(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
+    f.engine.quota(
+        order[1].clone(),
+        Err("Waiting for session usage. Start this profile and send a message".into()),
+        now(),
+    );
     f.engine.tick(&f.state).unwrap();
     let g = &f.engine.groups[&f.id];
-    assert_eq!(g.attempts.len(), 1, "status={:?} reason={:?} events={:?}", g.status, g.reason, g.events);
-    assert!(f.engine.dir(g).join(format!("response-{request}.json")).is_file());
+    assert_eq!(
+        g.attempts.len(),
+        1,
+        "status={:?} reason={:?} events={:?}",
+        g.status,
+        g.reason,
+        g.events
+    );
+    assert!(f
+        .engine
+        .dir(g)
+        .join(format!("response-{request}.json"))
+        .is_file());
     // No native Agent is spawned by this isolated dispatch test.
-    assert!(f.state.manager.runtime.lock().get_state(f.sid()).pid.is_none());
+    assert!(f
+        .state
+        .manager
+        .runtime
+        .lock()
+        .get_state(f.sid())
+        .pid
+        .is_none());
     let chosen = g.active_profile.clone().unwrap();
     order.iter().position(|key| *key == chosen).unwrap()
 }
@@ -1385,18 +1583,28 @@ fn monitoring_can_be_switched_off_and_back_on_from_the_terminal() {
     running(&mut f);
     f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
     f.engine
-        .request(&f.state, json!({"op":"set_monitoring","id":f.id,"enabled":false}))
+        .request(
+            &f.state,
+            json!({"op":"set_monitoring","id":f.id,"enabled":false}),
+        )
         .unwrap();
     // Off: no provider traffic, and a spent account is left alone rather than
     // being interrupted behind the user's back.
     assert!(f.engine.usage_targets().is_empty());
-    f.engine.quota("codex:a".into(), Ok(vec![window(95.0, now() + 60_000)]), now());
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(95.0, now() + 60_000)]),
+        now(),
+    );
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "running");
     assert!(f.engine.live[&f.id].interrupt_at.is_none());
     // Back on: the same evidence is acted on immediately.
     f.engine
-        .request(&f.state, json!({"op":"set_monitoring","id":f.id,"enabled":true}))
+        .request(
+            &f.state,
+            json!({"op":"set_monitoring","id":f.id,"enabled":true}),
+        )
         .unwrap();
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
