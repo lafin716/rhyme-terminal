@@ -329,6 +329,15 @@ pub struct Group {
     pub updated_at: u64,
     #[serde(default)]
     pub pending_work: bool,
+    /// Usage evidence recorded before this instant belongs to an earlier run,
+    /// not to this Loop. A Loop created after one that stopped at a limit
+    /// starts by re-checking rather than by inheriting the block that stopped
+    /// its predecessor: the old numbers are still shown on the cards, they
+    /// just do not decide anything until this Loop reads them again — which
+    /// happens while its own first prompt runs. Zero for Loops saved before
+    /// the field existed, which honours every stored block exactly as before.
+    #[serde(default)]
+    pub usage_evidence_from: u64,
 }
 impl Group {
     pub fn state(&mut self, state: LoopStatus, reason: Option<&str>) {
@@ -459,11 +468,18 @@ pub struct ProfileSnapshot {
     pub status: ProfileStatus,
     pub usage: Option<f64>,
     pub threshold: f64,
-    /// Which window `usage`/`threshold` above were read from — the basis
-    /// window in the ordinary case, the other one when that one is the closer
-    /// of the two to blocking this profile.
+    /// Which window `usage`/`threshold` above were read from: this account's
+    /// own basis window, and only the other one if the basis window is missing
+    /// from the sample entirely. It does not change because the other window
+    /// moved — see `blocking_kind` for that.
     #[serde(default = "default_threshold_kind")]
     pub threshold_kind: String,
+    /// The window nearest to stopping this profile, when that is *not* the one
+    /// `threshold_kind` reports and it is close enough to matter. This is the
+    /// reason a card can read well under its own threshold and still be
+    /// `NearLimit` or `Exhausted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_kind: Option<String>,
     pub remaining: Option<f64>,
     pub reset_at: Option<u64>,
     pub error: Option<String>,

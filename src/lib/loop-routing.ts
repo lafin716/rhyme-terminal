@@ -94,8 +94,18 @@ export interface LoopProfileSnapshot {
     | 'ERROR';
   usage: number | null;
   threshold: number;
-  /** Which window `usage`/`threshold` were read from — see `loopWindowLabel`. */
+  /**
+   * Which window `usage`/`threshold` were read from — see `loopWindowLabel`.
+   * This is the account's own basis window and stays put; it does not follow
+   * whichever window happens to be closest to its limit.
+   */
   thresholdKind?: string;
+  /**
+   * The window nearest to stopping this profile when that is not the one
+   * `thresholdKind` reports. Why a card reading well under its own threshold
+   * can still be `NEAR_LIMIT` or `EXHAUSTED`.
+   */
+  blockingKind?: string | null;
   remaining: number | null;
   resetAt: number | null;
   error: string | null;

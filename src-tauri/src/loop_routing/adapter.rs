@@ -1,13 +1,17 @@
 //! Interactive CLI adapter. Hook settings are invocation-scoped; account auth
 //! stays in the selected profile. Resume imports only one verified conversation.
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    ffi::{OsStr, OsString},
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
+    sync::LazyLock,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,11 +249,31 @@ fn encoded_hook_script() -> String {
     )
 }
 
+/// Locate the provider's own executable.
+///
+/// PATH order decides between installations, but inside a single PATH entry a
+/// real native binary always beats a launcher script: an npm install of either
+/// CLI puts a `.cmd` shim on PATH next to a `node_modules` tree that holds the
+/// actual `.exe`, and running the shim means running it through `cmd.exe`,
+/// which re-quotes every argument — including the prompt we pass as argv. So
+/// the whole PATH is swept for native binaries first and only then for shims.
 pub fn resolve_native(agent: &str) -> Result<String> {
-    let paths: Vec<_> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    for path in &paths {
-        let binary = path.join(if cfg!(windows) {
+    resolve_native_in(agent, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+fn resolve_native_in(agent: &str, path: &OsStr) -> Result<String> {
+    if let Some(hit) = cached_native(agent, path) {
+        return hit;
+    }
+    let result = scan_native(agent, path);
+    remember_native(agent, path, &result);
+    result
+}
+
+fn scan_native(agent: &str, path: &OsStr) -> Result<String> {
+    let paths: Vec<_> = std::env::split_paths(path).collect();
+    for dir in &paths {
+        let binary = dir.join(if cfg!(windows) {
             format!("{agent}.exe")
         } else {
             agent.to_owned()
@@ -257,27 +281,110 @@ pub fn resolve_native(agent: &str) -> Result<String> {
         if binary.is_file() {
             return Ok(binary.to_string_lossy().into_owned());
         }
-        if cfg!(windows) && agent == "codex" {
+        #[cfg(windows)]
+        if let Some(binary) = vendored_native(dir, agent) {
+            return Ok(binary);
+        }
+    }
+    #[cfg(windows)]
+    for dir in &paths {
+        for extension in ["cmd", "bat"] {
+            let shim = dir.join(format!("{agent}.{extension}"));
+            if shim.is_file() {
+                return Ok(shim.to_string_lossy().into_owned());
+            }
+        }
+    }
+    bail!("Native {agent} executable not found; install a supported native CLI")
+}
+
+/// Native binaries that ship inside an npm package, where PATH itself carries
+/// only the launcher script. Each provider lays these out differently, and npm
+/// may or may not have hoisted the per-platform package to the outer scope.
+#[cfg(windows)]
+fn vendored_native(dir: &Path, agent: &str) -> Option<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    match agent {
+        "claude" => {
+            let scope = dir.join("node_modules/@anthropic-ai");
+            candidates.push(scope.join("claude-code/bin/claude.exe"));
+            for arch in ["x64", "arm64"] {
+                let package = format!("claude-code-win32-{arch}");
+                candidates.push(
+                    scope
+                        .join("claude-code/node_modules/@anthropic-ai")
+                        .join(&package)
+                        .join("claude.exe"),
+                );
+                candidates.push(scope.join(&package).join("claude.exe"));
+            }
+        }
+        "codex" => {
+            let scope = dir.join("node_modules/@openai");
             for (package, target) in [
                 ("codex-win32-x64", "x86_64-pc-windows-msvc"),
                 ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
             ] {
                 for base in [
-                    path.join("node_modules/@openai/codex/node_modules/@openai")
-                        .join(package),
-                    path.join("node_modules/@openai").join(package),
+                    scope.join("codex/node_modules/@openai").join(package),
+                    scope.join(package),
                 ] {
-                    for dir in ["bin", "codex"] {
-                        let binary = base.join("vendor").join(target).join(dir).join("codex.exe");
-                        if binary.is_file() {
-                            return Ok(binary.to_string_lossy().into_owned());
-                        }
+                    for bin in ["bin", "codex"] {
+                        candidates.push(base.join("vendor").join(target).join(bin).join("codex.exe"));
                     }
                 }
             }
         }
+        _ => {}
     }
-    bail!("Native {agent} executable not found; install a supported native CLI")
+    candidates
+        .into_iter()
+        .find(|binary| binary.is_file())
+        .map(|binary| binary.to_string_lossy().into_owned())
+}
+
+/// A resolution that held, remembered against the PATH it was made under.
+struct ResolvedNative {
+    path: OsString,
+    at: Instant,
+    result: Result<String, String>,
+}
+/// The daemon's one-second Loop tick resolves every candidate's CLI, and a miss
+/// walks the entire PATH — plus each npm layout — without ever short-circuiting.
+/// That scan runs under the same engine lock terminal writes take, so an
+/// unresolvable CLI showed up as visibly laggy typing in the Loop terminal.
+/// Cache per PATH so a changed PATH re-resolves on its own, revalidate a hit
+/// with a single stat, and retry a miss soon enough that installing the CLI is
+/// picked up without restarting the daemon.
+static RESOLVED_NATIVE: LazyLock<Mutex<HashMap<String, ResolvedNative>>> =
+    LazyLock::new(Default::default);
+const RESOLVE_MISS_TTL: Duration = Duration::from_secs(10);
+
+fn cached_native(agent: &str, path: &OsStr) -> Option<Result<String>> {
+    let entries = RESOLVED_NATIVE.lock();
+    let entry = entries.get(agent)?;
+    if entry.path.as_os_str() != path {
+        return None;
+    }
+    match &entry.result {
+        Ok(binary) if Path::new(binary).is_file() => Some(Ok(binary.clone())),
+        Err(error) if entry.at.elapsed() < RESOLVE_MISS_TTL => Some(Err(anyhow!(error.clone()))),
+        _ => None,
+    }
+}
+
+fn remember_native(agent: &str, path: &OsStr, result: &Result<String>) {
+    RESOLVED_NATIVE.lock().insert(
+        agent.to_owned(),
+        ResolvedNative {
+            path: path.to_owned(),
+            at: Instant::now(),
+            result: match result {
+                Ok(binary) => Ok(binary.clone()),
+                Err(error) => Err(error.to_string()),
+            },
+        },
+    );
 }
 
 fn records(reference: &SessionReference) -> Result<Vec<Value>> {
@@ -926,6 +1033,76 @@ fn sanitize_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// An npm install puts only a `.cmd` shim on PATH; the CLI itself lives in
+    /// the `node_modules` tree beside it. Missing it left every profile
+    /// reporting "install a supported native CLI", and the failing scan re-ran
+    /// on every one-second tick.
+    #[cfg(windows)]
+    #[test]
+    fn an_npm_vendored_binary_outranks_the_shim_that_sits_on_path() {
+        let root = std::env::temp_dir().join(format!("winmux-resolve-{}", uuid::Uuid::new_v4()));
+        let vendored = root.join("with-exe");
+        let shim_only = root.join("shim-only");
+        let bin = vendored.join("node_modules/@anthropic-ai/claude-code/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&shim_only).unwrap();
+        fs::write(bin.join("claude.exe"), b"").unwrap();
+        fs::write(vendored.join("claude.cmd"), b"").unwrap();
+        fs::write(shim_only.join("claude.cmd"), b"").unwrap();
+        let path = |dirs: &[&PathBuf]| std::env::join_paths(dirs.iter().copied()).unwrap();
+        // `join` mixes separators; only the file identity matters.
+        let same = |found: String, expected: &Path| {
+            assert_eq!(
+                fs::canonicalize(found).unwrap(),
+                fs::canonicalize(expected).unwrap()
+            );
+        };
+        // A native binary wins over a shim in the same directory, and over one
+        // that PATH reaches first: the shim would have to run through cmd.exe,
+        // which re-quotes every argument we pass, the prompt included.
+        same(
+            scan_native("claude", &path(&[&shim_only, &vendored])).unwrap(),
+            &bin.join("claude.exe"),
+        );
+        // A shim is still better than refusing to launch at all.
+        same(
+            scan_native("claude", &path(&[&shim_only])).unwrap(),
+            &shim_only.join("claude.cmd"),
+        );
+        assert!(scan_native("claude", &path(&[&root])).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The scan is far too slow to repeat under the engine lock that terminal
+    /// writes take, so it is remembered — but only for the PATH that produced
+    /// it, and a miss only briefly.
+    #[test]
+    fn resolution_is_cached_per_path_and_a_miss_expires() {
+        let root = std::env::temp_dir().join(format!("winmux-cache-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let agent = format!("winmux-absent-{}", uuid::Uuid::new_v4());
+        let path = std::env::join_paths([&root]).unwrap();
+        assert!(resolve_native_in(&agent, &path).is_err());
+        assert!(cached_native(&agent, &path).is_some());
+        // Installing the CLI must be picked up without restarting the daemon.
+        RESOLVED_NATIVE.lock().get_mut(&agent).unwrap().at =
+            Instant::now() - RESOLVE_MISS_TTL - Duration::from_secs(1);
+        assert!(cached_native(&agent, &path).is_none());
+        let binary = root.join(if cfg!(windows) {
+            format!("{agent}.exe")
+        } else {
+            agent.clone()
+        });
+        fs::write(&binary, b"").unwrap();
+        assert_eq!(
+            resolve_native_in(&agent, &path).unwrap(),
+            binary.to_string_lossy(),
+        );
+        // A different PATH is a different question, never the cached answer.
+        assert!(cached_native(&agent, &std::env::join_paths([&std::env::temp_dir()]).unwrap())
+            .is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
     #[test]
     fn only_flags_the_target_cli_accepts_reach_the_launch() {
         // `codex --help` lists `-m/--model` but no `--effort` and no `--mode`;

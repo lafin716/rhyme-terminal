@@ -4,7 +4,7 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue';
 import { Icon } from '@iconify/vue';
 import TerminalView from './Terminal.vue';
 import { useLoopRouting } from '../composables/useLoopRouting';
-import { LOOP_THRESHOLD_BASES, loopBasisLabel, loopStatusLabel, loopWindowLabel, type LoopGroup, type LoopPolicyPatch, type LoopThresholdBasis } from '../lib/loop-routing';
+import { LOOP_THRESHOLD_BASES, loopBasisLabel, loopStatusLabel, loopWindowLabel, type LoopGroup, type LoopPolicyPatch, type LoopProfileSnapshot, type LoopThresholdBasis } from '../lib/loop-routing';
 const props = defineProps<{ group: LoopGroup; active: boolean }>();
 const loops = useLoopRouting();
 const expanded = ref(false);
@@ -131,6 +131,8 @@ function revertProfile(key: string) {
   draftErrors[key] = '';
 }
 const percent = (value: number | null | undefined) => value == null ? '확인 전' : `${Math.round(value)}%`;
+/** The reading behind `blockingKind`, so the note names a number and not just a window. */
+const blockingUsage = (p: LoopProfileSnapshot) => p.windows?.find(w => w.kind === p.blockingKind)?.percentUsed;
 async function control(op: 'pause' | 'resume' | 'next' | 'stop' | 'complete') {
   busy.value = true; error.value = '';
   try { await loops.control(op, props.group.id); } catch (e) { error.value = String(e); }
@@ -229,6 +231,7 @@ async function checkUsageNow() {
           </div>
           <p v-if="draftErrors[p.key]" class="profile-error" role="alert">{{ draftErrors[p.key] }}</p>
         </div>
+        <p v-if="p.blockingKind" class="blocking-note" role="status"><Icon icon="lucide:triangle-alert" />{{ loopWindowLabel(p.blockingKind) }} 사용량 {{ percent(blockingUsage(p)) }} — 이 창이 먼저 한도에 닿습니다</p>
         <p v-if="p.usagePending" class="usage-pending">Claude 실행 후 사용량 확인 · 실제 한도 오류 감지 시 자동 전환</p>
         <p v-if="p.error" class="profile-error">{{ p.error }}</p>
       </article></div>
@@ -280,6 +283,7 @@ async function checkUsageNow() {
 .session-policy input[type=checkbox] { accent-color: var(--accent); }
 input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .usage-pending { margin: 10px 0 0; font-size: 11px; color: var(--text-secondary, #aeb3ba); }
+.blocking-note { display: flex; align-items: center; gap: 5px; margin: 10px 0 0; font-size: 11px; color: #eac47e; }
 
 /*
  * The monitor bar answers three questions the status word alone cannot: is

@@ -73,6 +73,14 @@ struct Quota {
     /// Not usable before this instant: a provider-reported limit, or the reset
     /// of whichever window our own sample found spent.
     blocked_until: u64,
+    /// When `blocked_until` was last written. A Loop only acts on a block
+    /// recorded during its own run — see [`Group::usage_evidence_from`].
+    blocked_at: u64,
+    /// Whether the block above is our own threshold decision rather than
+    /// something the provider reported. Ours is lifted by a newer sample that
+    /// reads under the limit — the window turned over, or the threshold was
+    /// raised; a provider's stands until it expires.
+    blocked_by_threshold: bool,
     rate_limited: bool,
     windows: Vec<UsageWindow>,
     error: Option<String>,
@@ -450,11 +458,27 @@ impl Engine {
                     json!({"id":id,"name":name,"workspaceId":string(&r,"workspaceId")?,"workspaceIndex":r["workspaceIndex"].as_u64().unwrap_or(1),"cwd":cwd,"status":"idle","activeSessionId":null,"reason":null,"attempts":[],"updatedAt":now(),"participants":participants}),
                 )?;
                 g.policy = Some(self.settings.clone());
+                // A new Loop is a fresh start, not a continuation of whatever
+                // stopped the last one: the limits and blocks recorded before
+                // this instant stay on the cards as history but no longer hold
+                // any profile back. Whether an account is actually spent is
+                // re-read while this Loop's own first prompt runs.
+                g.usage_evidence_from = now();
                 self.terminal(state, &mut g)?;
                 let first = self.candidates(&g).into_iter().next().context("No active profile")?;
                 g.current_provider = Some(first.agent.clone());
                 g.state(LoopStatus::Resuming, Some("첫 번째 활성 프로필의 사용량을 확인하고 Agent를 실행합니다"));
                 g.event("CREATED", &format!("{} 자동 실행을 준비합니다", first.label));
+                if self
+                    .candidates(&g)
+                    .iter()
+                    .any(|c| self.held_back(c, 0) && !self.held_back(c, g.usage_evidence_from))
+                {
+                    g.event(
+                        "USAGE_EVIDENCE_RESET",
+                        "이전 실행에서 기록된 사용량 한도는 무시하고 시작합니다. 한도는 프롬프트가 실행될 때 다시 확인합니다",
+                    );
+                }
                 self.groups.insert(id, g.clone());
                 self.live.insert(id, Live { initial_start: true, ..Live::default() });
                 self.save()?;
@@ -916,8 +940,10 @@ impl Engine {
                         .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
                         .max()
                     {
-                        if reset_at > now() {
-                            q.blocked_until = q.blocked_until.max(reset_at);
+                        if reset_at > q.blocked_until && reset_at > now() {
+                            q.blocked_until = reset_at;
+                            q.blocked_at = now();
+                            q.blocked_by_threshold = true;
                         }
                         let cap = now() + polling::MAX_RESET_SKIP_SECS * 1000;
                         let target = reset_at
@@ -932,6 +958,17 @@ impl Engine {
                             q.next_fetch_at = target;
                         }
                     }
+                } else if q.blocked_by_threshold && q.blocked_until > now() {
+                    // We put this account on ice ourselves and the reading just
+                    // taken is under the limit — the window turned over, or the
+                    // threshold was raised since. Holding it to a reset instant
+                    // computed from the old threshold is what left 지금 확인 with
+                    // nothing to change. A provider's own block is not ours to
+                    // lift and stands until it expires.
+                    tracing::info!("[Usage] profile={key} threshold block lifted by a fresh sample");
+                    q.blocked_until = 0;
+                    q.blocked_at = 0;
+                    q.blocked_by_threshold = false;
                 }
             }
             if q.consecutive_failures == 0 {
@@ -951,6 +988,7 @@ impl Engine {
             q.windows.iter().map(|w| w.percent_used).collect::<Vec<_>>(),
             q.error.clone(),
         );
+        let read = q.error.is_none();
         if previous != current {
             let usage = q
                 .windows
@@ -978,6 +1016,20 @@ impl Engine {
                 g.event("USAGE_UPDATED", &message);
             }
         }
+        // A reading is the only thing that can end a cooldown early, and 지금 확인
+        // is how a user asks for one. Re-decide the Loops waiting on this
+        // account the moment it lands rather than leaving them to sit out a
+        // countdown computed from the numbers we have just replaced. `step`
+        // holds off while any sample is still in flight and re-arms the wait if
+        // the account really is still spent, so an early wake costs one pass.
+        if read {
+            for g in self.groups.values_mut().filter(|g| {
+                g.status == "waiting_for_usage_reset"
+                    && (g.participants.is_empty() || g.participants.contains(&key))
+            }) {
+                g.resume_at = Some(now());
+            }
+        }
     }
     /// [`over_limit`] restricted to the windows that have not turned over since
     /// the sample was taken. A 5-hour window recorded at 100% whose reset is
@@ -995,6 +1047,21 @@ impl Engine {
             .collect();
         over_limit(&self.settings, c, &live)
     }
+    /// Whether stored evidence holds this account back from a Loop that only
+    /// counts evidence recorded at or after `evidence_from`.
+    ///
+    /// Evidence is of two kinds and each is dated: a block (the provider said
+    /// the account was out, or our own sample found a window spent — dated by
+    /// `blocked_at`) and a sample (dated by `fetched_at`). Anything older than
+    /// `evidence_from` belongs to a previous run: still worth showing, never a
+    /// reason to refuse to start. Pass `0` to honour every stored block, which
+    /// is what a Loop that has been running all along does.
+    fn held_back(&self, c: &Candidate, evidence_from: u64) -> bool {
+        self.quotas.get(&c.key()).is_some_and(|q| {
+            (q.blocked_until > now() && q.blocked_at >= evidence_from)
+                || (q.fetched_at >= evidence_from && self.over_live_limit(c, &q.windows))
+        })
+    }
     /// Whether this account may be started right now.
     ///
     /// Deliberately optimistic about numbers we do not have: an account is held
@@ -1004,12 +1071,8 @@ impl Engine {
     /// account nobody has polled is eligible, which is what lets the first
     /// Agent of a fresh Loop start without spending a usage request, and what
     /// lets a cooldown end the moment its stored reset passes.
-    fn eligible(&self, c: &Candidate) -> bool {
-        c.enabled
-            && adapter::resolve_native(&c.agent).is_ok()
-            && self.quotas.get(&c.key()).is_none_or(|q| {
-                q.blocked_until <= now() && !self.over_live_limit(c, &q.windows)
-            })
+    fn eligible(&self, c: &Candidate, evidence_from: u64) -> bool {
+        c.enabled && adapter::resolve_native(&c.agent).is_ok() && !self.held_back(c, evidence_from)
     }
     /// Remember when an over-limit account is due back, taken from the reset
     /// instants its own sample carries. Complements the same bookkeeping in
@@ -1030,8 +1093,10 @@ impl Engine {
             .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
             .filter(|at| *at > now())
             .max();
-        if let Some(at) = reset {
-            q.blocked_until = q.blocked_until.max(at);
+        if let Some(at) = reset.filter(|at| *at > q.blocked_until) {
+            q.blocked_until = at;
+            q.blocked_at = now();
+            q.blocked_by_threshold = true;
         }
     }
     /// The account that comes back first, and when. This is the whole cooldown:
@@ -1044,16 +1109,20 @@ impl Engine {
             .into_iter()
             .filter(|c| adapter::resolve_native(&c.agent).is_ok())
             .filter_map(|c| {
+                // Only what this Loop is allowed to act on, so a countdown is
+                // never built out of the run before it — see `held_back`.
                 let q = self.quotas.get(&c.key())?;
-                let reset = q
-                    .windows
+                let sample = (q.fetched_at >= g.usage_evidence_from).then_some(&q.windows[..]);
+                let block = (q.blocked_at >= g.usage_evidence_from).then_some(q.blocked_until);
+                let reset = sample
+                    .unwrap_or_default()
                     .iter()
                     .filter(|w| {
                         matches!(w.kind.as_str(), "short" | "weekly")
                             && w.percent_used >= limit(&self.settings, &c, w)
                     })
                     .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
-                    .chain(Some(q.blocked_until))
+                    .chain(block)
                     .filter(|at| *at > now())
                     .max()?;
                 Some((c.key(), reset))
@@ -1100,6 +1169,9 @@ impl Engine {
     /// numbers and the reset instants instead of showing every account as
     /// unknown until something polls it again.
     fn profiles(&self, g: &mut Group) {
+        // Read out before the closure: capturing `g` whole would clash with the
+        // assignment into `g.profiles`.
+        let evidence_from = g.usage_evidence_from;
         g.profiles = self
             .settings
             .candidates
@@ -1109,12 +1181,34 @@ impl Engine {
                 let q = self.quotas.get(&c.key());
                 let windows = q.map(|q| q.windows.clone()).unwrap_or_default();
                 let controlling_window = controlling(&self.settings, c, &windows);
-                let usage = controlling_window.map(|w| w.percent_used);
-                let threshold = controlling_window
+                // What the card reports is this account's own basis window and
+                // nothing else. `controlling` moves to whichever window is
+                // nearer to stopping the profile, which is the right input to a
+                // scheduling decision and the wrong one for a number on screen:
+                // as the two windows' ratios crossed, the card swapped window
+                // kind, percentage, threshold and reset all at once and then
+                // swapped back, which reads as the card losing track of itself.
+                // The other window still decides `status`; `blocking_kind` names
+                // it beside the reading rather than replacing the reading.
+                let reported = windows
+                    .iter()
+                    .find(|w| c.threshold_basis.governs(&w.kind))
+                    .or(controlling_window);
+                let usage = reported.map(|w| w.percent_used);
+                let threshold = reported
                     .map(|w| limit(&self.settings, c, w))
                     .unwrap_or_else(|| self.settings.threshold_of(c, c.threshold_basis));
-                let threshold_kind = controlling_window
+                let threshold_kind = reported
                     .map_or_else(|| c.threshold_basis.kind().to_owned(), |w| w.kind.clone());
+                // Within 10 points of its own limit is what `status` calls near,
+                // so it is also when the window holding this profile back is
+                // worth naming — a card reading well under its threshold that
+                // still says NEAR_LIMIT is otherwise unexplainable.
+                let near_limit = controlling_window
+                    .is_some_and(|w| w.percent_used >= limit(&self.settings, c, w) - 10.0);
+                let blocking_kind = controlling_window
+                    .filter(|w| near_limit && reported.is_some_and(|r| r.kind != w.kind))
+                    .map(|w| w.kind.clone());
                 // All spent windows must reset before this account is usable.
                 let reset_at = windows
                     .iter()
@@ -1130,17 +1224,13 @@ impl Engine {
                             .map(|q| q.blocked_until),
                     )
                     .max()
-                    .or_else(|| {
-                        controlling_window.and_then(|w| w.resets_at.as_ref().and_then(reset_millis))
-                    });
+                    .or_else(|| reported.and_then(|w| w.resets_at.as_ref().and_then(reset_millis)));
                 let executable_error =
                     adapter::resolve_native(&c.agent).err().map(|e| e.to_string());
                 let error = executable_error
                     .clone()
                     .or_else(|| q.and_then(|q| q.error.clone()));
-                let blocked = q.is_some_and(|q| {
-                    q.blocked_until > now() || self.over_live_limit(c, &q.windows)
-                });
+                let blocked = self.held_back(c, evidence_from);
                 let status = if !c.enabled {
                     ProfileStatus::Disabled
                 } else if executable_error.is_some() {
@@ -1149,7 +1239,9 @@ impl Engine {
                     && g.waiting_profile_id.as_deref() == Some(c.key().as_str())
                 {
                     ProfileStatus::WaitingReset
-                } else if q.is_some_and(|q| q.rate_limited && q.blocked_until > now()) {
+                } else if q.is_some_and(|q| {
+                    q.rate_limited && q.blocked_until > now() && q.blocked_at >= evidence_from
+                }) {
                     ProfileStatus::RateLimited
                 } else if blocked {
                     ProfileStatus::Exhausted
@@ -1157,7 +1249,7 @@ impl Engine {
                     && g.runtime.pid.is_some()
                 {
                     ProfileStatus::Active
-                } else if usage.is_some_and(|n| n >= threshold - 10.0) {
+                } else if near_limit {
                     ProfileStatus::NearLimit
                 } else {
                     ProfileStatus::Available
@@ -1173,6 +1265,7 @@ impl Engine {
                     usage,
                     threshold,
                     threshold_kind,
+                    blocking_kind,
                     remaining: usage.map(|n| (100.0 - n).max(0.0)),
                     reset_at,
                     error,
@@ -1594,10 +1687,7 @@ impl Engine {
             // been able to read yet simply keeps working; the provider's own
             // limit error (`read_events`) is the backstop, and it carries the
             // reset instant the cooldown needs.
-            let spent = !c.enabled
-                || self.quotas.get(&c.key()).is_some_and(|q| {
-                    q.blocked_until > now() || self.over_live_limit(&c, &q.windows)
-                });
+            let spent = !c.enabled || self.held_back(&c, g.usage_evidence_from);
             if spent {
                 self.block_until_reset(&c);
                 g.event(
@@ -1671,7 +1761,11 @@ impl Engine {
             // Still nothing usable: re-arm the wait on the reset instants we
             // now hold rather than typing a provider command into the shell on
             // every tick of a cooldown that is still running.
-            if !self.candidates(g).into_iter().any(|c| self.eligible(&c)) {
+            if !self
+                .candidates(g)
+                .into_iter()
+                .any(|c| self.eligible(&c, g.usage_evidence_from))
+            {
                 let next = self.cooldown_until(g);
                 g.waiting_profile_id = next.as_ref().map(|(key, _)| key.clone());
                 g.resume_at = Some(
@@ -1739,7 +1833,9 @@ impl Engine {
                 ranked.retain(|c| Some(c.key()) == g.active_profile);
             }
             let allowed =
-                |c: &Candidate| !live.attempted.contains(&c.key()) && self.eligible(c);
+                |c: &Candidate| {
+                    !live.attempted.contains(&c.key()) && self.eligible(c, g.usage_evidence_from)
+                };
             // Advance from the account that just stopped rather than re-picking
             // the same one: "switch to the next profile" is the whole contract,
             // and cycling the full list is what decides a cooldown is due.
@@ -1784,7 +1880,10 @@ impl Engine {
             state.manager.runtime.lock().get_state(sid).pid.is_none(),
             "Previous Agent has not exited"
         );
-        ensure!(self.eligible(&c), "Profile no longer available");
+        ensure!(
+            self.eligible(&c, g.usage_evidence_from),
+            "Profile no longer available"
+        );
         let dispatch = live.dispatch.clone().context("Missing command dispatch")?;
         let attempt_id = Uuid::new_v4().to_string();
         let attempt_dir = self.dir(g).join(&attempt_id);
@@ -2019,6 +2118,8 @@ impl Engine {
                                 .filter(|at| *at > now())
                                 .min()
                                 .unwrap_or(now() + 60_000);
+                            q.blocked_at = now();
+                            q.blocked_by_threshold = false;
                             q.rate_limited = false;
                         }
                         g.event(
@@ -2030,6 +2131,8 @@ impl Engine {
                         if let Some(key) = &g.active_profile {
                             let q = self.quotas.entry(key.clone()).or_default();
                             q.blocked_until = now() + 300_000;
+                            q.blocked_at = now();
+                            q.blocked_by_threshold = false;
                             q.rate_limited = false;
                         }
                         g.event("PROFILE_AUTH_ERROR", "Claude 인증 오류 — 다음 Profile을 확인합니다");
@@ -2038,6 +2141,8 @@ impl Engine {
                         if let Some(key) = &g.active_profile {
                             let q = self.quotas.entry(key.clone()).or_default();
                             q.blocked_until = now() + 60_000;
+                            q.blocked_at = now();
+                            q.blocked_by_threshold = false;
                             q.rate_limited = true;
                         }
                         g.event(

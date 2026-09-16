@@ -594,7 +594,7 @@ fn a_stored_reset_gates_the_cooldown_and_releases_it_without_a_new_sample() {
     f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
     // A spent account is blocked until the reset it reported, and that instant
     // is what the wait is computed from.
-    assert!(!f.engine.eligible(&c));
+    assert!(!f.engine.eligible(&c, 0));
     assert_eq!(f.engine.quotas[&c.key()].blocked_until, reset);
     let g = f.engine.groups[&f.id].clone();
     assert_eq!(f.engine.cooldown_until(&g), Some((c.key(), reset)));
@@ -602,7 +602,78 @@ fn a_stored_reset_gates_the_cooldown_and_releases_it_without_a_new_sample() {
     // no fresh provider request is needed to end a cooldown.
     f.engine.quotas.get_mut(&c.key()).unwrap().blocked_until = now() - 1;
     f.engine.quotas.get_mut(&c.key()).unwrap().windows[0].resets_at = Some(json!(now() - 1));
-    assert!(f.engine.eligible(&c));
+    assert!(f.engine.eligible(&c, 0));
+}
+/// Stopping a Loop and starting another is how a user says "try again". The
+/// new Loop must not open on the cooldown that ended the old one: its own
+/// first prompt is what re-reads the account.
+#[test]
+fn a_new_loop_does_not_inherit_the_limit_that_stopped_the_last_one() {
+    let mut f = Fixture::new();
+    let c = candidate("a");
+    let reset = now() + 3_600_000;
+    f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
+    assert!(!f.engine.eligible(&c, 0), "the run that recorded it waits");
+    // Date that evidence to the previous run, and the Loop to after it.
+    let (previous_run, created) = (1, 2);
+    {
+        let q = f.engine.quotas.get_mut(&c.key()).unwrap();
+        assert!(q.blocked_until > now());
+        q.blocked_at = previous_run;
+        q.fetched_at = previous_run;
+    }
+    assert!(f.engine.eligible(&c, created));
+    let mut g = f.engine.groups[&f.id].clone();
+    g.usage_evidence_from = created;
+    assert_eq!(f.engine.cooldown_until(&g), None, "nothing to wait out");
+    // Evidence recorded once this Loop is running is its own, and decides.
+    {
+        let q = f.engine.quotas.get_mut(&c.key()).unwrap();
+        q.blocked_at = created + 1;
+        q.fetched_at = created + 1;
+    }
+    assert!(!f.engine.eligible(&c, created));
+    assert_eq!(f.engine.cooldown_until(&g), Some((c.key(), reset)));
+}
+/// 지금 확인 has to be able to change something. A block we put on ourselves is
+/// only as good as the threshold it was computed from.
+#[test]
+fn a_reading_under_a_raised_threshold_lifts_our_own_block_and_ends_the_wait() {
+    let mut f = Fixture::new();
+    let c = candidate("a");
+    let reset = now() + 3_600_000;
+    f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
+    assert!(!f.engine.eligible(&c, 0));
+    assert!(f.engine.quotas[&c.key()].blocked_by_threshold);
+    {
+        let g = f.engine.groups.get_mut(&f.id).unwrap();
+        g.status = LoopStatus::WaitingForUsageReset;
+        g.resume_at = Some(reset);
+    }
+    // The threshold moves above the reading, and a fresh sample lands.
+    f.engine.settings.short_threshold = 99.0;
+    f.engine
+        .quota(c.key(), Ok(vec![window(95.0, reset)]), now() + 1);
+    assert_eq!(f.engine.quotas[&c.key()].blocked_until, 0);
+    assert!(f.engine.eligible(&c, 0));
+    assert!(f.engine.groups[&f.id].resume_at.is_some_and(|at| at <= now()));
+}
+/// The provider's own limit is not ours to argue with: a reading that happens
+/// to sit under our threshold does not lift it.
+#[test]
+fn a_provider_reported_block_survives_a_reading_under_the_threshold() {
+    let mut f = Fixture::new();
+    let c = candidate("a");
+    let until = now() + 3_600_000;
+    {
+        let q = f.engine.quotas.entry(c.key()).or_default();
+        q.blocked_until = until;
+        q.blocked_at = now();
+    }
+    f.engine
+        .quota(c.key(), Ok(vec![window(10.0, now() + 60_000)]), now());
+    assert_eq!(f.engine.quotas[&c.key()].blocked_until, until);
+    assert!(!f.engine.eligible(&c, 0));
 }
 #[test]
 fn an_account_nobody_has_polled_is_allowed_to_start() {
@@ -611,13 +682,13 @@ fn an_account_nobody_has_polled_is_allowed_to_start() {
     // Requirement: the first Agent starts without a usage check. Absence of
     // numbers is not evidence of exhaustion.
     f.engine.quotas.clear();
-    assert!(f.engine.eligible(&c));
+    assert!(f.engine.eligible(&c, 0));
     // A failed read is not evidence either — the last good sample still stands.
     f.engine
         .quota(c.key(), Ok(vec![window(1.0, now() + 100_000)]), now());
     f.engine
         .quota(c.key(), Err("429 rate limited".into()), now() + 2);
-    assert!(f.engine.eligible(&c));
+    assert!(f.engine.eligible(&c, 0));
 }
 #[test]
 fn every_profile_spent_waits_for_the_earliest_reset_instead_of_failing() {
@@ -774,7 +845,7 @@ fn rate_limit_cooldown_survives_a_low_usage_refresh() {
     f.engine.quotas.get_mut(&c.key()).unwrap().blocked_until = now() + 60_000;
     f.engine
         .quota(c.key(), Ok(vec![window(1.0, now() + 60_000)]), now());
-    assert!(!f.engine.eligible(&c));
+    assert!(!f.engine.eligible(&c, 0));
 }
 
 #[test]
@@ -939,6 +1010,91 @@ fn each_accounts_own_basis_decides_which_window_switches_it() {
     c.threshold_basis = ThresholdBasis::Short;
     assert!(!over_limit(&settings, &c, &[weekly_window(31.0)]));
 }
+/// The card reports the account's own basis window, and keeps reporting it.
+///
+/// `controlling` moves between the two windows as their ratios cross, which is
+/// the right input to a switch decision and the wrong one for a number on
+/// screen: a 5h reading turned into a weekly one — different kind, percentage,
+/// threshold and reset, all at once — and turned back on the next sample.
+#[test]
+fn the_card_reports_the_basis_window_even_when_the_other_one_is_nearer_its_limit() {
+    fn card(f: &Fixture, key: &str) -> ProfileSnapshot {
+        f.engine.groups[&f.id]
+            .profiles
+            .iter()
+            .find(|p| p.key == key)
+            .unwrap()
+            .clone()
+    }
+    let mut f = Fixture::new();
+    // Nothing used in either window. Comparing ratios made this a tie, which
+    // resolved to the weekly window — so a Loop that had just started showed
+    // "weekly · 잔여 100%" until the 5h window moved off zero.
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(0.0, now() + 60_000), weekly_window(0.0)]),
+        now(),
+    );
+    // The weekly window is proportionally nearer its own 100% limit, but this
+    // account switches on its 5h window, so that is what the card reports.
+    f.engine.quota(
+        "codex:b".into(),
+        Ok(vec![window(60.0, now() + 60_000), weekly_window(78.0)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    for key in ["codex:a", "codex:b"] {
+        assert_eq!(card(&f, key).threshold_kind, "short", "{key}");
+        assert_eq!(card(&f, key).threshold, 90.0, "{key}");
+        assert_eq!(card(&f, key).blocking_kind, None, "{key}");
+    }
+    assert_eq!(card(&f, "codex:a").usage, Some(0.0));
+    assert_eq!(card(&f, "codex:a").remaining, Some(100.0));
+    assert_eq!(card(&f, "codex:b").usage, Some(60.0));
+    assert_eq!(card(&f, "codex:b").remaining, Some(40.0));
+    // Once the other window really is close to stopping the profile, the card
+    // still reads its own window and names the one responsible beside it —
+    // otherwise NEAR_LIMIT at 60% of a 90% threshold is unexplainable.
+    f.engine.quota(
+        "codex:b".into(),
+        Ok(vec![window(60.0, now() + 60_000), weekly_window(95.0)]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    let near = card(&f, "codex:b");
+    assert_eq!(near.threshold_kind, "short");
+    assert_eq!(near.usage, Some(60.0));
+    assert_eq!(near.blocking_kind.as_deref(), Some("weekly"));
+    assert!(matches!(near.status, ProfileStatus::NearLimit));
+}
+/// A 5h window that reaches its reset has turned over, not vanished. Sampling
+/// it away left the account reporting only its weekly window for as long as it
+/// took the CLI to write the next sample, which swapped the card over and back.
+#[test]
+fn a_window_that_reaches_its_reset_still_reports_its_own_kind() {
+    let mut f = Fixture::new();
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![
+            UsageWindow {
+                resets_at: None,
+                percent_used: 0.0,
+                ..window(0.0, 0)
+            },
+            weekly_window(72.0),
+        ]),
+        now(),
+    );
+    f.engine.tick(&f.state).unwrap();
+    let profile = f.engine.groups[&f.id]
+        .profiles
+        .iter()
+        .find(|p| p.key == "codex:a")
+        .unwrap();
+    assert_eq!(profile.threshold_kind, "short");
+    assert_eq!(profile.usage, Some(0.0));
+    assert_eq!(profile.blocking_kind, None);
+}
 #[test]
 fn an_accounts_basis_is_live_editable_per_loop_and_locked_while_it_is_active() {
     let mut f = Fixture::new();
@@ -1060,7 +1216,7 @@ fn an_account_with_no_readable_usage_still_runs_until_a_real_limit_arrives() {
     // reading keeps working until something says otherwise.
     f.engine.quota("claude:a".into(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
     let c = f.engine.settings.candidates[0].clone();
-    assert!(f.engine.eligible(&c));
+    assert!(f.engine.eligible(&c, 0));
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "running");
     assert!(f.engine.live[&f.id].interrupt_at.is_none());
@@ -1155,7 +1311,7 @@ fn claude_stop_failure_switches_even_when_usage_cannot_be_read() {
     assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
     assert!(f.engine.groups[&f.id].pending_work);
     assert!(f.engine.quotas["claude:a"].blocked_until > now());
-    assert!(!f.engine.eligible(&f.engine.settings.candidates[0]));
+    assert!(!f.engine.eligible(&f.engine.settings.candidates[0], 0));
     assert!(f.engine.live[&f.id].interrupt_at.is_some());
 }
 #[test]

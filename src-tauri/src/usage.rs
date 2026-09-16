@@ -105,20 +105,50 @@ fn windows_are_fresh_at(windows: &[UsageWindow], now: u64, max_age: Duration) ->
         })
 }
 
+const SESSION_USAGE_UNREAD: &str = "Waiting for session usage. Start this profile and send a message";
+
+/// A rolling window whose reset instant has passed has turned over — it has
+/// not gone away. Dropping it left the sample carrying only the account's
+/// other window, so every reader of the sample silently changed which limit
+/// it was talking about: the Loop's profile card swapped 5h for weekly, along
+/// with the percentage, threshold and reset beside it, and swapped back once
+/// the CLI wrote the next sample. Report the turnover instead — same window,
+/// nothing used yet, next reset instant not known until the provider names it.
+///
+/// A sample in which *every* window has expired carries no live reading at
+/// all; that one stays an error rather than claiming the account is untouched.
+fn rolled_over_at(windows: Vec<UsageWindow>, now: u64) -> Option<Vec<UsageWindow>> {
+    let current = |window: &UsageWindow| {
+        window
+            .resets_at
+            .as_ref()
+            .and_then(Value::as_u64)
+            .is_some_and(|reset| reset > now)
+    };
+    if !windows.iter().any(&current) {
+        return None;
+    }
+    Some(
+        windows
+            .into_iter()
+            .map(|window| {
+                if current(&window) {
+                    window
+                } else {
+                    UsageWindow {
+                        percent_used: 0.0,
+                        resets_at: None,
+                        ..window
+                    }
+                }
+            })
+            .collect(),
+    )
+}
+
 fn session_result_at(result: UsageResult, now: u64) -> UsageResult {
-    result.and_then(|mut windows| {
-        windows.retain(|window| {
-            window
-                .resets_at
-                .as_ref()
-                .and_then(Value::as_u64)
-                .is_some_and(|reset| reset > now)
-        });
-        if windows.is_empty() {
-            Err("Waiting for session usage. Start this profile and send a message".into())
-        } else {
-            Ok(windows)
-        }
+    result.and_then(|windows| {
+        rolled_over_at(windows, now).ok_or_else(|| SESSION_USAGE_UNREAD.to_owned())
     })
 }
 
@@ -315,31 +345,26 @@ fn parse_session_windows(sample: &Value, now_seconds: u64) -> Result<Vec<UsageWi
     for (key, label) in [("five_hour", "5h"), ("seven_day", "Weekly")] {
         let window = &sample["rate_limits"][key];
         let percent = window["used_percentage"].as_f64().filter(|v| v.is_finite());
-        let reset = window["resets_at"].as_u64();
-        if let (Some(percent), Some(reset)) = (percent, reset) {
-            if reset <= now_seconds {
-                continue;
-            }
-            if let Some(milliseconds) = reset.checked_mul(1000) {
-                windows.push(UsageWindow {
-                    label: label.into(),
-                    kind: if key == "five_hour" {
-                        "short"
-                    } else {
-                        "weekly"
-                    }
-                    .into(),
-                    percent_used: percent.clamp(0.0, 100.0),
-                    resets_at: Some(Value::from(milliseconds)),
-                    received_at: Some(received_at),
-                });
-            }
+        let reset = window["resets_at"].as_u64().and_then(|s| s.checked_mul(1000));
+        if let (Some(percent), Some(milliseconds)) = (percent, reset) {
+            windows.push(UsageWindow {
+                label: label.into(),
+                kind: if key == "five_hour" {
+                    "short"
+                } else {
+                    "weekly"
+                }
+                .into(),
+                percent_used: percent.clamp(0.0, 100.0),
+                resets_at: Some(Value::from(milliseconds)),
+                received_at: Some(received_at),
+            });
         }
     }
-    if windows.is_empty() {
-        return Err("Waiting for session usage. Start this profile and send a message".into());
-    }
-    Ok(windows)
+    // An elapsed window is reported as turned over, not omitted — see
+    // [`rolled_over_at`] for why an omission is worse than a stale number.
+    rolled_over_at(windows, now_seconds.saturating_mul(1000))
+        .ok_or_else(|| SESSION_USAGE_UNREAD.to_owned())
 }
 // Credentials stay in Rust; only normalized quota windows cross the bridge.
 // Fixed origins and disabled redirects prevent forwarding credentials elsewhere.
@@ -488,16 +513,24 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn session_usage_keeps_sample_time_and_drops_expired_windows() {
+    fn session_usage_keeps_sample_time_and_rolls_expired_windows_over() {
         let sample = json!({"version":1,"receivedAt":900000,"rate_limits":{"five_hour":{"used_percentage":0,"resets_at":1100},"seven_day":{"used_percentage":72,"resets_at":2000}}});
         let windows = parse_session_windows(&sample, 1000).unwrap();
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].percent_used, 0.0);
         assert_eq!(windows[0].received_at, Some(900000));
         assert_eq!(windows[0].resets_at, Some(json!(1100000)));
+        // The 5h window turns over: still reported, still the short window,
+        // now reading empty. Dropping it made every reader switch to the
+        // weekly window and back again a moment later.
         let later = parse_session_windows(&sample, 1100).unwrap();
-        assert_eq!(later.len(), 1);
-        assert_eq!(later[0].label, "Weekly");
+        assert_eq!(later.len(), 2);
+        assert_eq!(later[0].kind, "short");
+        assert_eq!(later[0].percent_used, 0.0);
+        assert_eq!(later[0].resets_at, None);
+        assert_eq!(later[1].kind, "weekly");
+        assert_eq!(later[1].percent_used, 72.0);
+        // Every window elapsed: no live reading at all, so still an error.
         assert!(parse_session_windows(&sample, 2000).is_err());
         assert!(parse_session_windows(&json!({}), 1000).is_err());
     }
@@ -548,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_hits_do_not_refresh_samples_and_expired_session_windows_are_removed() {
+    fn cache_hits_do_not_refresh_samples_and_expired_session_windows_turn_over() {
         let sample = json!({"version":1,"receivedAt":900000,"rate_limits":{
             "five_hour":{"used_percentage":0,"resets_at":1100},
             "seven_day":{"used_percentage":72,"resets_at":2000}
@@ -570,10 +603,14 @@ mod tests {
             Duration::from_secs(60)
         ));
         assert!(!windows_are_fresh_at(&[], 950000, Duration::from_secs(60)));
+        // A cached sample ages the same way: the elapsed window turns over in
+        // place, keeping the set of windows — and so the card — stable.
         let remaining = session_result_at(Ok(windows), 1100000).unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].kind, "weekly");
-        assert_eq!(remaining[0].received_at, Some(900000));
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].kind, "short");
+        assert_eq!(remaining[0].percent_used, 0.0);
+        assert_eq!(remaining[1].kind, "weekly");
+        assert_eq!(remaining[1].received_at, Some(900000));
         assert!(session_result_at(Ok(remaining), 2000000).is_err());
     }
 
