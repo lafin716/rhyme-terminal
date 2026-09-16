@@ -1,9 +1,9 @@
 pub mod activity;
 pub mod agent;
 pub mod agent_status;
-pub mod runtime_monitor;
 mod claude_title;
 pub mod manager;
+pub mod runtime_monitor;
 
 use anyhow::{anyhow, Result};
 use base64::Engine;

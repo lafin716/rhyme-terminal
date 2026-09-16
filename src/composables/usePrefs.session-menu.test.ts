@@ -1,15 +1,24 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { loadPrefsFromStorage, usePrefs } from "./usePrefs";
 import { moveSessionMenuItem, normalizeSessionMenuOrder } from "../lib/session-menu";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.resetModules();
+  vi.unstubAllGlobals();
+});
 
-it("persists and reloads session menu order while preserving other preferences", () => {
+function stubBrowser(platform: string) {
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => storage.set(key, value),
   });
+  vi.stubGlobal("navigator", { platform });
+  return storage;
+}
+
+it("persists and reloads session menu order while preserving Windows terminal preferences", async () => {
+  const storage = stubBrowser("Win32");
+  const { loadPrefsFromStorage, usePrefs } = await import("./usePrefs");
   const { prefs, setPref } = usePrefs();
   const order = moveSessionMenuItem(undefined, "codex", -1);
   setPref("sessionMenuOrder", order);
@@ -26,4 +35,21 @@ it("persists and reloads session menu order while preserving other preferences",
   setPref("sessionMenuOrder", normalizeSessionMenuOrder(undefined));
   loadPrefsFromStorage();
   expect(prefs.sessionMenuOrder?.[0]).toBe("page");
+});
+
+it("preserves the macOS default terminal while reloading session menu order", async () => {
+  const storage = stubBrowser("MacIntel");
+  const { loadPrefsFromStorage, usePrefs } = await import("./usePrefs");
+  const { prefs, setPref } = usePrefs();
+  const order = moveSessionMenuItem(undefined, "codex", -1);
+  setPref("sessionMenuOrder", order);
+  prefs.sessionMenuOrder = [];
+  loadPrefsFromStorage();
+  expect(prefs.sessionMenuOrder).toEqual(order);
+  expect(prefs.defaultTerminal).toEqual({
+    preset: "zsh",
+    program: "/bin/zsh",
+    args: ["-l", "-i"],
+  });
+  expect(JSON.parse(storage.get("winmux:prefs:v1")!).prefs.defaultTerminal.preset).toBe("zsh");
 });

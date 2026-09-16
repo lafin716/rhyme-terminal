@@ -42,13 +42,21 @@ test("packaged Unix helper records lifecycle metadata without raw input", { time
   const session = randomUUID();
   const { result } = launch(t, root, "--winmux-hook", {
     hook_event_name: "PostToolUse", session_id: session, tool_name: "Bash",
+    tool_use_id: "tool-1", transcript_path: "/tmp/transcript.jsonl",
     tool_input: { command: "private-prompt", run_in_background: true },
     tool_response: "private-output",
   });
   assert.deepEqual(await result, { code: 0, output: "{}\n", error: "" });
   const event = await waitForEvent(root);
   assert.equal(event.sessionId, session);
-  assert.equal(event.unknownBackground, true);
+  assert.equal(event.kind, "PostToolUse");
+  assert.equal(event.toolUseId, "tool-1");
+  assert.equal(event.transcriptPath, "/tmp/transcript.jsonl");
+  assert.equal(event.errorCode, null);
+  assert.equal(typeof event.atMs, "number");
+  assert.deepEqual(Object.keys(event).sort(), [
+    "atMs", "errorCode", "kind", "sessionId", "subagentId", "toolUseId", "transcriptPath",
+  ]);
   assert.ok(!JSON.stringify(event).includes("private-"));
 });
 test("startup waits for matching approval before acknowledging readiness", { timeout: 10000 }, async t => {
@@ -62,16 +70,24 @@ test("startup waits for matching approval before acknowledging readiness", { tim
   assert.equal((await result).code, 0);
   assert.equal(JSON.parse(readFileSync(join(root, "startup-ready.json"), "utf8")).sessionId, session);
 });
-test("switch boundary stays held until the controller explicitly resumes", { timeout: 10000 }, async t => {
-  const root = fixture(t);
-  writeFileSync(join(root, "control.json"), JSON.stringify({ switchRequested: true }));
-  const { child, result } = launch(t, root, "--winmux-hook", { hook_event_name: "PreToolUse", session_id: randomUUID() });
-  assert.equal((await waitForEvent(root)).boundary, true);
-  await pause(250);
-  assert.equal(child.exitCode, null);
-  writeFileSync(join(root, "control.json"), JSON.stringify({ switchRequested: false }));
-  assert.equal((await result).output, "{}\n");
-});
+// Tool-boundary gating was removed from the controller; only startup waits for approval.
+for (const kind of ["PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure"]) {
+  test(`${kind} completes even when an old switch request remains`, { timeout: 10000 }, async t => {
+    const root = fixture(t), session = randomUUID();
+    writeFileSync(join(root, "control.json"), JSON.stringify({ switchRequested: true }));
+    const { result } = launch(t, root, "--winmux-hook", {
+      hook_event_name: kind, session_id: session,
+      error: "rate_limit", last_assistant_message: "You have hit your limit. private-diagnostic",
+    });
+    // Do not clear control.json: waiting for a removed resume signal must fail this test.
+    assert.deepEqual(await result, { code: 0, output: "{}\n", error: "" });
+    const event = await waitForEvent(root);
+    assert.equal(event.kind, kind);
+    assert.equal(event.sessionId, session);
+    assert.equal(event.errorCode, kind === "StopFailure" ? "usage_limit_reached" : null);
+    assert.ok(!JSON.stringify(event).includes("private-"));
+  });
+}
 test("statusline keeps original output and stores quota fields only", { timeout: 10000 }, async t => {
   const root = fixture(t);
   writeFileSync(join(root, "winmux-statusline.json"), JSON.stringify({ original: { command: "cat >/dev/null; printf original" } }));
