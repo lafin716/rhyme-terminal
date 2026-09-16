@@ -145,6 +145,34 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn shell_fixture() -> (String, Vec<String>, &'static str) {
+        (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "exit".to_string()],
+            "cmd.exe",
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn shell_fixture() -> (String, Vec<String>, &'static str) {
+        (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), "exit".to_string()],
+            "sh",
+        )
+    }
+
+    #[cfg(windows)]
+    fn claude_image_name() -> &'static str {
+        "claude.exe"
+    }
+
+    #[cfg(not(windows))]
+    fn claude_image_name() -> &'static str {
+        "claude"
+    }
+
     #[test]
     fn has_sessions_is_false_for_a_new_manager() {
         assert!(!SessionManager::new().has_sessions());
@@ -154,11 +182,12 @@ mod tests {
     fn refresh_agents_reports_a_change_only_once() {
         let (events, _) = broadcast::channel(1);
         let manager = SessionManager::new();
+        let (shell, shell_args, shell_image) = shell_fixture();
         let session = spawn_session(
             events,
             "test".to_string(),
-            "cmd.exe".to_string(),
-            vec!["/C".to_string(), "exit".to_string()],
+            shell,
+            shell_args,
             None,
             None,
             80,
@@ -171,8 +200,8 @@ mod tests {
         assert!(manager.has_sessions());
 
         let processes = [
-            entry(shell_pid, None, "cmd.exe", 1),
-            entry(2, Some(shell_pid), "claude.exe", 2),
+            entry(shell_pid, None, shell_image, 1),
+            entry(2, Some(shell_pid), claude_image_name(), 2),
         ];
 
         assert_eq!(
@@ -181,7 +210,7 @@ mod tests {
         );
         assert!(manager.refresh_agents(&processes).is_empty());
 
-        let shell_only = [entry(shell_pid, None, "cmd.exe", 1)];
+        let shell_only = [entry(shell_pid, None, shell_image, 1)];
         assert_eq!(
             manager.refresh_agents(&shell_only),
             vec![(id, crate::pty::AgentKind::Terminal)]

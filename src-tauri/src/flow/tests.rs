@@ -7,6 +7,16 @@ fn temp() -> PathBuf {
     std::fs::create_dir_all(&p).unwrap();
     p
 }
+fn shell_args(script: &str) -> Value {
+    #[cfg(windows)]
+    {
+        json!(["-NoProfile", "-Command", script])
+    }
+    #[cfg(not(windows))]
+    {
+        json!(["-c", script])
+    }
+}
 #[test]
 fn shared_frontend_fixture_round_trips_without_contract_drift() {
     let json: Value =
@@ -178,7 +188,7 @@ async fn command_run_persists_results_and_exit_failure() {
         .unwrap()
         .contains("Rhyme Flow"));
     let mut f = f;
-    f.nodes[0].config["args"] = json!(["-NoProfile", "-Command", "exit 7"]);
+    f.nodes[0].config["args"] = shell_args("exit 7");
     let r = e
         .start(f, t, root.to_str().unwrap(), vec!["command".into()], None)
         .unwrap();
@@ -280,14 +290,18 @@ async fn repeat_failure_runs_the_entire_body_again() {
     let mut f = example_flow();
     let mut dev = f.nodes[0].clone();
     dev.id = "develop".into();
-    dev.config["args"] = json!([
-        "-NoProfile",
-        "-Command",
+    dev.config["args"] = shell_args(if cfg!(windows) {
         "Add-Content -LiteralPath passes.txt -Value develop"
-    ]);
+    } else {
+        "printf '%s\\n' develop >> passes.txt"
+    });
     let mut verify = dev.clone();
     verify.id = "verify".into();
-    verify.config["args"]=json!(["-NoProfile","-Command","if ((Get-Content -LiteralPath passes.txt).Count -lt 2) { exit 8 }; Write-Output 'verified'"]);
+    verify.config["args"] = shell_args(if cfg!(windows) {
+        "if ((Get-Content -LiteralPath passes.txt).Count -lt 2) { exit 8 }; Write-Output 'verified'"
+    } else {
+        "lines=$(awk 'END { print NR }' passes.txt); [ \"$lines\" -lt 2 ] && exit 8; printf '%s\\n' verified"
+    });
     f.nodes.truncate(1);
     f.edges.clear();
     f.nodes[0].kind = "bounded_repeat".into();
@@ -320,11 +334,11 @@ async fn independent_nodes_overlap_and_command_consumes_bound_stdin() {
     let e = Engine::open(root.join("data")).unwrap();
     let mut f = example_flow();
     let mut first = f.nodes[0].clone();
-    first.config["args"] = json!([
-        "-NoProfile",
-        "-Command",
+    first.config["args"] = shell_args(if cfg!(windows) {
         "Start-Sleep -Milliseconds 600; Write-Output first"
-    ]);
+    } else {
+        "sleep 0.6; printf '%s\\n' first"
+    });
     let mut second = first.clone();
     second.id = "second".into();
     f.nodes = vec![first, second];
@@ -361,7 +375,11 @@ async fn independent_nodes_overlap_and_command_consumes_bound_stdin() {
         },
     );
     f.nodes[0].config["stdin_binding"] = json!("payload");
-    f.nodes[0].config["args"] = json!(["-NoProfile", "-Command", "[Console]::In.ReadToEnd()"]);
+    f.nodes[0].config["args"] = shell_args(if cfg!(windows) {
+        "[Console]::In.ReadToEnd()"
+    } else {
+        "cat"
+    });
     let r = e
         .start(
             f,
