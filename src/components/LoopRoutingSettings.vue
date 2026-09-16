@@ -221,37 +221,39 @@ async function save() {
   <form class="loop-settings" @submit.prevent="save">
     <header>
       <h2>에이전트 루프</h2>
-      <p>사용할 프로필을 활성 영역으로 옮기세요. 새 Loop는 활성 순서의 첫 프로필부터 사용량을 확인하고 자동 실행합니다.</p>
+      <p>여기서 정한 대로 루프가 만들어집니다. 새 루프는 만들 때 아무것도 묻지 않고, 활성 순서의 첫 프로필로 바로 시작합니다.</p>
     </header>
     <section class="card">
-      <h3>공통 전환 기준</h3>
+      <h3>전역 한도 제한</h3>
       <div class="thresholds">
         <label
-          >단기 사용량 기준 (%)
+          >5시간 한도 제한 (%)
           <input v-model.number="draft.shortThreshold" type="number" min="1" max="100" required />
         </label>
         <label
-          >주간 사용량 기준 (%)
+          >주간 한도 제한 (%)
           <input v-model.number="draft.weeklyThreshold" type="number" min="1" max="100" required />
         </label>
       </div>
       <p class="basis-note">
-        전환에 쓰는 창은 계정마다 고릅니다 — 각 프로필의 <strong>개별 기준 → 사용량 기준</strong>에서 5시간과 주간 중 하나를 선택하세요.
-        기본값은 5시간이고, 기준이 아닌 창은 100% 소진에서만 막습니다.
+        모든 프로필의 기본값입니다. 프로필마다 <strong>개별 기준</strong>에서 따로 지정할 수 있고, 비워 두면 이 값을 씁니다.
+        전환을 결정하는 창은 계정마다 <strong>개별 기준 → 사용량 기준</strong>에서 5시간과 주간 중 하나를 고르며, 기본값은 5시간입니다.
+        기준이 아닌 창은 100% 소진에서만 막습니다.
       </p>
       <div class="thresholds">
         <label
-          >선택 전략
+          >전환 순서
           <select v-model="draft.strategy">
-            <option>SMART</option>
-            <option>LEAST_USAGE</option>
-            <option>ROUND_ROBIN</option>
-            <option>PRIORITY</option>
+            <option value="SMART">SMART · 사용량이 적은 계정부터</option>
+            <option value="ROUND_ROBIN">ROUND_ROBIN · 아래 순서대로 다음 계정</option>
+            <option value="LEAST_USAGE">LEAST_USAGE · 사용량이 가장 적은 계정</option>
+            <option value="PRIORITY">PRIORITY · 우선순위가 높은 계정</option>
           </select>
         </label>
         <label
-          >기본 Usage 조회 간격 (초)
+          >사용량 조회 간격 (초)
           <input v-model.number="draft.pollingIntervalSeconds" type="number" min="60" max="300" />
+          <small>프롬프트가 실행 중인 계정만, 이 간격으로 조회합니다. 대기 중인 계정은 사용량이 움직이지 않으므로 조회하지 않습니다</small>
         </label>
       </div>
     </section>
@@ -317,7 +319,7 @@ async function save() {
                   <small>이 계정을 전환할 창입니다. 나머지 창은 100% 소진에서만 막습니다</small>
                 </div>
                 <label :class="{ inactive: (candidate.thresholdBasis ?? 'short') !== 'short' }"
-                  >단기 (%)
+                  >5시간 한도 (%)
                   <input
                     v-model.number="candidate.shortThreshold"
                     type="number"
@@ -328,7 +330,7 @@ async function save() {
                   />
                 </label>
                 <label :class="{ inactive: (candidate.thresholdBasis ?? 'short') !== 'weekly' }"
-                  >주간 (%)
+                  >주간 한도 (%)
                   <input
                     v-model.number="candidate.weeklyThreshold"
                     type="number"
@@ -395,8 +397,9 @@ async function save() {
       </div>
     </section>
     <p>
-      최초 실행은 활성 순서를 따르며, 사용할 수 없는 프로필은 건너뜁니다. 이후 자동 전환은 선택
-      전략을 따릅니다. 핸들에 초점을 두고 ↑ / ↓ 키로도 순서를 바꿀 수 있습니다.
+      최초 실행은 활성 순서를 따르며, 한도에 걸린 프로필은 건너뜁니다. 이후 전환은 위의 전환 순서를 따르고,
+      모든 프로필이 한도에 걸리면 가장 먼저 초기화되는 시각까지 기다렸다가 다시 시도합니다.
+      핸들에 초점을 두고 ↑ / ↓ 키로도 순서를 바꿀 수 있습니다.
     </p>
     <div class="save-actions">
       <button type="submit" :disabled="busy">{{ busy ? '저장 중…' : '저장' }}</button>

@@ -43,7 +43,13 @@ struct Live {
     shell_editing: bool,
     targets: Vec<crate::pty::agent::ProcessEntry>,
     dispatch: Option<Dispatch>,
-    guard_at: u64,
+    /// Dispatch id of the launch currently being managed. The bridge helper
+    /// records the Agent's exit code under this id, which is how a finished
+    /// job is told apart from a crashed one — see the `running` branch.
+    dispatch_id: Option<String>,
+    /// One-shot request from the Loop terminal's monitor bar: read this Loop's
+    /// active profile usage now, outside the prompt-bound schedule.
+    force_usage_check: bool,
     attempted: HashSet<String>,
     interrupt_at: Option<u64>,
     interrupt_revision: u64,
@@ -54,12 +60,18 @@ struct Live {
     launch_at: u64,
     processed: HashSet<String>,
     awaiting_dispatch: bool,
-    selected: Option<String>,
     user_interrupt: bool,
     native_failed: bool,
 }
-#[derive(Default)]
+/// What is known about one account's quota. Persisted with the Loop state:
+/// the instant an exhausted account comes back is the only thing a cooldown
+/// can be computed from, and a daemon restart must not throw it away and
+/// start launching Agents into a limit that has not lifted yet.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 struct Quota {
+    /// Not usable before this instant: a provider-reported limit, or the reset
+    /// of whichever window our own sample found spent.
     blocked_until: u64,
     rate_limited: bool,
     windows: Vec<UsageWindow>,
@@ -76,42 +88,6 @@ struct Quota {
     /// reset time. A guard-forced check (activation, safe-boundary
     /// re-verification, explicit resume) bypasses this — see `usage_targets`.
     next_fetch_at: u64,
-}
-impl Quota {
-    /// Whether this candidate's usage may be confirmed *after* it starts
-    /// instead of before.
-    ///
-    /// This only ever applies to a Claude `setup-token` profile: it has no
-    /// usage endpoint of its own, so its numbers arrive from the statusline
-    /// sample the profile writes while it runs, and "no sample yet" is a
-    /// normal startup state rather than a fault. Every other profile —
-    /// including a Claude OAuth/subscription login and the system login —
-    /// answers a usage query directly, so a failed or stale read there means
-    /// the usage is genuinely unconfirmable and has to be treated as such.
-    /// Granting those the deferred check silently disabled the threshold
-    /// guard for the rest of a run whenever a query failed.
-    fn runtime_usage_fallback(&self, settings: &Settings, candidate: &Candidate) -> bool {
-        if candidate.agent != "claude"
-            || candidate.auth_method.as_deref() != Some("setup-token")
-            || self.blocked_until > now()
-        {
-            return false;
-        }
-        let unavailable = self.error.is_some()
-            || !crate::usage::usage_windows_are_fresh(&self.windows, sample_max_age(settings.polling_interval_seconds));
-        // Failed refreshes do not erase known limits before their reset.
-        let unexpired: Vec<_> = self.windows.iter().filter(|w| {
-            w.resets_at.as_ref().and_then(reset_millis).is_none_or(|at| at > now())
-        }).cloned().collect();
-        unavailable && !over_limit(settings, candidate, &unexpired)
-    }
-}
-/// How old a usage sample may be and still count as evidence, for a candidate
-/// polled every `interval_seconds`. Callers pass the cadence that candidate is
-/// actually scheduled at — see [`Engine::tier_interval`], which shortens it as
-/// usage climbs — so the window always outlasts one on-time poll.
-fn sample_max_age(interval_seconds: u64) -> Duration {
-    Duration::from_secs(interval_seconds.saturating_add(polling::FRESHNESS_GRACE_SECS))
 }
 /// `0.0..1.0` derived from the wall clock — good enough to spread out backoff
 /// and reset-skip retries without a `rand` dependency; not for security use.
@@ -133,6 +109,10 @@ struct Saved {
     version: u32,
     settings: Settings,
     groups: Vec<Group>,
+    /// Per-account quota knowledge, keyed by `Candidate::key`. Saved so that a
+    /// restart keeps the reset instants a cooldown is computed from.
+    #[serde(default)]
+    quotas: HashMap<String, Quota>,
 }
 pub struct Engine {
     root: PathBuf,
@@ -237,7 +217,7 @@ impl Engine {
         let saved = saved
             .map(|s| serde_json::from_str::<Saved>(&s))
             .transpose()?;
-        let (settings, groups) = if let Some(saved) = saved {
+        let (settings, groups, quotas) = if let Some(saved) = saved {
             ensure!(saved.version == 1, "Unsupported routing database version");
             (saved.settings, saved.groups.into_iter().map(|mut g| {
                 if g.policy.is_none() {
@@ -251,7 +231,7 @@ impl Engine {
                     }
                 }
                 g.active_session_id = None; g.runtime = AgentRuntimeState::default();
-                if !matches!(g.status.as_str(), "stopped" | "paused" | "waiting_for_usage_reset" | "idle") {
+                if !matches!(g.status.as_str(), "stopped" | "completed" | "paused" | "waiting_for_usage_reset" | "idle") {
                     // A prior Session (this Group's own, or handed off from another
                     // Profile) must never be abandoned just because the daemon
                     // restarted. Land on Paused, not Idle: typing the Agent command
@@ -270,9 +250,9 @@ impl Engine {
                     g.state(LoopStatus::Paused,Some("재시작 전 입력 전달 결과가 불확실합니다. 중복 전송을 막기 위해 일시정지했습니다."));
                 }
                 (g.id,g)
-            }).collect())
+            }).collect(), saved.quotas)
         } else {
-            (Settings::default(), HashMap::new())
+            (Settings::default(), HashMap::new(), HashMap::new())
         };
         Ok(Self {
             root,
@@ -280,7 +260,7 @@ impl Engine {
             settings,
             groups,
             live: HashMap::new(),
-            quotas: HashMap::new(),
+            quotas,
             global_settings: None,
             saved_snapshot: std::cell::RefCell::new(String::new()),
         })
@@ -298,6 +278,7 @@ impl Engine {
                 .unwrap_or(&self.settings)
                 .clone(),
             groups,
+            quotas: self.quotas.clone(),
         })?;
         if *self.saved_snapshot.borrow() == snapshot {
             return Ok(());
@@ -417,10 +398,10 @@ impl Engine {
                 let ids: Vec<_> = self.groups.keys().copied().collect();
                 for id in ids {
                     let mut g = self.groups.remove(&id).unwrap();
-                    let result = if g.status != "stopped" {
-                        self.terminal(state, &mut g)
-                    } else {
+                    let result = if matches!(g.status.as_str(), "stopped" | "completed") {
                         Ok(())
+                    } else {
+                        self.terminal(state, &mut g)
                     };
                     self.groups.insert(id, g);
                     result?;
@@ -528,22 +509,69 @@ impl Engine {
                 self.save()?;
                 Ok(json!({"ok":true}))
             }
-            op @ ("pause" | "resume" | "stop" | "next") => {
+            // Turning the Loop's own management on or off from the terminal's
+            // monitor bar. Observation never stops — the bar still reports
+            // whether an Agent process is alive and whether a prompt is running
+            // — but nothing is interrupted, switched or polled while it is off,
+            // and a command already waiting at the shell gate is released
+            // unmanaged instead of being left to hang.
+            "set_monitoring" => {
+                let id = Uuid::parse_str(string(&r, "id")?)?;
+                let enabled = r["enabled"].as_bool().context("Missing monitoring flag")?;
+                let mut g = self.groups.remove(&id).context("Loop not found")?;
+                let mut live = self.live.remove(&id).unwrap_or_default();
+                g.monitoring = enabled;
+                if !enabled {
+                    if let Some(dispatch) = live.dispatch.take() {
+                        let launch = adapter::Launch {
+                            managed: false,
+                            shell: adapter::resolve_native(&dispatch.provider)?,
+                            args: dispatch.args.clone(),
+                            env: HashMap::new(),
+                        };
+                        self.respond(&g, &dispatch, &launch)?;
+                    }
+                    live.awaiting_dispatch = false;
+                    live.continuation = false;
+                }
+                g.event(
+                    if enabled { "MONITOR_ON" } else { "MONITOR_OFF" },
+                    if enabled {
+                        "감시를 켰습니다 — 사용량 확인과 자동 전환을 다시 시작합니다"
+                    } else {
+                        "감시를 껐습니다 — 상태만 표시하고 개입하지 않습니다"
+                    },
+                );
+                let result = json!(g);
+                self.groups.insert(id, g);
+                self.live.insert(id, live);
+                self.save()?;
+                Ok(result)
+            }
+            // One-shot manual usage read, outside the prompt-bound schedule.
+            // The provider's own cooldown still applies (see `usage.rs`).
+            "check_usage" => {
+                let id = Uuid::parse_str(string(&r, "id")?)?;
+                ensure!(self.groups.contains_key(&id), "Loop not found");
+                self.live.entry(id).or_default().force_usage_check = true;
+                Ok(json!({"ok":true}))
+            }
+            op @ ("pause" | "resume" | "stop" | "next" | "complete") => {
                 let id = Uuid::parse_str(string(&r, "id")?)?;
                 let mut g = self.groups.remove(&id).context("Loop not found")?;
                 let mut live = self.live.remove(&id).unwrap_or_default();
                 let result = (|| -> Result<Value> {
                     if op == "resume" {
                         ensure!(
-                            matches!(g.status.as_str(), "paused" | "error" | "idle"),
-                            "일시정지 또는 오류 상태에서만 재개할 수 있습니다"
+                            matches!(g.status.as_str(), "paused" | "error" | "idle" | "completed"),
+                            "일시정지·오류·완료 상태에서만 재개할 수 있습니다"
                         );
                         ensure!(
                             !g.queued_input.iter().any(|c| c.delivering),
                             "전달 여부가 불확실한 보관 입력을 먼저 확인하세요"
                         );
+                        g.monitoring = true;
                         live.attempted.clear();
-                        live.guard_at = now();
                         live.continuation = true;
                         g.resume_at = None;
                         g.waiting_profile_id = None;
@@ -566,6 +594,7 @@ impl Engine {
                         let status = match op {
                             "pause" => LoopStatus::Paused,
                             "stop" => LoopStatus::Stopped,
+                            "complete" => LoopStatus::Completed,
                             _ => LoopStatus::SwitchingProfile,
                         };
                         g.resume_at = None;
@@ -575,6 +604,7 @@ impl Engine {
                             Some(match op {
                                 "pause" => "Agent를 중단하고 자동 관리를 일시정지합니다",
                                 "stop" => "Loop를 종료합니다",
+                                "complete" => "작업 완료로 표시하고 Loop를 종료합니다",
                                 _ => "다음 프로필로 전환합니다",
                             }),
                         );
@@ -644,7 +674,7 @@ impl Engine {
             }
         }
         if bytes == b"\x03" {
-            if !matches!(g.status.as_str(), "paused" | "stopped" | "running") {
+            if !matches!(g.status.as_str(), "paused" | "stopped" | "completed" | "running") {
                 g.state(LoopStatus::Idle, Some("사용자 interrupt — Agent 대기 중"));
             }
             g.resume_at = None;
@@ -660,7 +690,6 @@ impl Engine {
                     )?;
                 }
                 live.continuation = false;
-                live.selected = None;
                 live.awaiting_dispatch = false;
                 live.user_interrupt = true;
                 live.initial_start = false;
@@ -672,23 +701,12 @@ impl Engine {
         }
         Ok(true)
     }
-    /// Adaptive cadence for one candidate: `base` (that candidate's most
-    /// urgent configured `pollingIntervalSeconds` across participating Loops)
-    /// shortens as its last known usage climbs toward the switch threshold,
-    /// and lengthens when it is not any Loop's active, running profile
-    /// (standby monitoring). This is what keeps a Loop with many enabled
-    /// Profiles from polling all of them on one fixed cadence.
-    fn tier_interval(&self, key: &str, base: u64, active_running: bool) -> u64 {
-        // A standby candidate spends no quota, so its usage cannot move and a
-        // high last sample is no reason to watch it closely: the tiers below
-        // apply only to the profile actually running. They used to be checked
-        // first, which left a standby profile parked just under its threshold
-        // being polled every CRITICAL_INTERVAL_SECS for as long as the Loop
-        // lived — with a few enabled Profiles, that alone is what ran the
-        // provider's usage endpoint into a 429.
-        if !active_running {
-            return base.max(polling::IDLE_INTERVAL_SECS);
-        }
+    /// Adaptive cadence for the Loop's own account: the configured baseline
+    /// shortens as that account climbs toward its switch threshold, and never
+    /// drops below the provider-safe floor. Only the account that is actually
+    /// running a prompt is ever polled (see [`Self::usage_targets`]), so there
+    /// is no standby tier to reason about any more.
+    fn poll_interval(&self, key: &str, base: u64) -> u64 {
         let usage = self.quotas.get(key).map(|q| {
             q.windows
                 .iter()
@@ -705,92 +723,106 @@ impl Engine {
         // shorter baseline than `validate` now accepts.
         .max(polling::MIN_INTERVAL_SECS)
     }
+    /// Which accounts may cost a provider usage request right now.
+    ///
+    /// Exactly two situations justify one, and nothing else is ever polled:
+    ///
+    /// 1. A Loop's active account is **running a prompt**. Quota only moves
+    ///    while the Agent is working, so that is the only time a new sample
+    ///    can say anything, and it is precisely what the switch decision
+    ///    needs. An Agent that has started but has not been prompted yet
+    ///    reports `pending_work == false` and is therefore never polled.
+    /// 2. The user pressed 지금 확인 in the Loop terminal's monitor bar.
+    ///
+    /// A cooldown needs no poll of its own: an account is blocked until the
+    /// reset instant it reported, and that instant passing is itself the
+    /// evidence that it is usable again (see [`Self::eligible`]). Asking the
+    /// provider at that moment would spend a request while nothing is running
+    /// to learn something already known.
+    ///
+    /// Standby accounts spend no quota, so their numbers cannot move; polling
+    /// them on a timer is what used to run the providers' own throttles into
+    /// 429s, which leaves the Loop with no numbers at all — strictly worse
+    /// than a coarse sample.
     pub fn usage_targets(&mut self) -> Vec<(String, String, PathBuf, bool, u64)> {
         let stamp = now();
-        let mut keys = HashSet::new();
-        let mut guards = HashMap::new();
-        let mut intervals = HashMap::new();
-        let mut active_running = HashSet::new();
-        for g in self.groups.values().filter(|g| {
-            matches!(
-                g.status.as_str(),
-                "preparing" | "running" | "resuming" | "waiting_for_usage_reset"
-            )
-        }) {
-            if g.status == "waiting_for_usage_reset" && g.resume_at.is_some_and(|at| at > stamp) {
-                continue;
-            }
-            if g.status == "running" {
-                if let Some(key) = &g.active_profile {
-                    active_running.insert(key.clone());
-                }
-            }
-            for c in self.candidates(g) {
-                let key = c.key();
-                keys.insert(key.clone());
-                let interval = g
-                    .policy
-                    .as_ref()
-                    .unwrap_or(&self.settings)
-                    .polling_interval_seconds;
-                intervals
-                    .entry(key.clone())
-                    .and_modify(|old: &mut u64| *old = (*old).min(interval))
-                    .or_insert(interval);
-                guards
-                    .entry(key)
-                    .and_modify(|at: &mut u64| {
-                        *at = (*at).max(self.live.get(&g.id).map(|l| l.guard_at).unwrap_or(0))
-                    })
-                    .or_insert(self.live.get(&g.id).map(|l| l.guard_at).unwrap_or(0));
-            }
+        // key -> (shortest requested cadence, may bypass pacing)
+        let mut wanted: HashMap<String, (u64, bool)> = HashMap::new();
+        fn want(wanted: &mut HashMap<String, (u64, bool)>, key: String, interval: u64, forced: bool) {
+            wanted
+                .entry(key)
+                .and_modify(|entry| {
+                    entry.0 = entry.0.min(interval);
+                    entry.1 |= forced;
+                })
+                .or_insert((interval, forced));
         }
-        let mut targets = vec![];
-        for key in self
-            .settings
-            .candidates
-            .iter()
-            .filter(|c| keys.contains(&c.key()))
-            .map(Candidate::key)
-            .collect::<Vec<_>>()
-        {
-            let Some(c) = self.settings.candidates.iter().find(|c| c.key() == key).cloned() else {
-                continue;
-            };
-            let base = intervals
-                .get(&key)
-                .copied()
-                .unwrap_or(self.settings.polling_interval_seconds);
-            let interval = self.tier_interval(&key, base, active_running.contains(&key));
-            let q = self.quotas.entry(key.clone()).or_default();
-            let guard = guards.get(&key).copied().unwrap_or(0);
-            // A guard bump (activation check, safe-boundary re-verification,
-            // explicit resume) demands a fresh sample now and bypasses
-            // backoff/reset-skip pacing; the passive scheduler never does.
-            let forced = q.fetched_at < guard;
-            let due = forced
-                || (stamp >= q.next_fetch_at
-                    && stamp.saturating_sub(q.requested_at) >= interval * 1000);
-            if due
-                && (q.requested_at <= q.fetched_at || stamp.saturating_sub(q.requested_at) > 30_000)
-            {
-                q.requested_at = stamp;
-                match profile_dir(&c) {
-                    Ok(dir) => targets.push((
-                        key.clone(),
-                        c.agent.clone(),
-                        dir,
-                        c.auth_method.as_deref() == Some("setup-token"),
-                        stamp,
-                    )),
-                    Err(e) => {
-                        q.error = Some(e.to_string());
-                        q.fetched_at = stamp;
+        for g in self.groups.values().filter(|g| g.monitoring) {
+            let interval = g
+                .policy
+                .as_ref()
+                .unwrap_or(&self.settings)
+                .polling_interval_seconds;
+            let manual = self.live.get(&g.id).is_some_and(|l| l.force_usage_check);
+            match g.status {
+                LoopStatus::Running if g.pending_work || manual => {
+                    if let Some(key) = g.active_profile.clone() {
+                        want(&mut wanted, key, interval, manual);
                     }
                 }
+                // Only on request: the countdown itself runs on stored resets.
+                LoopStatus::WaitingForUsageReset if manual => {
+                    for c in self.candidates(g) {
+                        want(&mut wanted, c.key(), interval, true);
+                    }
+                }
+                _ => {}
             }
         }
-        targets.sort_by_key(|(key, ..)| !active_running.contains(key));
+        let mut wanted: Vec<_> = wanted.into_iter().collect();
+        wanted.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut targets = vec![];
+        for (key, (base, forced)) in wanted {
+            let Some(c) = self
+                .settings
+                .candidates
+                .iter()
+                .find(|c| c.key() == key)
+                .cloned()
+            else {
+                continue;
+            };
+            let interval = self.poll_interval(&key, base);
+            let q = self.quotas.entry(key.clone()).or_default();
+            let due = forced
+                || (stamp >= q.next_fetch_at
+                    && stamp.saturating_sub(q.fetched_at) >= interval * 1000);
+            // Never two requests in flight for the same account.
+            let in_flight =
+                q.requested_at > q.fetched_at && stamp.saturating_sub(q.requested_at) <= 30_000;
+            if !due || in_flight {
+                continue;
+            }
+            q.requested_at = stamp;
+            match profile_dir(&c) {
+                Ok(dir) => targets.push((
+                    key.clone(),
+                    c.agent.clone(),
+                    dir,
+                    c.auth_method.as_deref() == Some("setup-token"),
+                    stamp,
+                )),
+                Err(e) => {
+                    q.error = Some(e.to_string());
+                    q.fetched_at = stamp;
+                }
+            }
+        }
+        // A manual request is one-shot whether or not it produced work: pacing
+        // and the provider's own cooldown may legitimately swallow it.
+        for live in self.live.values_mut() {
+            live.force_usage_check = false;
+        }
         targets
     }
     pub fn quota(
@@ -859,21 +891,34 @@ impl Engine {
             }
         }
         if q.error.is_none() {
-            // Reset-aware skip: once every controlling window is at/over its
-            // threshold with a known reset time, there is no point polling
-            // again before that reset is near.
-            if let Some(c) = self.settings.candidates.iter().find(|c| c.key() == key) {
-                if over_limit(&self.settings, c, &q.windows) {
+            // A successful sample that finds a window spent is where a cooldown
+            // comes from. Record when the account is due back — the latest
+            // reset among the windows that stopped it, since it is only usable
+            // again once every one of them has turned over — and stop polling
+            // it until then. `blocked_until` is persisted, so the wait survives
+            // a daemon restart instead of being rediscovered by launching an
+            // Agent into a limit that has not lifted.
+            if let Some(c) = self
+                .settings
+                .candidates
+                .iter()
+                .find(|c| c.key() == key)
+                .cloned()
+            {
+                if over_limit(&self.settings, &c, &q.windows) {
                     if let Some(reset_at) = q
                         .windows
                         .iter()
                         .filter(|w| {
                             matches!(w.kind.as_str(), "short" | "weekly")
-                                && w.percent_used >= limit(&self.settings, c, w)
+                                && w.percent_used >= limit(&self.settings, &c, w)
                         })
                         .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
                         .max()
                     {
+                        if reset_at > now() {
+                            q.blocked_until = q.blocked_until.max(reset_at);
+                        }
                         let cap = now() + polling::MAX_RESET_SKIP_SECS * 1000;
                         let target = reset_at
                             .saturating_sub(jittered(60_000, 0.0, 1.0))
@@ -930,34 +975,90 @@ impl Engine {
                 .values_mut()
                 .filter(|g| g.participants.is_empty() || g.participants.contains(&key))
             {
-                let policy = g.policy.as_ref().unwrap_or(&self.settings);
-                let runtime_check = policy.candidates.iter().find(|c| c.key() == key)
-                    .is_some_and(|c| q.runtime_usage_fallback(policy, c));
-                let event_message = if runtime_check { format!("{label}: Claude 실행 후 사용량을 확인합니다") } else { message.clone() };
-                g.event("USAGE_UPDATED", &event_message);
+                g.event("USAGE_UPDATED", &message);
             }
         }
     }
-    fn eligible(&self, c: &Candidate, guard: u64) -> bool {
+    /// [`over_limit`] restricted to the windows that have not turned over since
+    /// the sample was taken. A 5-hour window recorded at 100% whose reset is
+    /// already in the past says nothing about the account now.
+    fn over_live_limit(&self, c: &Candidate, windows: &[UsageWindow]) -> bool {
+        let live: Vec<_> = windows
+            .iter()
+            .filter(|w| {
+                w.resets_at
+                    .as_ref()
+                    .and_then(reset_millis)
+                    .is_none_or(|at| at > now())
+            })
+            .cloned()
+            .collect();
+        over_limit(&self.settings, c, &live)
+    }
+    /// Whether this account may be started right now.
+    ///
+    /// Deliberately optimistic about numbers we do not have: an account is held
+    /// back only by *evidence* — the provider said it was out (`blocked_until`,
+    /// which carries the reset instant), or the last sample we took shows a
+    /// window at or over its limit and that window has not reset yet. An
+    /// account nobody has polled is eligible, which is what lets the first
+    /// Agent of a fresh Loop start without spending a usage request, and what
+    /// lets a cooldown end the moment its stored reset passes.
+    fn eligible(&self, c: &Candidate) -> bool {
         c.enabled
             && adapter::resolve_native(&c.agent).is_ok()
-            && self.quotas.get(&c.key()).is_some_and(|q| {
-                q.fetched_at >= guard
-                    && q.blocked_until <= now()
-                    && (q.runtime_usage_fallback(&self.settings, c)
-                        // Selection always forces a fresh fetch first (see the
-                        // guard in `usage_targets`), so this window only has to
-                        // outlast that round-trip, never the standby cadence.
-                        //
-                        // A failed refresh is not itself evidence: the last
-                        // good sample stands until it ages out of that window,
-                        // which is what genuinely makes usage unconfirmable.
-                        // Disqualifying on `error` alone meant one throttled
-                        // or dropped status query took the profile down while
-                        // a seconds-old reading was still in hand.
-                        || (crate::usage::usage_windows_are_fresh(&q.windows, sample_max_age(self.settings.polling_interval_seconds))
-                            && !over_limit(&self.settings, c, &q.windows)))
+            && self.quotas.get(&c.key()).is_none_or(|q| {
+                q.blocked_until <= now() && !self.over_live_limit(c, &q.windows)
             })
+    }
+    /// Remember when an over-limit account is due back, taken from the reset
+    /// instants its own sample carries. Complements the same bookkeeping in
+    /// [`Self::quota`] for the case where the decision is made from a sample
+    /// that was already in hand.
+    fn block_until_reset(&mut self, c: &Candidate) {
+        let settings = self.settings.clone();
+        let Some(q) = self.quotas.get_mut(&c.key()) else {
+            return;
+        };
+        let reset = q
+            .windows
+            .iter()
+            .filter(|w| {
+                matches!(w.kind.as_str(), "short" | "weekly")
+                    && w.percent_used >= limit(&settings, c, w)
+            })
+            .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
+            .filter(|at| *at > now())
+            .max();
+        if let Some(at) = reset {
+            q.blocked_until = q.blocked_until.max(at);
+        }
+    }
+    /// The account that comes back first, and when. This is the whole cooldown:
+    /// every participating account is spent, so the Loop waits for the earliest
+    /// stored reset rather than retrying on a fixed timer. An account is back
+    /// only once *all* of the windows that stopped it have reset, hence the
+    /// latest reset per account and the earliest across accounts.
+    fn cooldown_until(&self, g: &Group) -> Option<(String, u64)> {
+        self.candidates(g)
+            .into_iter()
+            .filter(|c| adapter::resolve_native(&c.agent).is_ok())
+            .filter_map(|c| {
+                let q = self.quotas.get(&c.key())?;
+                let reset = q
+                    .windows
+                    .iter()
+                    .filter(|w| {
+                        matches!(w.kind.as_str(), "short" | "weekly")
+                            && w.percent_used >= limit(&self.settings, &c, w)
+                    })
+                    .filter_map(|w| w.resets_at.as_ref().and_then(reset_millis))
+                    .chain(Some(q.blocked_until))
+                    .filter(|at| *at > now())
+                    .max()?;
+                Some((c.key(), reset))
+            })
+            .min_by_key(|(_, at)| *at)
     }
     fn respond(&self, g: &Group, d: &Dispatch, response: &impl Serialize) -> Result<()> {
         atomic_json(
@@ -966,10 +1067,6 @@ impl Engine {
         )
     }
     fn interrupt(&self, state: &Arc<DaemonState>, g: &mut Group, live: &mut Live) -> Result<()> {
-        // Any real interrupt (this call) supersedes a soft, not-yet-acted-on
-        // usage-threshold switch request — see the "running" branch of `step`.
-        g.switch_pending = false;
-        g.switch_pending_since = None;
         if live.interrupt_at.is_some() {
             return Ok(());
         }
@@ -998,29 +1095,17 @@ impl Engine {
         g.event("INTERRUPTING", "현재 Agent를 중단하는 중");
         Ok(())
     }
+    /// The per-account cards the Loop terminal shows. Purely a projection of
+    /// the quota table — the quota table is persisted, so a restart keeps the
+    /// numbers and the reset instants instead of showing every account as
+    /// unknown until something polls it again.
     fn profiles(&self, g: &mut Group) {
-        let saved = g.profiles.clone();
         g.profiles = self
             .settings
             .candidates
             .iter()
             .filter(|c| g.participants.is_empty() || g.participants.contains(&c.key()))
             .map(|c| {
-                if !self.quotas.contains_key(&c.key()) {
-                    if let Some(previous) = saved.iter().find(|p| p.key == c.key()) {
-                        let mut previous = previous.clone();
-                        let controlling = controlling(&self.settings, c, &previous.windows);
-                        previous.threshold = controlling
-                            .map(|w| limit(&self.settings, c, w))
-                            .unwrap_or_else(|| self.settings.threshold_of(c, c.threshold_basis));
-                        previous.threshold_kind = controlling
-                            .map_or_else(|| c.threshold_basis.kind().to_owned(), |w| w.kind.clone());
-                        previous.status = ProfileStatus::Error;
-                        previous.error =
-                            Some("저장된 사용량입니다. 실행 전 새로 조회합니다.".into());
-                        return previous;
-                    }
-                }
                 let q = self.quotas.get(&c.key());
                 let windows = q.map(|q| q.windows.clone()).unwrap_or_default();
                 let controlling_window = controlling(&self.settings, c, &windows);
@@ -1030,7 +1115,7 @@ impl Engine {
                     .unwrap_or_else(|| self.settings.threshold_of(c, c.threshold_basis));
                 let threshold_kind = controlling_window
                     .map_or_else(|| c.threshold_basis.kind().to_owned(), |w| w.kind.clone());
-                // All exhausted windows must reset before this profile is eligible.
+                // All spent windows must reset before this account is usable.
                 let reset_at = windows
                     .iter()
                     .filter(|w| {
@@ -1048,49 +1133,25 @@ impl Engine {
                     .or_else(|| {
                         controlling_window.and_then(|w| w.resets_at.as_ref().and_then(reset_millis))
                     });
-                let executable_error = adapter::resolve_native(&c.agent).err().map(|e| e.to_string());
-                let usage_pending = executable_error.is_none() && q.is_some_and(|q| q.runtime_usage_fallback(&self.settings, c));
-                // `usage_pending` only speaks for a profile that has never
-                // produced a sample — that one really is just waiting, and the
-                // pending note already says so. Once a profile has reported
-                // usage at least once (`quota` keeps the last windows through
-                // a failure), any later message is news the user needs: an
-                // expired login, a refused request, an unreadable sample. It
-                // used to be swallowed here, leaving a profile showing neither
-                // a number nor a reason.
-                let waiting_for_first_sample = q.is_some_and(|q| q.windows.is_empty());
-                let missing_native = executable_error.is_some();
-                let error = executable_error.or_else(|| {
-                    if usage_pending && waiting_for_first_sample { None } else { q.and_then(|q| q.error.clone()) }
+                let executable_error =
+                    adapter::resolve_native(&c.agent).err().map(|e| e.to_string());
+                let error = executable_error
+                    .clone()
+                    .or_else(|| q.and_then(|q| q.error.clone()));
+                let blocked = q.is_some_and(|q| {
+                    q.blocked_until > now() || self.over_live_limit(c, &q.windows)
                 });
-                // A refresh that failed while the last sample is still inside
-                // its freshness window does not change what this profile is:
-                // the Loop keeps running on that sample (see `eligible`), so
-                // the card keeps showing its real state rather than flipping
-                // to an error. The reason the number stopped moving still
-                // reaches the user through `error`.
-                let unconfirmed = error.is_some()
-                    && !crate::usage::usage_windows_are_fresh(
-                        &windows,
-                        sample_max_age(self.settings.polling_interval_seconds),
-                    );
                 let status = if !c.enabled {
                     ProfileStatus::Disabled
+                } else if executable_error.is_some() {
+                    ProfileStatus::Error
                 } else if g.status == "waiting_for_usage_reset"
                     && g.waiting_profile_id.as_deref() == Some(c.key().as_str())
                 {
                     ProfileStatus::WaitingReset
-                } else if (unconfirmed && error.as_ref().is_some_and(|e| e.contains("429")))
-                    || q.is_some_and(|q| q.blocked_until > now() && q.rate_limited)
-                {
+                } else if q.is_some_and(|q| q.rate_limited && q.blocked_until > now()) {
                     ProfileStatus::RateLimited
-                } else if usage_pending {
-                    if Some(c.key()) == g.active_profile && g.runtime.pid.is_some() { ProfileStatus::Active } else { ProfileStatus::Available }
-                } else if missing_native || unconfirmed || usage.is_none() {
-                    ProfileStatus::Error
-                } else if over_limit(&self.settings, c, &windows)
-                    || q.is_some_and(|q| q.blocked_until > now())
-                {
+                } else if blocked {
                     ProfileStatus::Exhausted
                 } else if g.active_profile.as_deref() == Some(c.key().as_str())
                     && g.runtime.pid.is_some()
@@ -1102,7 +1163,9 @@ impl Engine {
                     ProfileStatus::Available
                 };
                 ProfileSnapshot {
-                    usage_pending,
+                    // Nothing has been read yet. Not a fault: usage is only
+                    // ever queried while this account is running a prompt.
+                    usage_pending: usage.is_none() && error.is_none(),
                     key: c.key(),
                     agent: c.agent.clone(),
                     label: c.label.clone(),
@@ -1113,6 +1176,7 @@ impl Engine {
                     remaining: usage.map(|n| (100.0 - n).max(0.0)),
                     reset_at,
                     error,
+                    checked_at: q.map(|q| q.fetched_at).filter(|at| *at > 0),
                     windows,
                 }
             })
@@ -1195,7 +1259,7 @@ impl Engine {
         self.save()
     }
     fn step(&mut self, state: &Arc<DaemonState>, g: &mut Group, live: &mut Live) -> Result<()> {
-        if g.active_session_id.is_none() && g.status != "stopped" {
+        if g.active_session_id.is_none() && !matches!(g.status.as_str(), "stopped" | "completed") {
             self.terminal(state, g)?;
         }
         let Some(sid) = g.active_session_id else {
@@ -1211,7 +1275,7 @@ impl Engine {
             g.active_session_id = None;
             if !matches!(
                 g.status.as_str(),
-                "stopped" | "paused" | "waiting_for_usage_reset"
+                "stopped" | "completed" | "paused" | "waiting_for_usage_reset"
             ) {
                 g.state(
                     LoopStatus::Idle,
@@ -1234,7 +1298,11 @@ impl Engine {
         if runtime.pid.is_some() {
             live.process_seen = true;
         }
-        if !matches!(g.status.as_str(), "stopped" | "paused" | "error") {
+        // Lifecycle evidence (prompt started/finished, provider limit errors,
+        // session identity) is read even when this Loop is only observing: it
+        // is what the monitor bar reports, and turning monitoring back on must
+        // not start from a blank slate.
+        if !matches!(g.status.as_str(), "stopped" | "completed" | "paused" | "error") {
             self.read_events(g, live)?;
         }
         if g.status == "switching_profile" && live.interrupt_at.is_none() {
@@ -1331,7 +1399,12 @@ impl Engine {
             if g.status == "waiting_for_usage_reset" && !live.awaiting_dispatch {
                 live.continuation = false;
             }
-            if matches!(g.status.as_str(), "paused" | "stopped") {
+            // A Loop that is not managing this terminal — paused, stopped,
+            // finished, or monitoring switched off — still has to answer the
+            // shell's gate, or the command the user typed would hang. It is
+            // answered with an unmanaged launch: their command, their profile,
+            // no hooks and no ownership.
+            if matches!(g.status.as_str(), "paused" | "stopped" | "completed") || !g.monitoring {
                 if live.awaiting_dispatch {
                     self.respond(g, &dispatch, &json!({"cancel":true}))?;
                     live.awaiting_dispatch = false;
@@ -1373,17 +1446,16 @@ impl Engine {
             live.launch_at = 0;
             live.user_interrupt = false;
             live.helper_pid = Some(dispatch.pid);
-            live.guard_at = now();
             live.attempted.clear();
             live.dispatch = Some(dispatch);
             live.awaiting_dispatch = false;
             g.runtime.status = RuntimeStatus::Starting;
             g.state(
                 LoopStatus::Preparing,
-                Some("Agent 실행 전 Profile 사용량을 확인하는 중"),
+                Some("사용 가능한 프로필을 선택하는 중"),
             );
         }
-        if matches!(g.status.as_str(), "paused" | "stopped" | "error") {
+        if matches!(g.status.as_str(), "paused" | "stopped" | "completed" | "error") || !g.monitoring {
             return Ok(());
         }
         if live.user_interrupt && runtime.pid.is_none() && !helper_alive {
@@ -1469,148 +1541,72 @@ impl Engine {
             }
             if runtime.pid.is_none() && live.process_seen && !helper_alive {
                 live.process_seen = false;
-                g.state(
-                    LoopStatus::Idle,
-                    Some("Agent가 종료되었습니다 — Agent 대기 중"),
-                );
+                // The Agent left on its own, while the Loop was neither
+                // switching it out nor being interrupted by the user. That is
+                // the end of the work this Loop exists to carry: the helper
+                // recorded the CLI's exit code, which is the one signal that
+                // tells a finished job from a crashed one.
+                let code = live
+                    .dispatch_id
+                    .as_ref()
+                    .and_then(|id| fs::read(root.join(format!("exit-{id}.json"))).ok())
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .and_then(|value| value["code"].as_i64());
+                if let Some(a) = g.attempts.last_mut() {
+                    a.ended_at = Some(now());
+                    a.status = "exited".into();
+                }
+                if code.is_none_or(|code| code == 0) {
+                    g.state(
+                        LoopStatus::Completed,
+                        Some("Agent가 작업을 마치고 종료했습니다 — Loop를 종료합니다"),
+                    );
+                } else {
+                    g.state(
+                        LoopStatus::Idle,
+                        Some(&format!(
+                            "Agent가 오류로 종료했습니다 (exit {}). 재개하거나 터미널에서 직접 실행하세요",
+                            code.unwrap_or(-1)
+                        )),
+                    );
+                }
                 return Ok(());
             }
             if runtime.pid.is_none() && now().saturating_sub(live.launch_at) > 30_000 {
                 bail!("Agent 프로세스 시작을 확인하지 못했습니다");
             }
-            if let Some(c) = self
+            let Some(c) = self
                 .settings
                 .candidates
                 .iter()
                 .find(|c| Some(c.key()) == g.active_profile)
                 .cloned()
-            {
-                let q = self.quotas.get(&c.key());
-                // The active, running profile is polled at its own adaptive
-                // cadence, so the window its sample has to stay inside is that
-                // cadence — not the configured baseline, which the tiers
-                // shorten as usage climbs.
-                let max_age = sample_max_age(self.tier_interval(
-                    &c.key(),
-                    self.settings.polling_interval_seconds,
-                    true,
-                ));
-                // Hard block: the profile is disabled, explicitly blocked by a
-                // provider-reported limit/rate-limit, or we cannot confirm its
-                // usage at all (no sample inside the freshness window). None of
-                // that is safe to keep running on, so this still interrupts
-                // immediately regardless of any turn in progress — continuing
-                // would just fail against the provider anyway. A failed refresh
-                // on its own is not that: it only counts once the last good
-                // sample has aged out (see `eligible`).
-                let hard_invalid = !c.enabled
-                    || q.is_none_or(|q| {
-                        q.blocked_until > now()
-                            || (!q.runtime_usage_fallback(&self.settings, &c)
-                                && !crate::usage::usage_windows_are_fresh(&q.windows, max_age))
-                    });
-                // Soft block: our own periodic usage check crossed the
-                // configured threshold, but the profile itself is otherwise
-                // known-good (fresh, no error, not provider-blocked). This is
-                // a *request* to switch, not the switch — see below.
-                let soft_over = !hard_invalid
-                    && q.is_some_and(|q| {
-                        !q.runtime_usage_fallback(&self.settings, &c)
-                            && over_limit(&self.settings, &c, &q.windows)
-                    });
-                if hard_invalid {
-                    g.switch_pending = false;
-                    g.switch_pending_since = None;
-                    g.event(
-                        "USAGE_THRESHOLD_REACHED",
-                        "현재 Profile 사용량이 임계값에 도달했거나 확인할 수 없습니다",
-                    );
-                    g.state(
-                        LoopStatus::SwitchingProfile,
-                        Some("사용량 방어 — 다음 프로필로 전환합니다"),
-                    );
-                    self.interrupt(state, g, live)?;
-                    return Ok(());
-                }
-                if soft_over && !g.switch_pending {
-                    g.switch_pending = true;
-                    g.switch_pending_since = Some(now());
-                    g.event(
-                        "SWITCH_PENDING",
-                        &format!(
-                            "{} 사용량이 임계값을 초과했습니다 — 현재 작업이 끝나면 안전하게 전환합니다",
-                            c.label
-                        ),
-                    );
-                    tracing::info!("[Usage] profile={} switch-pending usage-threshold-reached", c.key());
-                } else if !soft_over && g.switch_pending {
-                    g.switch_pending = false;
-                    g.switch_pending_since = None;
-                    g.event(
-                        "SWITCH_PENDING_CLEARED",
-                        &format!("{} 사용량이 임계값 아래로 회복되어 전환 요청을 취소합니다", c.label),
-                    );
-                }
-                if g.switch_pending {
-                    if g.pending_work {
-                        // Mid-turn (THINKING/TOOL_RUNNING/RUNNING-equivalent for
-                        // this project's binary turn tracker) — never interrupt
-                        // here. Wait for the next Stop/idle boundary; a timeout
-                        // never silently drops switch_pending nor forces either
-                        // extreme (see AGENTS.md notes on safe-boundary switching).
-                        tracing::debug!(
-                            "[Loop] profile={} waiting-safe-boundary state=TOOL_RUNNING pending_since={}",
-                            c.key(),
-                            g.switch_pending_since.unwrap_or(0)
-                        );
-                    } else if let Some(q) = q.filter(|q| {
-                        now().saturating_sub(q.fetched_at) <= polling::CACHE_TTL_SECS * 1000
-                    }) {
-                        // Safe boundary reached (turn completed / idle) and we
-                        // have a fresh-enough sample to trust — re-verify before
-                        // committing to a switch instead of acting on a stale read.
-                        tracing::info!("[Loop] profile={} safe-boundary detected", c.key());
-                        tracing::debug!("[Usage] profile={} verifying-before-switch", c.key());
-                        if over_limit(&self.settings, &c, &q.windows) {
-                            g.switch_pending = false;
-                            g.switch_pending_since = None;
-                            g.event(
-                                "SAFE_BOUNDARY_SWITCH",
-                                &format!(
-                                    "{}: 안전한 경계에서 사용량을 재확인했고 여전히 임계값 이상입니다 — 전환합니다",
-                                    c.label
-                                ),
-                            );
-                            g.state(
-                                LoopStatus::SwitchingProfile,
-                                Some("안전한 경계에서 사용량을 재확인하고 다음 프로필로 전환합니다"),
-                            );
-                            self.interrupt(state, g, live)?;
-                            return Ok(());
-                        }
-                        g.switch_pending = false;
-                        g.switch_pending_since = None;
-                        g.event(
-                            "SWITCH_PENDING_CLEARED",
-                            &format!("{}: 안전한 경계에서 재확인한 사용량이 임계값 아래입니다", c.label),
-                        );
-                    } else {
-                        // Cache is stale (or a verification fetch is still in
-                        // flight, e.g. rate-limited): demand a fresh sample and
-                        // check again next tick. Never guess — switch_pending
-                        // stays set and we neither force a switch nor silently
-                        // resume unbounded execution on this account.
-                        live.guard_at = live.guard_at.max(now());
-                        tracing::debug!(
-                            "[Usage] profile={} verifying-before-switch awaiting-fresh-sample",
-                            c.key()
-                        );
-                    }
-                }
-            } else {
+            else {
                 g.state(
                     LoopStatus::SwitchingProfile,
                     Some("활성 Profile이 제거되어 Agent를 중단합니다"),
+                );
+                self.interrupt(state, g, live)?;
+                return Ok(());
+            };
+            // The account is judged on evidence only, and the evidence arrives
+            // while a prompt runs — see `usage_targets`. An account nobody has
+            // been able to read yet simply keeps working; the provider's own
+            // limit error (`read_events`) is the backstop, and it carries the
+            // reset instant the cooldown needs.
+            let spent = !c.enabled
+                || self.quotas.get(&c.key()).is_some_and(|q| {
+                    q.blocked_until > now() || self.over_live_limit(&c, &q.windows)
+                });
+            if spent {
+                self.block_until_reset(&c);
+                g.event(
+                    "USAGE_THRESHOLD_REACHED",
+                    &format!("{} 사용량이 한도에 도달했습니다", c.label),
+                );
+                g.state(
+                    LoopStatus::SwitchingProfile,
+                    Some("사용량 한도 — 다음 프로필로 전환합니다"),
                 );
                 self.interrupt(state, g, live)?;
                 return Ok(());
@@ -1638,11 +1634,10 @@ impl Engine {
             }
             ensure!(g.handoff_context.is_some() || !g.pending_work, "Session context를 확인할 수 없어 자동 재실행을 중단했습니다. 터미널에서 직접 resume하세요.");
             live.continuation = true;
-            live.guard_at = now();
             live.attempted.clear();
             g.state(
                 LoopStatus::Resuming,
-                Some("다음 Profile 사용량을 새로 확인하는 중"),
+                Some("다음 프로필로 작업을 이어가는 중"),
             );
         }
         if g.status == "waiting_for_usage_reset" {
@@ -1660,11 +1655,35 @@ impl Engine {
             if !self.settings.auto_resume || g.resume_at.is_some_and(|at| at > now()) {
                 return Ok(());
             }
-            live.guard_at = now();
+            // The stored reset has arrived. If the user asked for a reading
+            // while the countdown ran, let it land before deciding, so a
+            // cooldown that has not actually ended is not discovered by
+            // launching an Agent into it.
+            let awaiting_sample = self.candidates(g).into_iter().any(|c| {
+                self.quotas.get(&c.key()).is_some_and(|q| {
+                    q.requested_at > q.fetched_at
+                        && now().saturating_sub(q.requested_at) <= 30_000
+                })
+            });
+            if awaiting_sample {
+                return Ok(());
+            }
+            // Still nothing usable: re-arm the wait on the reset instants we
+            // now hold rather than typing a provider command into the shell on
+            // every tick of a cooldown that is still running.
+            if !self.candidates(g).into_iter().any(|c| self.eligible(&c)) {
+                let next = self.cooldown_until(g);
+                g.waiting_profile_id = next.as_ref().map(|(key, _)| key.clone());
+                g.resume_at = Some(
+                    next.map(|(_, at)| at)
+                        .unwrap_or(now() + self.settings.polling_interval_seconds * 1000),
+                );
+                return Ok(());
+            }
             live.attempted.clear();
             g.state(
                 LoopStatus::Resuming,
-                Some("예상 초기화 시간이 되어 실제 사용량을 확인합니다"),
+                Some("사용 가능한 프로필이 생겼습니다 — 작업을 재개합니다"),
             );
         }
         if g.status == "resuming" && live.dispatch.is_none() {
@@ -1677,44 +1696,22 @@ impl Engine {
             write_pty(state, sid, format!("{provider}\r").as_bytes())?;
             g.state(
                 LoopStatus::Preparing,
-                Some("Agent 실행 전 새 Usage 조회를 기다립니다"),
+                Some("사용 가능한 프로필을 선택하는 중"),
             );
             return Ok(());
         }
         if g.status == "preparing" && live.dispatch.is_some() {
             let candidates = self.candidates(g);
-            if let Some(key) = live.selected.clone() {
-                if self
-                    .quotas
-                    .get(&key)
-                    .is_none_or(|q| q.fetched_at < live.guard_at)
-                {
-                    return Ok(());
-                }
-                if let Some(c) = candidates
-                    .iter()
-                    .find(|c| c.key() == key && self.eligible(c, live.guard_at))
-                {
-                    self.activate(state, g, live, c.clone())?;
-                    live.selected = None;
-                    return Ok(());
-                }
-                live.attempted.insert(key);
-                live.selected = None;
-            }
-            if candidates.iter().any(|c| {
-                self.quotas
-                    .get(&c.key())
-                    .is_none_or(|q| q.fetched_at < live.guard_at)
-            }) {
-                return Ok(());
-            }
             let mut ranked = candidates.clone();
+            // An account nobody has read yet is assumed fresh, not spent. With
+            // usage only sampled while a prompt runs, "no sample" is the normal
+            // state of every standby account, and ranking those last would pin
+            // the Loop to the one account it happens to have numbers for.
             let usage = |c: &Candidate| {
                 self.quotas
                     .get(&c.key())
                     .map(|q| q.windows.iter().map(|w| w.percent_used).fold(0.0, f64::max))
-                    .unwrap_or(100.0)
+                    .unwrap_or(0.0)
             };
             let last = |c: &Candidate| {
                 g.attempts
@@ -1741,36 +1738,26 @@ impl Engine {
             if live.context_restart {
                 ranked.retain(|c| Some(c.key()) == g.active_profile);
             }
-            let allowed = |c: &Candidate| {
-                !live.attempted.contains(&c.key()) && self.eligible(c, live.guard_at)
-            };
+            let allowed =
+                |c: &Candidate| !live.attempted.contains(&c.key()) && self.eligible(c);
+            // Advance from the account that just stopped rather than re-picking
+            // the same one: "switch to the next profile" is the whole contract,
+            // and cycling the full list is what decides a cooldown is due.
             let chosen = if !live.initial_start && self.settings.strategy == "ROUND_ROBIN" {
                 choose(&ranked, g.active_profile.as_deref(), allowed)
             } else {
                 ranked.into_iter().find(allowed)
             };
             if let Some(c) = chosen {
-                live.selected = Some(c.key());
-                live.guard_at = now() + 1;
-                g.event(
-                    "ACTIVATION_CHECK",
-                    &format!("{} 활성화 직전 사용량을 다시 확인합니다", c.label),
-                );
+                self.activate(state, g, live, c)?;
             } else {
-                self.profiles(g);
-                let next = g
-                    .profiles
-                    .iter()
-                    .filter(|p| !matches!(p.status, ProfileStatus::Disabled))
-                    .filter_map(|p| {
-                        p.reset_at
-                            .filter(|at| *at > now())
-                            .map(|at| (at, p.key.clone()))
-                    })
-                    .min_by_key(|(at, _)| *at);
-                g.waiting_profile_id = next.as_ref().map(|(_, key)| key.clone());
+                // Every participating account has been tried and none is
+                // usable. Wait out the earliest stored reset — never a fixed
+                // retry timer, and never a failure.
+                let next = self.cooldown_until(g);
+                g.waiting_profile_id = next.as_ref().map(|(key, _)| key.clone());
                 g.resume_at = Some(
-                    next.map(|(at, _)| at)
+                    next.map(|(_, at)| at)
                         .unwrap_or(now() + self.settings.polling_interval_seconds * 1000),
                 );
                 if let Some(d) = live.dispatch.take() {
@@ -1779,7 +1766,7 @@ impl Engine {
                 live.continuation = true;
                 g.state(
                     LoopStatus::WaitingForUsageReset,
-                    Some("모든 참여 Profile을 사용할 수 없습니다. Usage reset 후 다시 확인합니다"),
+                    Some("모든 참여 프로필의 사용량이 소진되었습니다. 초기화 시간까지 대기합니다"),
                 );
             }
         }
@@ -1797,13 +1784,7 @@ impl Engine {
             state.manager.runtime.lock().get_state(sid).pid.is_none(),
             "Previous Agent has not exited"
         );
-        ensure!(
-            self.eligible(&c, live.guard_at),
-            "Profile no longer available"
-        );
-        if self.quotas.get(&c.key()).is_some_and(|q| q.runtime_usage_fallback(&self.settings, &c)) {
-            g.event("USAGE_CHECK_DEFERRED", &format!("{}: 실행 전 사용량을 조회할 수 없어 Claude 실행 후 확인합니다", c.label));
-        }
+        ensure!(self.eligible(&c), "Profile no longer available");
         let dispatch = live.dispatch.clone().context("Missing command dispatch")?;
         let attempt_id = Uuid::new_v4().to_string();
         let attempt_dir = self.dir(g).join(&attempt_id);
@@ -1977,6 +1958,9 @@ impl Engine {
         live.initial_start = false;
         live.launch_at = now();
         live.startup_ready = false;
+        // The helper writes this launch's exit code under its dispatch id; the
+        // `running` branch reads it to tell a finished job from a crash.
+        live.dispatch_id = Some(dispatch.id.clone());
         live.processed.clear();
         g.runtime.status = RuntimeStatus::Starting;
         g.state(

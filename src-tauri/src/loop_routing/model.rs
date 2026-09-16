@@ -309,15 +309,13 @@ pub struct Group {
     pub current_provider: Option<String>,
     #[serde(default)]
     pub current_agent_session_id: Option<String>,
-    /// Set when the active profile's usage has crossed its configured
-    /// threshold while `status` is still `running`. This is a *request* to
-    /// switch, not the switch itself — see the "running" branch of
-    /// `Engine::step`. The actual interrupt only fires once `pending_work` is
-    /// false (a safe turn boundary) and the usage has been re-verified.
-    #[serde(default)]
-    pub switch_pending: bool,
-    #[serde(default)]
-    pub switch_pending_since: Option<u64>,
+    /// Whether this Loop actively manages its terminal: usage polling,
+    /// threshold switching, profile handoff and cooldown scheduling. Turned
+    /// off from the Loop terminal's own monitor bar it keeps observing and
+    /// reporting (Agent process, prompt state) but never interrupts, never
+    /// switches, and never spends a provider usage request.
+    #[serde(default = "monitoring_default")]
+    pub monitoring: bool,
     pub id: uuid::Uuid,
     pub name: String,
     pub workspace_id: String,
@@ -360,6 +358,9 @@ impl Group {
 fn default_strategy() -> String {
     "SMART".into()
 }
+pub fn monitoring_default() -> bool {
+    true
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopStatus {
@@ -374,6 +375,10 @@ pub enum LoopStatus {
     #[serde(alias = "waiting")]
     WaitingForUsageReset,
     Resuming,
+    /// The managed Agent finished its work and exited on its own. Terminal for
+    /// the Loop: nothing is restarted, no usage is polled, and the shell stays
+    /// open so the result can still be read.
+    Completed,
     Stopped,
     #[serde(alias = "recovery")]
     Error,
@@ -389,6 +394,7 @@ impl LoopStatus {
             Self::Handoff => "handoff",
             Self::WaitingForUsageReset => "waiting_for_usage_reset",
             Self::Resuming => "resuming",
+            Self::Completed => "completed",
             Self::Stopped => "stopped",
             Self::Error => "error",
         }
@@ -411,6 +417,7 @@ impl From<&str> for LoopStatus {
             "handoff" => Self::Handoff,
             "waiting_for_usage_reset" | "waiting" => Self::WaitingForUsageReset,
             "resuming" => Self::Resuming,
+            "completed" => Self::Completed,
             "stopped" => Self::Stopped,
             "error" => Self::Error,
             _ => panic!("Unknown test LoopStatus: {value}"),
@@ -460,6 +467,10 @@ pub struct ProfileSnapshot {
     pub remaining: Option<f64>,
     pub reset_at: Option<u64>,
     pub error: Option<String>,
+    /// When this account's usage was last read, so the Loop terminal can say
+    /// whether the numbers on screen are from this run or from before it.
+    #[serde(default)]
+    pub checked_at: Option<u64>,
     pub windows: Vec<crate::usage::UsageWindow>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -502,7 +513,7 @@ mod tests {
     fn legacy_profile_snapshot_without_threshold_kind_loads() {
         let mut saved = serde_json::json!({
             "key":"codex:system", "agent":"codex", "label":"System",
-            "status":"AVAILABLE", "usage":25.0, "threshold":90.0,
+            "status":"AVAILABLE", "usage":25.0, "threshold":90.0, "checkedAt":null,
             "remaining":75.0, "resetAt":null, "error":null, "windows":[]
         });
         let legacy: ProfileSnapshot = serde_json::from_value(saved.clone()).unwrap();

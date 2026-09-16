@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue';
+
 import { Icon } from '@iconify/vue';
 import TerminalView from './Terminal.vue';
 import { useLoopRouting } from '../composables/useLoopRouting';
@@ -130,25 +131,76 @@ function revertProfile(key: string) {
   draftErrors[key] = '';
 }
 const percent = (value: number | null | undefined) => value == null ? '확인 전' : `${Math.round(value)}%`;
-async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
+async function control(op: 'pause' | 'resume' | 'next' | 'stop' | 'complete') {
   busy.value = true; error.value = '';
   try { await loops.control(op, props.group.id); } catch (e) { error.value = String(e); }
   finally { busy.value = false; }
+}
+
+/**
+ * What the Loop is doing to this terminal, stated plainly. Three separate
+ * facts get confused otherwise: whether an Agent process exists at all,
+ * whether it is working on a prompt, and whether the Loop is allowed to act on
+ * either. Usage is only ever read during a prompt, so "감시 중" without a
+ * running prompt genuinely means no provider request is being made.
+ */
+const finished = computed(() => ['completed', 'stopped'].includes(props.group.status));
+const monitoring = computed(() => props.group.monitoring !== false && !finished.value);
+const agentRunning = computed(() => props.group.runtime?.pid != null);
+const promptRunning = computed(() => agentRunning.value && props.group.pendingWork === true);
+const usageState = computed(() => {
+  if (!monitoring.value) return { label: '사용량 확인 안 함', hint: '감시가 꺼져 있습니다' };
+  if (!agentRunning.value) return { label: '사용량 확인 대기', hint: '에이전트가 실행 중이 아닙니다' };
+  if (!promptRunning.value) return { label: '사용량 확인 안 함', hint: '프롬프트 실행 전에는 사용량을 조회하지 않습니다' };
+  const at = profile.value?.checkedAt;
+  return { label: at ? `사용량 확인 ${date(at)}` : '사용량 확인 중', hint: '프롬프트 실행 중에만 조회합니다' };
+});
+const monitorBusy = ref(false);
+async function toggleMonitoring() {
+  monitorBusy.value = true; error.value = '';
+  try { await loops.setMonitoring(props.group.id, !monitoring.value); }
+  catch (e) { error.value = String(e); }
+  finally { monitorBusy.value = false; }
+}
+const checked = ref(false);
+let checkedTimer: ReturnType<typeof setTimeout> | undefined;
+onUnmounted(() => clearTimeout(checkedTimer));
+async function checkUsageNow() {
+  monitorBusy.value = true; error.value = '';
+  try {
+    await loops.checkUsage(props.group.id);
+    checked.value = true;
+    clearTimeout(checkedTimer);
+    checkedTimer = setTimeout(() => { checked.value = false; }, 4000);
+  } catch (e) { error.value = String(e); }
+  finally { monitorBusy.value = false; }
 }
 </script>
 <template>
   <section class="loop-view">
     <div v-if="uncertainInput.length" class="input-recovery"><p>재시작 전 아래 입력의 전달 여부를 확인할 수 없습니다. Agent 대화에서 확인한 뒤 재개하세요.</p><pre>{{ inputText }}</pre><button :disabled="busy" @click="resolveInput(true)">이미 전달됨</button> <button :disabled="busy" @click="resolveInput(false)">전달 안 됨 — 재개 시 전송</button></div>
     <div class="loop-toolbar">
-      <span class="status" role="status"><span class="dot" :class="{ running: group.runtime?.pid != null }" />{{ loopStatusLabel(group.status) }}</span>
-      <span v-if="group.switchPending" class="switch-pending" role="status" title="사용량 임계값 초과 — 현재 작업이 끝나면 안전하게 전환합니다"><Icon icon="lucide:clock-arrow-up" />전환 대기</span>
+      <span class="status" role="status"><span class="dot" :class="{ running: agentRunning }" />{{ loopStatusLabel(group.status) }}</span>
       <strong v-if="profile" class="active-profile">{{ profile.agent === 'codex' ? 'Codex' : 'Claude Code' }} · {{ profile.label }}</strong>
       <span v-if="profile" class="usage">{{ percent(profile.usage) }}</span>
       <div v-if="profile" class="mini-meter"><span :style="{ width: `${profile.usage ?? 0}%` }" /></div>
       <span class="spacer" />
-      <button :disabled="busy || group.status === 'stopped'" @click="control(['paused', 'error', 'recovery'].includes(group.status) ? 'resume' : 'pause')">{{ ['paused', 'error', 'recovery'].includes(group.status) ? '재개' : '일시정지' }}</button>
-      <button :disabled="busy || group.status === 'stopped'" @click="control('stop')">종료</button>
+      <button v-if="!finished" :disabled="busy" @click="control(['paused', 'error', 'recovery'].includes(group.status) ? 'resume' : 'pause')">{{ ['paused', 'error', 'recovery'].includes(group.status) ? '재개' : '일시정지' }}</button>
+      <button v-if="group.status === 'completed'" :disabled="busy" @click="control('resume')">다시 시작</button>
+      <button v-if="!finished" :disabled="busy" title="작업이 끝났다고 표시하고 Loop를 종료합니다" @click="control('complete')">작업 완료</button>
+      <button :disabled="busy || finished" @click="control('stop')">종료</button>
       <button class="expand" :aria-expanded="expanded" aria-label="Agent Loop 상세 정보" @click="expanded = !expanded"><Icon :icon="expanded ? 'lucide:chevron-up' : 'lucide:chevron-down'" /></button>
+    </div>
+    <div class="monitor-bar" :class="{ off: !monitoring }" aria-label="Agent Loop 감시 상태">
+      <button class="monitor-toggle" type="button" role="switch" :aria-checked="monitoring" :disabled="monitorBusy || finished" :title="monitoring ? '감시를 끄면 사용량 확인과 자동 전환을 멈추고 상태만 표시합니다' : '감시를 켜면 사용량 확인과 자동 전환을 다시 시작합니다'" @click="toggleMonitoring">
+        <Icon :icon="monitoring ? 'lucide:eye' : 'lucide:eye-off'" />{{ monitoring ? '감시 중' : '감시 꺼짐' }}
+      </button>
+      <span class="signal" :class="{ on: agentRunning }" role="status"><Icon :icon="agentRunning ? 'lucide:cpu' : 'lucide:power-off'" />{{ agentRunning ? `에이전트 실행 중${group.runtime?.pid ? ` · PID ${group.runtime.pid}` : ''}` : '에이전트 없음' }}</span>
+      <span class="signal" :class="{ on: promptRunning }" role="status"><Icon :icon="promptRunning ? 'lucide:loader' : 'lucide:pause'" />{{ promptRunning ? '프롬프트 실행 중' : '프롬프트 대기' }}</span>
+      <span class="signal usage-state" :class="{ on: promptRunning && monitoring }" role="status" :title="usageState.hint"><Icon icon="lucide:gauge" />{{ usageState.label }}</span>
+      <span class="spacer" />
+      <span v-if="checked" class="checked-note" role="status"><Icon icon="lucide:check" />요청했습니다</span>
+      <button type="button" :disabled="monitorBusy || !monitoring" title="지금 한 번만 사용량을 조회합니다. Provider 조회 제한이 있으면 다음 기회에 반영됩니다" @click="checkUsageNow">지금 확인</button>
     </div>
     <div v-if="group.status === 'waiting_for_usage_reset'" class="reset" role="status"><Icon icon="lucide:hourglass" /><span>{{ waitingProfile ? `${waitingProfile.agent} · ${waitingProfile.label}` : '참여 Profile' }} · {{ group.resumeAt ? date(group.resumeAt) : '확인 중' }} 재확인</span><time>{{ countdown }}</time></div>
     <p v-if="error || latest || group.reason" class="latest" :title="error || latest?.message || group.reason || ''">{{ error || (latest ? `${date(latest.at)} ${latest.message}` : group.reason) }}</p>
@@ -156,7 +208,7 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
       <div class="profiles"><article v-for="p in group.profiles ?? []" :key="p.key" class="profile" :class="{ selected: p.key === group.activeProfile }">
         <header><strong>{{ p.agent === 'codex' ? 'Codex' : 'Claude Code' }} · {{ p.label }}</strong><span>{{ p.status }}</span></header>
         <div class="meter" role="progressbar" :aria-label="`${p.label} 사용량`" :aria-valuenow="p.usage ?? undefined" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: `${p.usage ?? 0}%` }" /><i :style="{ left: `${p.threshold}%` }" :title="`임계값 ${p.threshold}%`" /></div>
-        <div class="profile-meta"><span class="window-usage"><span class="window-tag" :title="`${loopWindowLabel(p.thresholdKind)} 사용량`"><Icon :icon="p.thresholdKind === 'short' ? 'lucide:clock' : 'lucide:calendar-range'" />{{ loopWindowLabel(p.thresholdKind) }}</span>{{ percent(p.usage) }} · 임계값 {{ p.threshold }}%</span><span>잔여 {{ percent(p.remaining) }}</span><span v-if="p.resetAt">Reset {{ date(p.resetAt) }}</span></div>
+        <div class="profile-meta"><span class="window-usage"><span class="window-tag" :title="`${loopWindowLabel(p.thresholdKind)} 사용량`"><Icon :icon="p.thresholdKind === 'short' ? 'lucide:clock' : 'lucide:calendar-range'" />{{ loopWindowLabel(p.thresholdKind) }}</span>{{ percent(p.usage) }} · 임계값 {{ p.threshold }}%</span><span>잔여 {{ percent(p.remaining) }}</span><span v-if="p.resetAt">Reset {{ date(p.resetAt) }}</span><span v-if="p.checkedAt">확인 {{ date(p.checkedAt) }}</span></div>
         <div v-if="group.policy && candidatePolicy(p.key) && drafts[p.key]" class="profile-settings">
           <div class="basis-field">
             <span class="basis-label">사용량 기준</span>
@@ -190,12 +242,12 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
       <details class="advanced"><summary>고급 제어</summary><button :disabled="busy || !['running', 'preparing'].includes(group.status)" @click="control('next')">지금 Profile 전환</button></details>
     </div>
     <TerminalView v-if="group.activeSessionId" :key="group.activeSessionId" :session-id="group.activeSessionId" :active="active" />
-    <p v-else class="latest">{{ group.status === 'stopped' ? '종료된 Loop입니다.' : '터미널을 연결하는 중입니다.' }}</p>
+    <p v-else class="latest">{{ finished ? '종료된 Loop입니다.' : '터미널을 연결하는 중입니다.' }}</p>
   </section>
 </template>
 <style scoped>
 .input-recovery{padding:10px;font-size:12px;background:#d9a44115}.input-recovery pre{max-height:100px;overflow:auto;white-space:pre-wrap}
-.loop-view{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden}.loop-view :deep(.term-host){flex:1;min-height:0;height:auto}.loop-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 10px;background:var(--bg-secondary,#252525);font-size:12px;border-bottom:1px solid #ffffff15}.status{display:flex;align-items:center;gap:6px;white-space:nowrap}.dot{width:7px;height:7px;border:1px solid #999;border-radius:50%}.dot.running{background:var(--accent);border-color:var(--accent)}.switch-pending{display:flex;align-items:center;gap:4px;white-space:nowrap;font-size:11px;color:#eac47e;border:1px solid #eac47e50;border-radius:4px;padding:2px 6px}.active-profile{color:var(--accent);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.usage{font-variant-numeric:tabular-nums}.spacer{flex:1}.mini-meter{height:4px;width:80px;border-radius:3px;background:#ffffff20;overflow:hidden}.mini-meter span,.meter>span{display:block;height:100%;background:var(--accent);max-width:100%}button{color:inherit;background:#ffffff08;border:1px solid #ffffff30;border-radius:4px;padding:4px 8px;font:inherit;cursor:pointer}button:disabled{opacity:.4;cursor:default}.expand{display:flex;align-items:center;padding:5px}.latest{padding:4px 10px;margin:0;color:var(--text-secondary,#aeb3ba);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reset{display:flex;align-items:center;gap:8px;font-size:12px;padding:9px 10px;background:#d9a44115;color:#eac47e}.reset time{margin-left:auto;font-variant-numeric:tabular-nums}.details{max-height:42%;overflow:auto;flex-shrink:0;padding:12px;display:grid;gap:14px;background:var(--bg-secondary,#242424);border-bottom:1px solid #ffffff20;font-size:12px}.profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.profile{padding:12px;border:1px solid #ffffff20;border-radius:6px}.profile.selected{border-color:var(--accent)}header{display:flex;justify-content:space-between;gap:10px}header span{font-size:10px;color:var(--text-secondary,#aeb3ba)}.meter{height:7px;background:#ffffff18;margin:12px 0 9px;position:relative;border-radius:3px}.meter>span{border-radius:3px}.meter i{position:absolute;width:2px;top:-3px;height:13px;background:#eac47e}.profile-meta{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--text-secondary,#aeb3ba);font-size:11px}.profile-error{color:#ffb3ad;overflow-wrap:anywhere;margin-bottom:0}dl{display:grid;grid-template-columns:auto 1fr;gap:8px;margin:0}dt{color:var(--text-secondary,#aeb3ba)}dd{margin:0;overflow-wrap:anywhere}summary{cursor:pointer;color:var(--text-secondary,#aeb3ba)}ol{list-style:none;padding:0;margin:10px 0;display:grid;gap:7px}li{display:flex;gap:12px}li time{color:var(--text-secondary,#aeb3ba);flex-shrink:0}.advanced button{margin-top:10px}button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:520px){.mini-meter{display:none}.active-profile{max-width:145px}.loop-toolbar{gap:6px}.profiles{grid-template-columns:1fr}.reset{flex-wrap:wrap}}
+.loop-view{display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden}.loop-view :deep(.term-host){flex:1;min-height:0;height:auto}.loop-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:7px 10px;background:var(--bg-secondary,#252525);font-size:12px;border-bottom:1px solid #ffffff15}.status{display:flex;align-items:center;gap:6px;white-space:nowrap}.dot{width:7px;height:7px;border:1px solid #999;border-radius:50%}.dot.running{background:var(--accent);border-color:var(--accent)}.active-profile{color:var(--accent);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.usage{font-variant-numeric:tabular-nums}.spacer{flex:1}.mini-meter{height:4px;width:80px;border-radius:3px;background:#ffffff20;overflow:hidden}.mini-meter span,.meter>span{display:block;height:100%;background:var(--accent);max-width:100%}button{color:inherit;background:#ffffff08;border:1px solid #ffffff30;border-radius:4px;padding:4px 8px;font:inherit;cursor:pointer}button:disabled{opacity:.4;cursor:default}.expand{display:flex;align-items:center;padding:5px}.latest{padding:4px 10px;margin:0;color:var(--text-secondary,#aeb3ba);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reset{display:flex;align-items:center;gap:8px;font-size:12px;padding:9px 10px;background:#d9a44115;color:#eac47e}.reset time{margin-left:auto;font-variant-numeric:tabular-nums}.details{max-height:42%;overflow:auto;flex-shrink:0;padding:12px;display:grid;gap:14px;background:var(--bg-secondary,#242424);border-bottom:1px solid #ffffff20;font-size:12px}.profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}.profile{padding:12px;border:1px solid #ffffff20;border-radius:6px}.profile.selected{border-color:var(--accent)}header{display:flex;justify-content:space-between;gap:10px}header span{font-size:10px;color:var(--text-secondary,#aeb3ba)}.meter{height:7px;background:#ffffff18;margin:12px 0 9px;position:relative;border-radius:3px}.meter>span{border-radius:3px}.meter i{position:absolute;width:2px;top:-3px;height:13px;background:#eac47e}.profile-meta{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;color:var(--text-secondary,#aeb3ba);font-size:11px}.profile-error{color:#ffb3ad;overflow-wrap:anywhere;margin-bottom:0}dl{display:grid;grid-template-columns:auto 1fr;gap:8px;margin:0}dt{color:var(--text-secondary,#aeb3ba)}dd{margin:0;overflow-wrap:anywhere}summary{cursor:pointer;color:var(--text-secondary,#aeb3ba)}ol{list-style:none;padding:0;margin:10px 0;display:grid;gap:7px}li{display:flex;gap:12px}li time{color:var(--text-secondary,#aeb3ba);flex-shrink:0}.advanced button{margin-top:10px}button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}@media(max-width:520px){.mini-meter{display:none}.active-profile{max-width:145px}.loop-toolbar{gap:6px}.profiles{grid-template-columns:1fr}.reset{flex-wrap:wrap}}
 
 .profile-settings { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 .profile-settings label, .session-policy label { display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary, #aeb3ba); font-size: 11px; }
@@ -228,4 +280,21 @@ async function control(op: 'pause' | 'resume' | 'next' | 'stop') {
 .session-policy input[type=checkbox] { accent-color: var(--accent); }
 input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .usage-pending { margin: 10px 0 0; font-size: 11px; color: var(--text-secondary, #aeb3ba); }
+
+/*
+ * The monitor bar answers three questions the status word alone cannot: is
+ * there an Agent process at all, is it working on a prompt, and is the Loop
+ * allowed to act on what it sees. Each signal lights only when it is true, so
+ * a dark row reads as "nothing is happening" rather than "unknown".
+ */
+.monitor-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px; background: var(--bg-secondary, #252525); border-bottom: 1px solid #ffffff12; font-size: 11px; color: var(--text-secondary, #aeb3ba); }
+.monitor-bar.off { background: #6b4e1a20; }
+.monitor-bar .signal { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; padding: 2px 7px; border: 1px solid #ffffff20; border-radius: 999px; }
+.monitor-bar .signal.on { border-color: var(--accent); color: var(--accent); }
+.monitor-bar .usage-state { cursor: help; }
+.monitor-toggle { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
+.monitor-bar .monitor-toggle[aria-checked='true'] { color: var(--accent); border-color: var(--accent); }
+.monitor-bar .monitor-toggle[aria-checked='false'] { color: #eac47e; border-color: #eac47e70; }
+.checked-note { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); }
+@media (max-width: 520px) { .monitor-bar { gap: 6px; } }
 </style>

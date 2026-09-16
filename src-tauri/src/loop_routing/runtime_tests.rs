@@ -53,7 +53,28 @@ impl Drop for Fixture {
         // SQLite is still open here on Windows; temp artifacts stay isolated.
     }
 }
+/// Selection refuses an account whose provider CLI is not installed, which
+/// would otherwise make every scheduling test depend on what happens to be on
+/// this machine's PATH. Put empty stub executables in front of it instead —
+/// nothing in these tests ever spawns one.
+fn stub_native_cli() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join("rhyme-loop-native-stubs");
+        fs::create_dir_all(&dir).unwrap();
+        for agent in ["claude", "codex"] {
+            let stub = dir.join(format!("{agent}{}", if cfg!(windows) { ".exe" } else { "" }));
+            if !stub.is_file() {
+                fs::write(&stub, b"").unwrap();
+            }
+        }
+        let mut paths = vec![dir];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+    });
+}
 fn candidate(id: &str) -> Candidate {
+    stub_native_cli();
     serde_json::from_value(json!({"agent":"codex","profileId":id,"label":id,"enabled":true}))
         .unwrap()
 }
@@ -178,10 +199,27 @@ fn codex_and_resume_use_the_same_start_gate() {
         )
         .unwrap();
         f.engine.tick(&f.state).unwrap();
-        assert_eq!(f.engine.groups[&f.id].status, "preparing");
+        // Both forms are intercepted by the same shell gate: the Loop takes
+        // the command over and nothing runs until it hands one back.
         assert_eq!(f.engine.groups[&f.id].command_args, args);
-        assert!(!root.join(format!("response-{request}.json")).exists());
-        assert!(!f.engine.usage_targets().is_empty());
+        assert!(!matches!(
+            f.engine.groups[&f.id].status.as_str(),
+            "idle" | "running"
+        ));
+        // Whatever the Loop decides, it never hands the raw command back to
+        // the shell: an approved launch is always a managed one, carrying the
+        // profile and the lifecycle hooks the Loop needs to follow it.
+        let response = root.join(format!("response-{request}.json"));
+        if response.is_file() {
+            let launch: Value = serde_json::from_slice(&fs::read(&response).unwrap()).unwrap();
+            assert!(
+                launch["managed"] == true || launch["cancel"] == true,
+                "{launch}"
+            );
+        }
+        // Starting an Agent costs no provider request: usage is read while a
+        // prompt runs, never to decide whether one may begin.
+        assert!(f.engine.usage_targets().is_empty());
     }
 }
 #[test]
@@ -200,29 +238,7 @@ fn threshold_is_inclusive_and_applies_to_the_basis_window() {
     assert!(over_limit(&s, &c, &[window(1.0, 0), weekly]));
 }
 #[test]
-// `running()` never sets `pending_work`, so it defaults false: the Agent is
-// already at a safe boundary (idle at the prompt) the moment the threshold is
-// crossed, and the switch fires on this same tick without ever waiting.
-fn threshold_interrupts_immediately_when_already_at_a_safe_boundary() {
-    let mut f = Fixture::new();
-    running(&mut f);
-    f.engine.quota(
-        "codex:a".into(),
-        Ok(vec![window(90.0, now() + 60_000)]),
-        now(),
-    );
-    f.engine.tick(&f.state).unwrap();
-    assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
-    assert_eq!(
-        f.engine.groups[&f.id].runtime.status,
-        RuntimeStatus::Interrupting
-    );
-    assert!(f.engine.live[&f.id].interrupt_at.is_some());
-    assert_eq!(f.engine.groups[&f.id].active_session_id, Some(f.sid()));
-    assert!(!f.engine.groups[&f.id].switch_pending);
-}
-#[test]
-fn soft_threshold_defers_switch_while_a_turn_is_in_progress() {
+fn reaching_the_limit_switches_profile_at_once() {
     let mut f = Fixture::new();
     running(&mut f);
     f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
@@ -231,90 +247,66 @@ fn soft_threshold_defers_switch_while_a_turn_is_in_progress() {
         Ok(vec![window(90.0, now() + 60_000)]),
         now(),
     );
-    f.engine.tick(&f.state).unwrap();
-    let g = &f.engine.groups[&f.id];
-    // Mid-turn: the soft usage threshold only arms switch_pending, it never
-    // interrupts a Tool/Thinking-equivalent turn in progress.
-    assert_eq!(g.status, "running");
-    assert!(g.switch_pending);
-    assert!(g.switch_pending_since.is_some());
-    assert_eq!(g.runtime.status, RuntimeStatus::Running);
-    assert!(f.engine.live[&f.id].interrupt_at.is_none());
-    // Ticking again while still mid-turn changes nothing new.
-    f.engine.tick(&f.state).unwrap();
-    assert_eq!(f.engine.groups[&f.id].status, "running");
-    assert!(f.engine.groups[&f.id].switch_pending);
-}
-#[test]
-fn soft_threshold_switches_once_the_turn_completes() {
-    let mut f = Fixture::new();
-    running(&mut f);
-    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
-    f.engine.quota(
-        "codex:a".into(),
-        Ok(vec![window(90.0, now() + 60_000)]),
-        now(),
-    );
-    f.engine.tick(&f.state).unwrap();
-    assert!(f.engine.groups[&f.id].switch_pending);
-    // Stop event equivalent: the turn completes and usage is still fresh
-    // (CACHE_TTL_SECS has not elapsed), so cache is trusted for verification.
-    f.engine.groups.get_mut(&f.id).unwrap().pending_work = false;
     f.engine.tick(&f.state).unwrap();
     let g = &f.engine.groups[&f.id];
     assert_eq!(g.status, "switching_profile");
-    assert!(!g.switch_pending);
-    assert!(g.switch_pending_since.is_none());
+    assert_eq!(g.runtime.status, RuntimeStatus::Interrupting);
     assert!(f.engine.live[&f.id].interrupt_at.is_some());
+    assert_eq!(g.active_session_id, Some(f.sid()));
+    // The window's reset is stored, so the cooldown can be computed from it
+    // even if the provider never sends a limit event of its own.
+    assert!(f.engine.quotas["codex:a"].blocked_until > now());
 }
 #[test]
-fn soft_threshold_clears_when_usage_recovers_before_the_boundary() {
+fn usage_below_the_limit_keeps_the_agent_running() {
     let mut f = Fixture::new();
     running(&mut f);
     f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
-    f.engine.quota(
-        "codex:a".into(),
-        Ok(vec![window(95.0, now() + 60_000)]),
-        now(),
-    );
-    f.engine.tick(&f.state).unwrap();
-    assert!(f.engine.groups[&f.id].switch_pending);
-    // A later sample (still mid-turn) shows usage back under threshold.
     f.engine.quota(
         "codex:a".into(),
         Ok(vec![window(40.0, now() + 60_000)]),
         now(),
     );
     f.engine.tick(&f.state).unwrap();
-    let g = &f.engine.groups[&f.id];
-    assert!(!g.switch_pending);
-    assert_eq!(g.status, "running");
+    assert_eq!(f.engine.groups[&f.id].status, "running");
     assert!(f.engine.live[&f.id].interrupt_at.is_none());
 }
 #[test]
-fn safe_boundary_waits_for_a_fresh_sample_before_switching() {
+fn usage_is_only_read_while_a_prompt_is_running() {
     let mut f = Fixture::new();
     running(&mut f);
-    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
-    f.engine.quota(
-        "codex:a".into(),
-        Ok(vec![window(90.0, now() + 60_000)]),
-        now(),
-    );
-    f.engine.tick(&f.state).unwrap();
-    assert!(f.engine.groups[&f.id].switch_pending);
-    // Turn completes, but the cached sample is older than CACHE_TTL_SECS.
+    // The Agent has started but has not been prompted yet: nothing is asked of
+    // the provider, because nothing it could answer has changed.
     f.engine.groups.get_mut(&f.id).unwrap().pending_work = false;
-    f.engine.quotas.get_mut("codex:a").unwrap().fetched_at =
-        now() - (polling::CACHE_TTL_SECS + 5) * 1000;
-    f.engine.tick(&f.state).unwrap();
-    let g = &f.engine.groups[&f.id];
-    // Never guesses: stays pending, does not switch, does not silently resume.
-    assert!(g.switch_pending);
-    assert_eq!(g.status, "running");
-    assert!(f.engine.live[&f.id].interrupt_at.is_none());
-    // But a fresh re-check was explicitly demanded (bypasses the passive interval).
-    assert!(f.engine.live[&f.id].guard_at >= now().saturating_sub(1_000));
+    f.engine.quotas.clear();
+    assert!(f.engine.usage_targets().is_empty());
+    // A prompt starts. Now the account that is spending quota — and only that
+    // one — is polled.
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    let targets = f.engine.usage_targets();
+    assert_eq!(
+        targets.iter().map(|(key, ..)| key.clone()).collect::<Vec<_>>(),
+        vec!["codex:a".to_string()]
+    );
+    // Monitoring off means no provider traffic at all.
+    f.engine.quotas.clear();
+    f.engine.groups.get_mut(&f.id).unwrap().monitoring = false;
+    assert!(f.engine.usage_targets().is_empty());
+}
+#[test]
+fn the_monitor_bar_can_ask_for_one_reading_outside_the_schedule() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = false;
+    f.engine.quotas.clear();
+    assert!(f.engine.usage_targets().is_empty());
+    f.engine
+        .request(&f.state, json!({"op":"check_usage","id":f.id}))
+        .unwrap();
+    assert_eq!(f.engine.usage_targets().len(), 1);
+    // One-shot: it does not leave the schedule permanently forced.
+    f.engine.quotas.clear();
+    assert!(f.engine.usage_targets().is_empty());
 }
 #[test]
 fn backoff_grows_exponentially_with_jitter_and_caps() {
@@ -398,58 +390,43 @@ fn exhausted_profile_reset_skip_targets_the_actual_reset_when_sooner_than_the_ca
 }
 #[test]
 fn usage_targets_skips_an_exhausted_candidate_until_near_its_reset() {
-    let mut f = Fixture::auto_start();
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
     let reset = now() + 20 * 60_000;
     f.engine
         .quota("codex:a".into(), Ok(vec![window(95.0, reset)]), now());
-    f.engine
-        .quota("codex:b".into(), Ok(vec![window(10.0, now() + 60_000)]), now());
-    let targets = f.engine.usage_targets();
     assert!(
-        !targets.iter().any(|(key, ..)| key == "codex:a"),
+        !f.engine
+            .usage_targets()
+            .iter()
+            .any(|(key, ..)| key == "codex:a"),
         "an exhausted candidate with a known reset should not be due yet"
     );
-    assert!(targets.iter().any(|(key, ..)| key == "codex:b"));
 }
 #[test]
-fn tier_interval_speeds_up_near_threshold_and_slows_down_when_not_active() {
+fn poll_interval_speeds_up_near_the_limit_and_never_beats_the_provider_floor() {
     let mut f = Fixture::new();
     let base = 120;
     f.engine
         .quota("codex:a".into(), Ok(vec![window(50.0, now() + 60_000)]), now());
-    assert_eq!(f.engine.tier_interval("codex:a", base, true), base);
+    assert_eq!(f.engine.poll_interval("codex:a", base), base);
     f.engine
         .quota("codex:a".into(), Ok(vec![window(72.0, now() + 60_000)]), now());
     assert_eq!(
-        f.engine.tier_interval("codex:a", base, true),
+        f.engine.poll_interval("codex:a", base),
         polling::HIGH_INTERVAL_SECS
     );
     f.engine
         .quota("codex:a".into(), Ok(vec![window(90.0, now() + 60_000)]), now());
     assert_eq!(
-        f.engine.tier_interval("codex:a", base, true),
+        f.engine.poll_interval("codex:a", base),
         polling::CRITICAL_INTERVAL_SECS
-    );
-    // Low usage but not any Loop's active running profile: standby cadence.
-    f.engine
-        .quota("codex:a".into(), Ok(vec![window(10.0, now() + 60_000)]), now());
-    assert_eq!(
-        f.engine.tier_interval("codex:a", base, false),
-        polling::IDLE_INTERVAL_SECS
-    );
-    // A standby profile spends no quota, so a high sample does not pull it
-    // back onto the fast tiers — that combination is what used to poll an
-    // idle, near-threshold profile every CRITICAL_INTERVAL_SECS indefinitely.
-    f.engine
-        .quota("codex:a".into(), Ok(vec![window(88.0, now() + 60_000)]), now());
-    assert_eq!(
-        f.engine.tier_interval("codex:a", base, false),
-        polling::IDLE_INTERVAL_SECS
     );
     // Nothing is ever polled faster than the provider-imposed floor, even if
     // an older configuration named a shorter baseline.
     assert_eq!(
-        f.engine.tier_interval("codex:a", 10, true),
+        f.engine.poll_interval("codex:a", 10),
         polling::MIN_INTERVAL_SECS
     );
 }
@@ -491,9 +468,33 @@ fn ctrl_c_and_agent_exit_return_to_idle_without_stopping_loop() {
     assert_eq!(f.engine.groups[&f.id].active_session_id, Some(sid));
 }
 #[test]
-fn voluntary_agent_exit_is_not_task_completion() {
+fn voluntary_agent_exit_completes_the_loop() {
     let mut f = Fixture::new();
     running(&mut f);
+    f.agent(None);
+    f.engine.tick(&f.state).unwrap();
+    // The Agent finished and left of its own accord, so the work the Loop was
+    // created to carry is done: it stops managing and stops polling.
+    assert_eq!(f.engine.groups[&f.id].status, "completed");
+    assert!(f.engine.usage_targets().is_empty());
+    // Terminal, but recoverable: Resume puts it back under management.
+    f.engine
+        .request(&f.state, json!({"op":"resume","id":f.id}))
+        .unwrap();
+    assert_ne!(f.engine.groups[&f.id].status, "completed");
+}
+#[test]
+fn an_agent_that_exits_with_an_error_is_not_reported_as_finished() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    let dispatch = Uuid::new_v4().to_string();
+    f.engine.live.get_mut(&f.id).unwrap().dispatch_id = Some(dispatch.clone());
+    let root = f.engine.root.join(f.id.to_string());
+    fs::write(
+        root.join(format!("exit-{dispatch}.json")),
+        json!({"code":1}).to_string(),
+    )
+    .unwrap();
     f.agent(None);
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "idle");
@@ -586,41 +587,40 @@ fn reset_uses_latest_exhausted_window_and_earliest_profile() {
     f.engine.groups.insert(f.id, g);
 }
 #[test]
-fn reset_deadline_requires_new_usage_evidence() {
+fn a_stored_reset_gates_the_cooldown_and_releases_it_without_a_new_sample() {
     let mut f = Fixture::new();
-    let g = f.engine.groups.get_mut(&f.id).unwrap();
-    g.status = "waiting_for_usage_reset".into();
-    g.resume_at = Some(now() - 1);
-    g.current_provider = Some("codex".into());
-    f.engine.tick(&f.state).unwrap();
-    assert_ne!(f.engine.groups[&f.id].status, "running");
-    assert!(f.engine.live[&f.id].guard_at > 0);
-}
-#[test]
-fn stale_or_unconfirmable_usage_never_approves_a_launch() {
-    let mut f = Fixture::new();
-    let stamp = now();
     let c = candidate("a");
-    f.engine
-        .quota(c.key(), Ok(vec![window(1.0, stamp + 100_000)]), stamp);
-    // A sample older than the guard does not answer the guard's question.
-    assert!(!f.engine.eligible(&c, stamp + 1));
-    // A failed refresh is not itself evidence: whatever the guard decided with
-    // the sample in hand, it still decides.
-    let with_sample = f.engine.eligible(&c, stamp);
-    f.engine
-        .quota(c.key(), Err("429 rate limited".into()), stamp + 2);
-    assert_eq!(f.engine.eligible(&c, stamp), with_sample);
-    // Once that sample ages out of its freshness window, usage really is
-    // unconfirmable and nothing launches on it.
-    let max_age = sample_max_age(f.engine.settings.polling_interval_seconds).as_millis() as u64;
-    f.engine.quotas.get_mut(&c.key()).unwrap().windows[0].received_at =
-        Some(now().saturating_sub(max_age + 1_000));
-    assert!(!f.engine.eligible(&c, stamp));
+    let reset = now() + 60_000;
+    f.engine.quota(c.key(), Ok(vec![window(95.0, reset)]), now());
+    // A spent account is blocked until the reset it reported, and that instant
+    // is what the wait is computed from.
+    assert!(!f.engine.eligible(&c));
+    assert_eq!(f.engine.quotas[&c.key()].blocked_until, reset);
+    let g = f.engine.groups[&f.id].clone();
+    assert_eq!(f.engine.cooldown_until(&g), Some((c.key(), reset)));
+    // Once it passes, the account is usable again on the evidence in hand —
+    // no fresh provider request is needed to end a cooldown.
+    f.engine.quotas.get_mut(&c.key()).unwrap().blocked_until = now() - 1;
+    f.engine.quotas.get_mut(&c.key()).unwrap().windows[0].resets_at = Some(json!(now() - 1));
+    assert!(f.engine.eligible(&c));
 }
-
 #[test]
-fn activation_recheck_skips_a_profile_that_crossed_threshold() {
+fn an_account_nobody_has_polled_is_allowed_to_start() {
+    let mut f = Fixture::new();
+    let c = candidate("a");
+    // Requirement: the first Agent starts without a usage check. Absence of
+    // numbers is not evidence of exhaustion.
+    f.engine.quotas.clear();
+    assert!(f.engine.eligible(&c));
+    // A failed read is not evidence either — the last good sample still stands.
+    f.engine
+        .quota(c.key(), Ok(vec![window(1.0, now() + 100_000)]), now());
+    f.engine
+        .quota(c.key(), Err("429 rate limited".into()), now() + 2);
+    assert!(f.engine.eligible(&c));
+}
+#[test]
+fn every_profile_spent_waits_for_the_earliest_reset_instead_of_failing() {
     let mut f = Fixture::new();
     let root = f.engine.dir(&f.engine.groups[&f.id]);
     let request = Uuid::new_v4().to_string();
@@ -645,8 +645,6 @@ fn activation_recheck_skips_a_profile_that_crossed_threshold() {
         cwd: root.to_string_lossy().into_owned(),
     });
     live.helper_pid = Some(pid);
-    live.guard_at = stamp;
-    live.selected = Some("codex:a".into());
     f.engine.quota(
         "codex:a".into(),
         Ok(vec![window(91.0, stamp + 60_000)]),
@@ -660,14 +658,58 @@ fn activation_recheck_skips_a_profile_that_crossed_threshold() {
     f.engine.tick(&f.state).unwrap();
     assert!(f.engine.groups[&f.id].attempts.is_empty());
     assert_eq!(f.engine.groups[&f.id].status, "waiting_for_usage_reset");
+    // The account that comes back first is the one the countdown names.
     assert_eq!(
         f.engine.groups[&f.id].waiting_profile_id.as_deref(),
         Some("codex:b")
     );
+    assert_eq!(f.engine.groups[&f.id].resume_at, Some(stamp + 30_000));
     let response: Value =
         serde_json::from_slice(&fs::read(root.join(format!("response-{request}.json"))).unwrap())
             .unwrap();
     assert_eq!(response["cancel"], true);
+    // The cooldown and its reset instants survive a daemon restart.
+    f.engine.save().unwrap();
+    let restored = Engine::open_at(f.engine.root.clone()).unwrap();
+    assert_eq!(restored.quotas["codex:b"].blocked_until, stamp + 30_000);
+}
+#[test]
+fn a_cooldown_that_has_not_ended_is_re_armed_instead_of_retried() {
+    let mut f = Fixture::new();
+    let stamp = now();
+    f.engine.quota(
+        "codex:a".into(),
+        Ok(vec![window(95.0, stamp + 300_000)]),
+        stamp,
+    );
+    f.engine.quota(
+        "codex:b".into(),
+        Ok(vec![window(95.0, stamp + 400_000)]),
+        stamp,
+    );
+    let g = f.engine.groups.get_mut(&f.id).unwrap();
+    g.status = "waiting_for_usage_reset".into();
+    g.current_provider = Some("codex".into());
+    // The previously scheduled deadline has arrived, but nothing has recovered.
+    g.resume_at = Some(stamp - 1);
+    f.engine.tick(&f.state).unwrap();
+    let g = &f.engine.groups[&f.id];
+    assert_eq!(g.status, "waiting_for_usage_reset");
+    assert_eq!(g.resume_at, Some(stamp + 300_000));
+    assert_eq!(g.waiting_profile_id.as_deref(), Some("codex:a"));
+}
+#[test]
+fn a_recovered_profile_ends_the_cooldown_and_resumes() {
+    let mut f = Fixture::new();
+    let g = f.engine.groups.get_mut(&f.id).unwrap();
+    g.status = "waiting_for_usage_reset".into();
+    g.current_provider = Some("codex".into());
+    g.resume_at = Some(now() - 1);
+    f.engine.tick(&f.state).unwrap();
+    assert!(matches!(
+        f.engine.groups[&f.id].status.as_str(),
+        "resuming" | "preparing"
+    ));
 }
 
 #[test]
@@ -732,7 +774,7 @@ fn rate_limit_cooldown_survives_a_low_usage_refresh() {
     f.engine.quotas.get_mut(&c.key()).unwrap().blocked_until = now() + 60_000;
     f.engine
         .quota(c.key(), Ok(vec![window(1.0, now() + 60_000)]), now());
-    assert!(!f.engine.eligible(&c, 0));
+    assert!(!f.engine.eligible(&c));
 }
 
 #[test]
@@ -843,31 +885,6 @@ fn available_profiles_still_display_their_reset_time() {
         Some(reset)
     );
     f.engine.groups.insert(f.id, g);
-}
-
-#[test]
-fn first_launch_uses_order_before_smart_usage_and_skips_exhausted() {
-    let mut f = Fixture::auto_start();
-    let pid = std::process::id();
-    f.state.manager.runtime.lock().processes.push(ProcessEntry { pid, parent_pid: None, image_name: "bridge".into(), command_args: vec![], started_at: 1 });
-    f.engine.groups.get_mut(&f.id).unwrap().status = LoopStatus::Preparing;
-    let stamp = now();
-    let live = f.engine.live.get_mut(&f.id).unwrap();
-    live.continuation = true;
-    live.dispatch = Some(Dispatch { id: Uuid::new_v4().to_string(), pid, provider: "codex".into(), args: vec![], cwd: f.engine.root.to_string_lossy().into_owned() });
-    live.helper_pid = Some(pid);
-    live.guard_at = stamp;
-    f.engine.quota("codex:a".into(), Ok(vec![window(80.0, stamp + 60000)]), stamp);
-    f.engine.quota("codex:b".into(), Ok(vec![window(1.0, stamp + 60000)]), stamp);
-    f.engine.tick(&f.state).unwrap();
-    assert_eq!(f.engine.live[&f.id].selected.as_deref(), Some("codex:a"));
-    assert!(f.engine.groups[&f.id].attempts.is_empty());
-    let recheck = f.engine.live[&f.id].guard_at;
-    f.engine.quota("codex:a".into(), Ok(vec![window(91.0, stamp + 60000)]), recheck);
-    f.engine.quota("codex:b".into(), Ok(vec![window(1.0, stamp + 60000)]), recheck);
-    f.engine.tick(&f.state).unwrap();
-    assert_eq!(f.engine.live[&f.id].selected.as_deref(), Some("codex:b"));
-    assert!(f.engine.groups[&f.id].attempts.is_empty());
 }
 
 #[test]
@@ -1022,12 +1039,6 @@ fn waiting_policy_edit_schedules_usage_revalidation_without_starting_an_agent() 
 fn claude_running(f: &mut Fixture) {
     claude_running_with(f, "setup-token");
 }
-/// A subscription (OAuth) login, unlike `setup-token`, can be asked for its
-/// usage directly — so it must never get the deferred, check-after-launch
-/// treatment.
-fn claude_oauth_running(f: &mut Fixture) {
-    claude_running_with(f, "oauth");
-}
 fn claude_running_with(f: &mut Fixture, auth_method: &str) {
     running(f);
     for c in &mut f.engine.settings.candidates { c.agent = "claude".into(); c.auth_method = Some(auth_method.into()); }
@@ -1039,117 +1050,60 @@ fn claude_running_with(f: &mut Fixture, auth_method: &str) {
     f.agent(Some("claude"));
 }
 #[test]
-fn claude_missing_usage_can_start_and_run_until_real_threshold_arrives() {
+fn an_account_with_no_readable_usage_still_runs_until_a_real_limit_arrives() {
     let mut f = Fixture::new();
     claude_running(&mut f);
-    let stamp = now();
-    f.engine.quota("claude:a".into(), Err("Waiting for session usage. Start this profile and send a message".into()), stamp);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    // A Claude setup-token profile has no usage endpoint of its own; its
+    // numbers only appear once it is running. That is a normal startup state,
+    // not a fault, and it is no longer special-cased: *any* account with no
+    // reading keeps working until something says otherwise.
+    f.engine.quota("claude:a".into(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
     let c = f.engine.settings.candidates[0].clone();
-    assert!(f.engine.eligible(&c, stamp));
-    assert!(!f.engine.eligible(&c, stamp + 1), "each launch still attempts fresh usage");
+    assert!(f.engine.eligible(&c));
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "running");
-    assert!(f.engine.groups[&f.id].profiles[0].usage_pending);
-    assert!(f.engine.groups[&f.id].profiles[0].error.is_none());
     assert!(f.engine.live[&f.id].interrupt_at.is_none());
+    // A first real reading below the limit changes nothing.
     f.engine.quota("claude:a".into(), Ok(vec![window(89.0, now()+60000)]), now());
     f.engine.tick(&f.state).unwrap();
     assert!(!f.engine.groups[&f.id].profiles[0].usage_pending);
     assert_eq!(f.engine.groups[&f.id].status, "running");
+    // Reaching it switches.
     f.engine.quota("claude:a".into(), Ok(vec![window(90.0, now()+60000)]), now());
     f.engine.tick(&f.state).unwrap();
     assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
     assert!(f.engine.live[&f.id].interrupt_at.is_some());
 }
 #[test]
-fn runtime_usage_fallback_keeps_known_limits_and_actual_cooldowns() {
-    let mut c = candidate("a"); c.agent = "claude".into(); c.auth_method = Some("setup-token".into());
-    let settings = Settings::default();
-    let mut q = Quota { error: Some("usage request failed".into()), ..Quota::default() };
-    assert!(q.runtime_usage_fallback(&settings, &c));
-    q.windows = vec![window(91.0, now()+60000)];
-    assert!(!q.runtime_usage_fallback(&settings, &c));
-    q.windows[0].resets_at = Some(json!(now()-1));
-    assert!(q.runtime_usage_fallback(&settings, &c));
-    q.blocked_until = now()+60000;
-    assert!(!q.runtime_usage_fallback(&settings, &c));
-    q.blocked_until = 0;
-    c.agent = "codex".into();
-    assert!(!q.runtime_usage_fallback(&settings, &c));
-}
-#[test]
-fn only_setup_token_claude_defers_its_usage_check_to_after_launch() {
-    let settings = Settings::default();
-    let q = Quota { error: Some("Login expired. Sign in again through the CLI".into()), ..Quota::default() };
-    let with = |auth: Option<&str>| {
-        let mut c = candidate("a");
-        c.agent = "claude".into();
-        c.auth_method = auth.map(str::to_owned);
-        c
-    };
-    assert!(q.runtime_usage_fallback(&settings, &with(Some("setup-token"))));
-    // A subscription login and the system login both answer a usage query, so
-    // a failure there is unconfirmable usage, not a profile still warming up.
-    assert!(!q.runtime_usage_fallback(&settings, &with(Some("oauth"))));
-    assert!(!q.runtime_usage_fallback(&settings, &with(None)));
-}
-#[test]
-fn a_sample_one_polling_cycle_old_is_still_fresh_enough_to_act_on() {
-    let settings = Settings::default();
-    let mut c = candidate("a");
-    c.agent = "claude".into();
-    c.auth_method = Some("setup-token".into());
-    let aged = |seconds: u64| {
-        let mut w = window(40.0, now() + 3_600_000);
-        w.received_at = Some(now() - seconds * 1000);
-        Quota { windows: vec![w], ..Quota::default() }
-    };
-    // One full cycle at the default cadence: the next poll has only just come
-    // due, so this is the freshest sample that can exist at that moment. The
-    // window used to be capped at 120s — the same as the cadence — which made
-    // every profile look unconfirmable once per cycle.
-    let cycle = settings.polling_interval_seconds;
-    assert!(!aged(cycle + 1).runtime_usage_fallback(&settings, &c));
-    assert!(!aged(cycle + polling::FRESHNESS_GRACE_SECS - 1).runtime_usage_fallback(&settings, &c));
-    // Beyond one cycle plus the round-trip grace, it really is too old.
-    assert!(aged(cycle + polling::FRESHNESS_GRACE_SECS + 5).runtime_usage_fallback(&settings, &c));
-}
-#[test]
-fn oauth_claude_switches_away_when_its_usage_cannot_be_confirmed() {
+fn a_failed_reading_never_interrupts_a_healthy_run() {
     let mut f = Fixture::new();
-    claude_oauth_running(&mut f);
-    f.engine.quota("claude:a".into(), Err("Login expired. Sign in again through the CLI".into()), now());
-    let c = f.engine.settings.candidates[0].clone();
-    assert!(!f.engine.eligible(&c, 0), "an unreadable subscription profile is not launchable");
+    claude_running_with(&mut f, "oauth");
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    f.engine.quota("claude:a".into(), Ok(vec![window(20.0, now() + 3_600_000)]), now());
+    // One dropped or throttled status query used to take the running account
+    // down, and then the account it switched to for the same reason.
+    f.engine.quota("claude:a".into(), Err("Login expired. Sign in again through the CLI".into()), now() + 1);
     f.engine.tick(&f.state).unwrap();
+    assert_eq!(f.engine.groups[&f.id].status, "running");
+    assert!(f.engine.live[&f.id].interrupt_at.is_none());
+    // The reason the number stopped moving still reaches the user.
     let g = &f.engine.groups[&f.id];
-    assert_eq!(g.status, "switching_profile");
-    assert!(f.engine.live[&f.id].interrupt_at.is_some());
     let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
-    assert!(!p.usage_pending, "a subscription profile never defers its check");
+    assert_eq!(p.usage, Some(20.0));
     assert_eq!(p.error.as_deref(), Some("Login expired. Sign in again through the CLI"));
+    assert!(!p.usage_pending);
 }
 #[test]
-fn a_usage_failure_after_a_first_sample_is_reported_instead_of_hidden() {
+fn a_profile_that_has_never_been_read_reports_pending_not_error() {
     let mut f = Fixture::new();
-    claude_running(&mut f); // setup-token: the only kind that defers its check
+    claude_running(&mut f);
     let mut g = f.engine.groups.remove(&f.id).unwrap();
-
-    // Never sampled: the pending note is the whole story, so no error is shown.
-    f.engine.quota("claude:a".into(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
+    f.engine.quotas.clear();
     f.engine.profiles(&mut g);
     let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
     assert!(p.usage_pending);
     assert!(p.error.is_none());
-
-    // Sampled once, then the reads start failing. The profile may keep running,
-    // but the reason its number is missing has to reach the user.
-    f.engine.quota("claude:a".into(), Ok(vec![window(20.0, now() + 3_600_000)]), now());
-    f.engine.quota("claude:a".into(), Err("Unable to read session usage".into()), now() + 1);
-    f.engine.profiles(&mut g);
-    let p = g.profiles.iter().find(|p| p.key == "claude:a").unwrap();
-    assert!(p.usage_pending, "a setup-token profile is still runnable");
-    assert_eq!(p.error.as_deref(), Some("Unable to read session usage"));
     f.engine.groups.insert(f.id, g);
 }
 #[test]
@@ -1201,7 +1155,7 @@ fn claude_stop_failure_switches_even_when_usage_cannot_be_read() {
     assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
     assert!(f.engine.groups[&f.id].pending_work);
     assert!(f.engine.quotas["claude:a"].blocked_until > now());
-    assert!(!f.engine.eligible(&f.engine.settings.candidates[0], 0));
+    assert!(!f.engine.eligible(&f.engine.settings.candidates[0]));
     assert!(f.engine.live[&f.id].interrupt_at.is_some());
 }
 #[test]
@@ -1213,8 +1167,10 @@ fn claude_failure_normalization_does_not_scan_regular_conversations() {
     assert!(adapter::hook_error_code(&json!({"hook_event_name":"Stop","last_assistant_message":"Tests assert quota exceeded"})).is_none());
 }
 
-#[test]
-fn exhausted_profile_is_skipped_and_setup_token_launch_is_approved_without_a_sample() {
+/// Drives one launch with two real profile directories and returns the
+/// position, in the configured order, of the account the Loop picked.
+/// `spend_first` makes the account listed first look exhausted.
+fn launched_position(spend_first: bool) -> usize {
     let mut f = Fixture::new();
     struct TestProfiles(Vec<PathBuf>);
     impl Drop for TestProfiles {
@@ -1232,30 +1188,60 @@ fn exhausted_profile_is_skipped_and_setup_token_launch_is_approved_without_a_sam
         fs::write(dir.join("oauth-token.txt"), "test-only-placeholder").unwrap();
         c.config_dir = Some(dir.to_string_lossy().into_owned());
     }
-    let first = f.engine.settings.candidates[0].key();
-    let second = f.engine.settings.candidates[1].key();
+    let order: Vec<String> = f.engine.settings.candidates.iter().map(Candidate::key).collect();
     let policy = f.engine.settings.clone();
     let g = f.engine.groups.get_mut(&f.id).unwrap();
-    g.policy = Some(policy.clone()); g.participants = policy.candidates.iter().map(Candidate::key).collect();
+    g.policy = Some(policy.clone()); g.participants = order.clone();
     g.status = LoopStatus::Preparing; g.current_provider = Some("claude".into());
     let pid = std::process::id();
     f.state.manager.runtime.lock().processes.push(ProcessEntry { pid, parent_pid: None, image_name: "bridge".into(), command_args: vec![], started_at: 1 });
     let request = Uuid::new_v4().to_string();
     let live = f.engine.live.get_mut(&f.id).unwrap();
+    live.initial_start = true;
     live.dispatch = Some(Dispatch { id: request.clone(), pid, provider: "claude".into(), args: vec![], cwd: f.engine.root.to_string_lossy().into_owned() });
-    live.helper_pid = Some(pid); live.guard_at = now();
-    f.engine.quota(first.clone(), Ok(vec![window(91.0, now()+60000)]), now());
-    f.engine.quota(second.clone(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
-    f.engine.tick(&f.state).unwrap();
-    assert_eq!(f.engine.live[&f.id].selected.as_deref(), Some(second.as_str()));
-    let stamp = f.engine.live[&f.id].guard_at;
-    f.engine.quota(second.clone(), Err("Waiting for session usage".into()), stamp);
+    live.helper_pid = Some(pid);
+    if spend_first {
+        f.engine.quota(order[0].clone(), Ok(vec![window(91.0, now() + 60000)]), now());
+    }
+    // The other account has no usable reading, which is the normal state of one
+    // that has never run: it must not stand in the way of starting.
+    f.engine.quota(order[1].clone(), Err("Waiting for session usage. Start this profile and send a message".into()), now());
     f.engine.tick(&f.state).unwrap();
     let g = &f.engine.groups[&f.id];
-    assert_eq!(g.active_profile.as_deref(), Some(second.as_str()), "status={:?} reason={:?} events={:?}", g.status, g.reason, g.events);
-    assert_eq!(g.attempts.len(), 1);
-    assert!(g.events.iter().any(|e| e.kind == "USAGE_CHECK_DEFERRED"));
+    assert_eq!(g.attempts.len(), 1, "status={:?} reason={:?} events={:?}", g.status, g.reason, g.events);
     assert!(f.engine.dir(g).join(format!("response-{request}.json")).is_file());
     // No native Agent is spawned by this isolated dispatch test.
     assert!(f.state.manager.runtime.lock().get_state(f.sid()).pid.is_none());
+    let chosen = g.active_profile.clone().unwrap();
+    order.iter().position(|key| *key == chosen).unwrap()
+}
+#[test]
+fn the_first_launch_follows_the_configured_order_without_reading_usage() {
+    assert_eq!(launched_position(false), 0);
+}
+#[test]
+fn a_spent_account_is_skipped_and_the_next_one_launches_without_a_sample() {
+    assert_eq!(launched_position(true), 1);
+}
+#[test]
+fn monitoring_can_be_switched_off_and_back_on_from_the_terminal() {
+    let mut f = Fixture::new();
+    running(&mut f);
+    f.engine.groups.get_mut(&f.id).unwrap().pending_work = true;
+    f.engine
+        .request(&f.state, json!({"op":"set_monitoring","id":f.id,"enabled":false}))
+        .unwrap();
+    // Off: no provider traffic, and a spent account is left alone rather than
+    // being interrupted behind the user's back.
+    assert!(f.engine.usage_targets().is_empty());
+    f.engine.quota("codex:a".into(), Ok(vec![window(95.0, now() + 60_000)]), now());
+    f.engine.tick(&f.state).unwrap();
+    assert_eq!(f.engine.groups[&f.id].status, "running");
+    assert!(f.engine.live[&f.id].interrupt_at.is_none());
+    // Back on: the same evidence is acted on immediately.
+    f.engine
+        .request(&f.state, json!({"op":"set_monitoring","id":f.id,"enabled":true}))
+        .unwrap();
+    f.engine.tick(&f.state).unwrap();
+    assert_eq!(f.engine.groups[&f.id].status, "switching_profile");
 }

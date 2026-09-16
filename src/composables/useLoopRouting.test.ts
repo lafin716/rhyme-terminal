@@ -97,13 +97,25 @@ it('renames a loop through its real group id without changing the stable tab', a
   expect(useLoopRouting().getByTab('loop:group-1')?.name).toBe('Renamed loop');
 });
 
-it('requests guarded automatic creation without a prompt or session selector', async () => {
+it('creates a loop from the saved settings alone, with no per-loop options', async () => {
   mocks.invoke.mockImplementation(async (_command, args) => args.request.op === 'create' ? { ...group('shell'), status: 'resuming' } : args.request.op === 'list' ? [] : { runtimeMonitor: true, autoStart: true });
-  await useLoopRouting().create({ name: 'Checkout', workspaceId: 'w1', workspaceIndex: 1, cwd: 'C:/repo', participants: ['codex:work'] });
+  useLoopRouting().state.settings.candidates = [
+    { agent: 'codex', profileId: 'work', label: 'Work', enabled: true },
+    { agent: 'claude', profileId: 'spare', label: 'Spare', enabled: false },
+  ];
+  await useLoopRouting().create({ name: 'Checkout', workspaceId: 'w1', workspaceIndex: 1, cwd: 'C:/repo' });
+  // The participants are exactly the enabled profiles, in their configured
+  // order — the create call itself carries no thresholds, strategy or prompt.
   expect(mocks.invoke).toHaveBeenCalledWith('loop_request', { request: expect.objectContaining({ op: 'create', participants: ['codex:work'] }) });
   const request = mocks.invoke.mock.calls.find(([, args]) => args.request.op === 'create')![1].request;
   expect(request).not.toHaveProperty('start');
+  expect(request).not.toHaveProperty('settings');
   expect(mocks.invoke.mock.calls.some(([, args]) => args.request.op === 'conversations')).toBe(false);
+});
+it('refuses to create a loop when no profile is enabled in settings', async () => {
+  mocks.invoke.mockResolvedValue({ version: 1, runtimeMonitor: true, autoStart: true });
+  useLoopRouting().state.settings.candidates = [];
+  await expect(useLoopRouting().create({ name: 'New', workspaceId: 'w1', workspaceIndex: 1, cwd: 'C:/repo' })).rejects.toThrow('활성화');
 });
 it('blocks a runtime-aware daemon without automatic startup before creation', async () => {
   mocks.invoke.mockResolvedValue({ version: 1, runtimeMonitor: true });

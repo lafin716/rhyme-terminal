@@ -16,6 +16,14 @@ export const LOOP_THRESHOLD_BASES: { value: LoopThresholdBasis; label: string; h
   { value: 'short', label: '5시간', hint: '세션 중에 움직이는 단기 창' },
   { value: 'weekly', label: '주간', hint: '7일 한도를 아껴 쓸 때' },
 ];
+
+/**
+ * A Loop that has stopped managing its terminal for good. Neither is a
+ * failure: `completed` is the Agent finishing its work, `stopped` is the user
+ * ending the Loop.
+ */
+export const loopIsFinished = (status: LoopGroup['status']) =>
+  status === 'completed' || status === 'stopped';
 export const loopBasisLabel = (basis: LoopThresholdBasis | undefined) =>
   basis === 'weekly' ? '주간' : '5시간';
 /** `LoopProfileSnapshot.thresholdKind` reads the same way, window kind for window kind. */
@@ -91,6 +99,8 @@ export interface LoopProfileSnapshot {
   remaining: number | null;
   resetAt: number | null;
   error: string | null;
+  /** When this account's usage was last read, or absent if it never has been. */
+  checkedAt?: number | null;
   windows?: { label: string; percentUsed: number; kind: string }[];
 }
 
@@ -110,6 +120,13 @@ export type LoopPolicyPatch = Partial<
 };
 
 export interface LoopGroup {
+  /**
+   * Whether the Loop manages this terminal — usage reading, limit switching,
+   * profile handoff, cooldown scheduling. Off, it still reports what it sees.
+   */
+  monitoring?: boolean;
+  /** True while the managed Agent is working on a prompt. Usage is only ever read then. */
+  pendingWork?: boolean;
   policy?: LoopSettings;
   queuedInput?: { id: string; bytes: number[]; delivering: boolean }[];
   runtime?: AgentRuntimeState;
@@ -133,6 +150,7 @@ export interface LoopGroup {
     | 'waiting_for_usage_reset'
     | 'resuming'
     | 'paused'
+    | 'completed'
     | 'stopped'
     | 'error'
     | 'recovery';
@@ -140,8 +158,6 @@ export interface LoopGroup {
   reason: string | null;
   attempts: LoopAttempt[];
   updatedAt: number;
-  switchPending?: boolean;
-  switchPendingSince?: number | null;
 }
 
 export const loopTabId = (id: string) => `loop:${id}`;
@@ -208,6 +224,7 @@ export const loopStatusLabel = (status: string) =>
     waiting_for_usage_reset: 'Usage Reset 대기',
     resuming: '재개 대기',
     paused: '일시중지',
+    completed: '작업 완료',
     stopped: '종료됨',
     error: '오류',
     recovery: '복구 중',

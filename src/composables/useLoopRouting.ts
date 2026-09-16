@@ -4,7 +4,7 @@ import { usePrefs } from './usePrefs';
 import { useAccountProfiles } from './useAccountProfiles';
 import { useWorkspaces } from './useWorkspaces';
 import { addTabToLeaf, findFirstLeaf, findLeafBySession, removeTab } from './useLayout';
-import { loopTabId, mergeLoopProfiles, type LoopGroup, type LoopSettings, type LoopPolicyPatch } from '../lib/loop-routing';
+import { loopIsFinished, loopTabId, mergeLoopProfiles, type LoopGroup, type LoopSettings, type LoopPolicyPatch } from '../lib/loop-routing';
 const KEY = 'winmux:loop-routing:v1';
 // pollingIntervalSeconds is only the "active, usage below HIGH" baseline —
 // the daemon scheduler adapts around it (faster near the switch threshold,
@@ -50,6 +50,8 @@ export async function refreshLoopGroups(skipId?: string) {
   for (const group of state.groups) {
     const ws = workspaces.workspaces.find(w => w.id === group.workspaceId);
     if (!ws || group.status === 'stopped' || group.id === skipId) continue;
+    // A finished Loop keeps its tab so the result stays readable; only an
+    // explicitly stopped one is dropped from the layout.
     const id = loopTabId(group.id);
     if (!findLeafBySession(ws.layout, id)) {
       const leaf = findFirstLeaf(ws.layout);
@@ -78,15 +80,24 @@ export async function initializeLoopRouting() {
 export function disposeLoopRouting() { closed = true; refreshGeneration++; clearTimeout(timer); stopProfiles?.(); }
 export function useLoopRouting() {
   return { state, getByTab: (id: string | null) => state.groups.find(g => loopTabId(g.id) === id),
-    async create(options: { name: string; workspaceId: string; workspaceIndex: number; cwd: string; participants?: string[]; requestId?: string; settings?: LoopSettings }) {
+    /**
+     * Creating a Loop asks nothing: the accounts, the limits and the timings
+     * all come from 설정 → 에이전트 루프, and the first usable account in that
+     * order starts straight away.
+     */
+    async create(options: { name: string; workspaceId: string; workspaceIndex: number; cwd: string; requestId?: string }) {
       await requireRuntimeMonitor();
-      const { settings, ...args } = options;
-      await saveLoopSettings(settings);
-      const group = await request<LoopGroup>({ op: 'create', ...args, cols: 120, rows: 30 });
+      const enabled = state.settings.candidates.filter(c => c.enabled);
+      if (!enabled.length) throw new Error('설정 → 에이전트 루프에서 사용할 프로필을 먼저 활성화하세요.');
+      const group = await request<LoopGroup>({ op: 'create', ...options, participants: enabled.map(c => `${c.agent}:${c.profileId ?? 'system'}`), cols: 120, rows: 30 });
       await refreshLoopGroups(group.id).catch(e => { state.error = String(e); });
       return group;
     },
-    async control(op: 'pause' | 'resume' | 'next' | 'stop', id: string) { await request({ op, id }); await refreshLoopGroups(); },
+    async control(op: 'pause' | 'resume' | 'next' | 'stop' | 'complete', id: string) { await request({ op, id }); await refreshLoopGroups(); },
+    /** Hand the Loop's own management on or off from its terminal. */
+    async setMonitoring(id: string, enabled: boolean) { await request({ op: 'set_monitoring', id, enabled }); await refreshLoopGroups(); },
+    /** One manual usage read, outside the prompt-bound schedule. */
+    async checkUsage(id: string) { await request({ op: 'check_usage', id }); },
     async updatePolicy(id: string, patch: LoopPolicyPatch) {
       const capabilities = await request<{ livePolicy?: boolean }>({ op: 'capabilities' });
       if (!capabilities.livePolicy) throw new Error('실행 중인 데몬은 Loop 설정 수정을 지원하지 않습니다. 기존 작업 종료 후 앱과 데몬을 재시작하세요.');
@@ -113,6 +124,7 @@ export function useLoopRouting() {
       for (const ws of workspaces.workspaces) replaceLayout(ws.id, removeTab(ws.layout, loopTabId(id)).root);
       await refreshLoopGroups();
     },
+    isFinished: (group: LoopGroup) => loopIsFinished(group.status),
     history: (id: string, attemptId: string) => request<string>({ op: 'history', id, attemptId }),
   };
 }

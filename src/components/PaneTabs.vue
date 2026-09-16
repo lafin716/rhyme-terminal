@@ -20,7 +20,6 @@ import type { LeafNode } from "../lib/layout-types";
 import TerminalView from "./Terminal.vue";
 import FileViewer from "./FileViewerLoader.vue";
 import LoopGroupView from './LoopGroupView.vue';
-import LoopCreateDialog from './LoopCreateDialog.vue';
 import { homeDir } from '@tauri-apps/api/path';
 import { useLoopRouting } from '../composables/useLoopRouting';
 import { loopTabId, loopStatusLabel, type LoopGroup } from '../lib/loop-routing';
@@ -179,12 +178,29 @@ function terminalGlyph(terminal: TerminalConfig): string {
   }
 }
 
-const loopDraft = ref<{ workspaceId: string; workspaceIndex: number; cwd: string; name: string }>();
+const loopError = ref('');
+/**
+ * A Loop takes no options. Everything it needs — which accounts, in what
+ * order, with which 5시간 / 주간 한도 — is already configured in
+ * 설정 → 에이전트 루프, so this creates it and it starts.
+ */
 async function createLoop() {
   closeTerminalMenu();
   const ws = activeWorkspace.value;
   if (!ws) return;
-  loopDraft.value = { workspaceId: ws.id, workspaceIndex: ws.index, cwd: workspaceDefaultCwd(ws) ?? await homeDir(), name: `루프 ${loops.state.groups.length + 1}` };
+  loopError.value = '';
+  try {
+    const group = await loops.create({
+      workspaceId: ws.id,
+      workspaceIndex: ws.index,
+      cwd: workspaceDefaultCwd(ws) ?? (await homeDir()),
+      name: `루프 ${loops.state.groups.length + 1}`,
+      requestId: crypto.randomUUID(),
+    });
+    loopCreated(group);
+  } catch (e) {
+    loopError.value = String(e);
+  }
 }
 function loopCreated(group: LoopGroup) {
   const ws = activeWorkspace.value;
@@ -192,7 +208,6 @@ function loopCreated(group: LoopGroup) {
     addTabToLeaf(ws.layout, props.leaf.id, loopTabId(group.id));
     setFocusedLeaf(props.leaf.id);
   }
-  loopDraft.value = undefined;
 }
 function sessionName(id: string): string {
   const group = loops.getByTab(id);
@@ -853,11 +868,12 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
-  <LoopCreateDialog v-if="loopDraft" v-bind="loopDraft" @close="loopDraft = undefined" @created="loopCreated" />
+  <p v-if="loopError" class="loop-error" role="alert" @click="loopError = ''">{{ loopError }}</p>
 </template>
 
 <style scoped>
 .loop-tag { color: var(--accent); font-size: 10px; }
+.loop-error { position: fixed; right: 16px; bottom: 16px; z-index: 60; max-width: min(420px, calc(100vw - 32px)); margin: 0; padding: 10px 12px; border: 1px solid #ffb3ad55; border-radius: 6px; background: var(--bg-secondary, #252525); color: #ffb3ad; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; cursor: pointer; }
 .pane {
   display: flex;
   flex-direction: column;
