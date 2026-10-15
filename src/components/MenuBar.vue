@@ -8,7 +8,14 @@ import { dispatchAction } from "../composables/useGlobalShortcuts";
 import { useSettings } from "../composables/useSettings";
 import { useFireworks } from "../composables/useFireworks";
 import { formatKeybinding, type ActionId } from "../lib/keybindings";
-import { panelLeftIcon, panelRightIcon, fireworksIcon } from "../lib/offline-icons";
+import { toggleFlyoutGroup } from "../lib/menu-flyout";
+import { groupMenuItems } from "../lib/menu-groups";
+import {
+  chevronRightIcon,
+  moreHorizontalIcon,
+  panelLeftIcon,
+  panelRightIcon,
+} from "../lib/offline-icons";
 
 type MenuItem =
   | { kind: "action"; label: string; actionId: ActionId; disabled?: boolean }
@@ -26,7 +33,8 @@ const { openSettings } = useSettings();
 const { panels, toggleLeft, toggleRight } = useShellPanels();
 const { launch: launchFireworks } = useFireworks();
 
-const openMenu = ref<string | null>(null);
+const isOverflowMenuOpen = ref(false);
+const activeGroupId = ref<string | null>(null);
 const rootRef = ref<HTMLDivElement | null>(null);
 
 const leftToggleTitle = computed(
@@ -45,7 +53,7 @@ async function quitApp() {
   }
 }
 
-const menus = computed<MenuDef[]>(() => [
+const menuGroups = computed<MenuDef[]>(() => groupMenuItems<MenuItem>([
   {
     id: "file",
     label: "File",
@@ -97,18 +105,24 @@ const menus = computed<MenuDef[]>(() => [
       { kind: "cmd", label: "About winmux", run: () => alert("winmux — terminal multiplexer") },
     ],
   },
-]);
+]));
 
-function toggleMenu(id: string) {
-  openMenu.value = openMenu.value === id ? null : id;
+function toggleOverflowMenu() {
+  isOverflowMenuOpen.value = !isOverflowMenuOpen.value;
+  activeGroupId.value = null;
 }
 
-function hoverMenu(id: string) {
-  if (openMenu.value !== null) openMenu.value = id;
+function showGroup(id: string) {
+  activeGroupId.value = id;
+}
+
+function toggleGroup(id: string) {
+  activeGroupId.value = toggleFlyoutGroup(activeGroupId.value, id);
 }
 
 function closeMenu() {
-  openMenu.value = null;
+  isOverflowMenuOpen.value = false;
+  activeGroupId.value = null;
 }
 
 function runItem(item: MenuItem) {
@@ -136,7 +150,7 @@ function onDocClick(ev: MouseEvent) {
 }
 
 function onKey(ev: KeyboardEvent) {
-  if (ev.key === "Escape" && openMenu.value) {
+  if (ev.key === "Escape" && isOverflowMenuOpen.value) {
     ev.stopPropagation();
     closeMenu();
   }
@@ -154,6 +168,59 @@ onUnmounted(() => {
 
 <template>
   <div ref="rootRef" class="menubar">
+    <div class="overflow-menu">
+      <button
+        class="corner-toggle"
+        :class="{ active: isOverflowMenuOpen }"
+        title="Application menu"
+        type="button"
+        aria-label="Application menu"
+        aria-haspopup="menu"
+        :aria-expanded="isOverflowMenuOpen"
+        @click.stop="toggleOverflowMenu"
+      >
+        <Icon class="ico" :icon="moreHorizontalIcon" />
+      </button>
+      <div v-if="isOverflowMenuOpen" class="dropdown root-dropdown" role="menu" @click.stop>
+        <div
+          v-for="group in menuGroups"
+          :key="group.id"
+          class="menu-group"
+          @mouseenter="showGroup(group.id)"
+        >
+          <button
+            class="group-item"
+            :class="{ active: activeGroupId === group.id }"
+            type="button"
+            role="menuitem"
+            :aria-expanded="activeGroupId === group.id"
+            @click="toggleGroup(group.id)"
+          >
+            <span>{{ group.label }}</span>
+            <Icon class="group-arrow" :icon="chevronRightIcon" />
+          </button>
+          <div
+            v-if="activeGroupId === group.id"
+            class="dropdown submenu"
+            role="menu"
+          >
+            <template v-for="(item, i) in group.items" :key="i">
+              <div v-if="item.kind === 'separator'" class="sep" />
+              <div
+                v-else
+                class="item"
+                :class="{ disabled: item.disabled }"
+                role="menuitem"
+                @click="!item.disabled && runItem(item)"
+              >
+                <span class="item-label">{{ item.label }}</span>
+                <span class="item-shortcut">{{ shortcutLabel(item) }}</span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
     <button
       class="corner-toggle"
       :class="{ active: panels.left.open }"
@@ -163,30 +230,6 @@ onUnmounted(() => {
     >
       <Icon class="ico" :icon="panelLeftIcon" />
     </button>
-    <div
-      v-for="m in menus"
-      :key="m.id"
-      class="menu"
-      :class="{ active: openMenu === m.id }"
-      @click.stop="toggleMenu(m.id)"
-      @mouseenter="hoverMenu(m.id)"
-    >
-      <span class="label">{{ m.label }}</span>
-      <div v-if="openMenu === m.id" class="dropdown" @click.stop>
-        <template v-for="(item, i) in m.items" :key="i">
-          <div v-if="item.kind === 'separator'" class="sep" />
-          <div
-            v-else
-            class="item"
-            :class="{ disabled: item.disabled }"
-            @click="!item.disabled && runItem(item)"
-          >
-            <span class="item-label">{{ item.label }}</span>
-            <span class="item-shortcut">{{ shortcutLabel(item) }}</span>
-          </div>
-        </template>
-      </div>
-    </div>
     <div class="spacer" />
     <button
       class="corner-toggle fireworks-btn"
@@ -221,24 +264,18 @@ onUnmounted(() => {
   position: relative;
   z-index: 50;
 }
-.menu {
+.overflow-menu {
   position: relative;
   display: flex;
-  align-items: center;
-  padding: 0 10px;
-  color: #d4d4d4;
-  cursor: pointer;
+  height: 100%;
 }
-.menu:hover, .menu.active {
-  background: #3a3a3a;
-}
-.label { line-height: 1; }
 .spacer { flex: 1; }
 .corner-toggle {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 34px;
+  height: 100%;
   border: none;
   background: transparent;
   color: #9a9a9a;
@@ -263,6 +300,41 @@ onUnmounted(() => {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55);
   padding: 4px 0;
   z-index: 100;
+}
+.root-dropdown {
+  top: 0;
+  left: 100%;
+  min-width: 160px;
+}
+.menu-group {
+  position: relative;
+}
+.group-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px 0 12px;
+  border: 0;
+  background: transparent;
+  color: #d4d4d4;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.group-item:hover,
+.group-item.active {
+  background: #2e2e2e;
+}
+.group-arrow {
+  color: #8f8f8f;
+  font-size: 15px;
+}
+.submenu {
+  top: -4px;
+  left: calc(100% + 4px);
+  min-width: 240px;
 }
 .item {
   display: flex;

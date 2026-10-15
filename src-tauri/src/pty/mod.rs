@@ -1,4 +1,6 @@
 pub mod activity;
+pub mod agent;
+pub mod agent_status;
 pub mod manager;
 
 use anyhow::{anyhow, Result};
@@ -16,8 +18,33 @@ use uuid::Uuid;
 
 use crate::ipc::protocol::Event;
 use crate::pty::activity::detect_activity;
+use crate::pty::agent_status::{AgentTaskEvent, AgentTaskTracker};
 
 const SCROLLBACK_BYTES: usize = 1_000_000;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    Terminal,
+    Claude,
+    Codex,
+}
+
+impl Default for AgentKind {
+    fn default() -> Self {
+        Self::Terminal
+    }
+}
+
+impl AgentKind {
+    fn executable_name(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionInfo {
@@ -27,6 +54,8 @@ pub struct SessionInfo {
     pub cwd: Option<String>,
     pub cols: u16,
     pub rows: u16,
+    #[serde(default)]
+    pub agent: AgentKind,
 }
 
 pub struct Session {
@@ -35,6 +64,9 @@ pub struct Session {
     pub writer: Box<dyn Write + Send>,
     pub killer: Box<dyn ChildKiller + Send + Sync>,
     pub scrollback: Arc<Mutex<VecDeque<u8>>>,
+    pub agent_kind: Arc<Mutex<AgentKind>>,
+    pub task_tracker: Arc<Mutex<AgentTaskTracker>>,
+    shell_pid: u32,
 }
 
 pub fn spawn_session(
@@ -81,6 +113,9 @@ pub fn spawn_session(
         .map_err(|e| anyhow!("spawn shell {shell:?} failed: {e}"))?;
     drop(pair.slave);
 
+    let shell_pid = child
+        .process_id()
+        .ok_or_else(|| anyhow!("spawned shell did not report a process ID"))?;
     let killer = child.clone_killer();
     let writer = pair
         .master
@@ -93,8 +128,12 @@ pub fn spawn_session(
 
     let id = Uuid::new_v4();
     let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
+    let agent_kind = Arc::new(Mutex::new(AgentKind::Terminal));
+    let task_tracker = Arc::new(Mutex::new(AgentTaskTracker::new()));
 
     let scrollback_clone = scrollback.clone();
+    let agent_kind_clone = agent_kind.clone();
+    let task_tracker_clone = task_tracker.clone();
     let events_clone = events.clone();
     thread::Builder::new()
         .name(format!("pty-reader-{id}"))
@@ -120,6 +159,10 @@ pub fn spawn_session(
                         let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
                         let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
                         let _ = events_clone.send(Event::SessionActivity { id, bell: sig.bell });
+                        let agent = *agent_kind_clone.lock();
+                        if let Some(status) = task_tracker_clone.lock().observe(agent, AgentTaskEvent::Output(chunk)) {
+                            let _ = events_clone.send(Event::SessionAgentStatusChanged { id, status });
+                        }
                     }
                     Err(_) => break,
                 }
@@ -143,6 +186,7 @@ pub fn spawn_session(
         cwd: effective_cwd.map(|value| value.to_string_lossy().into_owned()),
         cols,
         rows,
+        agent: AgentKind::Terminal,
     };
     Ok(Session {
         info,
@@ -150,6 +194,9 @@ pub fn spawn_session(
         writer,
         killer,
         scrollback,
+        agent_kind,
+        task_tracker,
+        shell_pid,
     })
 }
 

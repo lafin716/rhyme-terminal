@@ -7,6 +7,7 @@ import {
   onMounted,
   onUnmounted,
 } from "vue";
+import { Icon } from "@iconify/vue";
 import type { LeafNode } from "../lib/layout-types";
 import TerminalView from "./Terminal.vue";
 import BrowserView from "./BrowserView.vue";
@@ -21,6 +22,7 @@ import { useFocus } from "../composables/useFocus";
 import { useDragState } from "../composables/useDragState";
 import { useConfirm } from "../composables/useConfirm";
 import { usePrefs } from "../composables/usePrefs";
+import { sessionAgentIcon } from "../lib/session-agent-icon";
 import {
   TERMINAL_PRESETS,
   cloneTerminalConfig,
@@ -39,7 +41,13 @@ import {
 const props = defineProps<{ leaf: LeafNode }>();
 const FileViewer = defineAsyncComponent(() => import("./FileViewer.vue"));
 
-const { state: sessState, kill, rename, create } = useSessions();
+const {
+  kill,
+  rename,
+  create,
+  getById: getSessionById,
+  sessionAgentStatus,
+} = useSessions();
 const resources = useResources();
 const { activeWorkspace, replaceLayout } = useWorkspaces();
 const { focusedLeafId, setFocusedLeaf } = useFocus();
@@ -107,7 +115,7 @@ function sessionName(id: string): string {
       return resource.url;
     }
   }
-  const s = sessState.sessions.find((x) => x.id === id);
+  const s = getSessionById(id);
   return s ? displayName(s.name) : id.slice(0, 6);
 }
 
@@ -121,6 +129,10 @@ function tabIcon(id: string): string {
     case "browser": return "◎";
     default: return "›_";
   }
+}
+
+function terminalTabIcon(id: string) {
+  return sessionAgentIcon(getSessionById(id)?.agent ?? "terminal");
 }
 
 function fileTab(id: string | null): FileTab | null {
@@ -492,7 +504,16 @@ onUnmounted(() => {
             />
           </template>
           <template v-else>
-            <span class="kind-icon">{{ tabIcon(id) }}</span>
+            <span
+              v-if="tabKind(id) === 'terminal' && getSessionById(id)?.agent !== 'terminal' && sessionAgentStatus(id)"
+              :class="['agent-status', `is-${sessionAgentStatus(id)}`]"
+            />
+            <Icon
+              v-if="tabKind(id) === 'terminal'"
+              :class="['kind-icon', `agent-${getSessionById(id)?.agent ?? 'terminal'}`]"
+              :icon="terminalTabIcon(id)"
+            />
+            <span v-else class="kind-icon">{{ tabIcon(id) }}</span>
             <span class="name">{{ sessionName(id) }}</span>
             <span
               v-if="isFileDirty(id)"
@@ -695,6 +716,28 @@ onUnmounted(() => {
   color: #4ec9b0;
   font-family: Consolas, monospace;
   font-size: 11px;
+}
+.kind-icon.agent-codex {
+  font-size: 15px;
+}
+.kind-icon.agent-claude {
+  color: #d97757;
+}
+.agent-status {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+.agent-status.is-working {
+  background: #e2b341;
+  animation: agent-working 900ms ease-in-out infinite alternate;
+}
+.agent-status.is-completed { background: #4ec9b0; }
+.agent-status.is-error { background: #e06c75; }
+@keyframes agent-working {
+  from { opacity: 0.35; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
 }
 .dirty-dot {
   color: #4ec9b0;

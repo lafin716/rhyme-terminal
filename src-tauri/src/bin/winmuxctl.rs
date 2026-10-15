@@ -370,7 +370,7 @@ mod tests {
     use base64::Engine;
     use clap::Parser;
     use uuid::Uuid;
-    use winmux_lib::pty::SessionInfo;
+    use winmux_lib::pty::{AgentKind, SessionInfo};
 
     fn session(id: Uuid, name: &str, shell: &str, cols: u16, rows: u16) -> SessionInfo {
         SessionInfo {
@@ -380,6 +380,7 @@ mod tests {
             cwd: None,
             cols,
             rows,
+            agent: AgentKind::Terminal,
         }
     }
 

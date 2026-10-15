@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { computed, onMounted } from "vue";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import { computed, onBeforeUnmount, onMounted } from "vue";
 import SideBar from "./components/SideBar.vue";
 import ExplorerPanel from "./components/ExplorerPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
@@ -24,7 +25,7 @@ import { loadPaletteFromStorage } from "./composables/usePalette";
 import { useResources } from "./composables/useResources";
 import { useQuickOpen } from "./composables/useQuickOpen";
 import { useShellPanels } from "./composables/useShellPanels";
-import { RAIL_WIDTH } from "./lib/shell-panels";
+import { onSessionAgentChanged } from "./lib/tauri";
 import { ACTIONS, type ActionId } from "./lib/keybindings";
 import {
   activateSessionTab,
@@ -53,6 +54,7 @@ const {
   focusedSession,
   workspaceSessions,
   rename,
+  applyAgentUpdate,
 } = useSessions();
 const {
   activeWorkspace,
@@ -68,6 +70,45 @@ const resources = useResources();
 const { open: openQuickOpen } = useQuickOpen();
 const { panels, toggleLeft, toggleRight, resize, commit } = useShellPanels();
 useGlobalShortcuts();
+
+let unlistenSessionAgent: UnlistenFn | null = null;
+let agentListenerRetry: ReturnType<typeof setTimeout> | null = null;
+let agentListenerStarting: Promise<void> | null = null;
+let appUnmounted = false;
+
+function startSessionAgentListener(resyncAfterRetry = false): Promise<void> {
+  if (unlistenSessionAgent || appUnmounted) return Promise.resolve();
+  if (agentListenerStarting) return agentListenerStarting;
+
+  agentListenerStarting = onSessionAgentChanged(applyAgentUpdate)
+    .then(async (unlisten) => {
+      if (appUnmounted) {
+        unlisten();
+      } else {
+        unlistenSessionAgent = unlisten;
+        if (resyncAfterRetry) {
+          try {
+            await refresh();
+          } catch (error) {
+            console.warn("Failed to resync sessions after agent listener retry", error);
+          }
+        }
+      }
+    })
+    .catch((error) => {
+      console.warn("Failed to subscribe to session agent changes", error);
+      if (!appUnmounted) {
+        agentListenerRetry = setTimeout(() => {
+          agentListenerRetry = null;
+          void startSessionAgentListener(true);
+        }, 1000);
+      }
+    })
+    .finally(() => {
+      agentListenerStarting = null;
+    });
+  return agentListenerStarting;
+}
 
 // Between-region splitter drag: resize a panel's width in px while the center
 // content flexes to fill the rest. Widths are clamped to the panel's minimum;
@@ -95,7 +136,7 @@ function startRegionResize(side: "left" | "right", ev: MouseEvent) {
 }
 
 const leftRegionStyle = computed(() => ({
-  width: `${panels.left.collapsed ? RAIL_WIDTH : panels.left.width}px`,
+  width: `${panels.left.width}px`,
 }));
 const rightRegionStyle = computed(() => ({ width: `${panels.right.width}px` }));
 
@@ -381,7 +422,17 @@ usePrefixKey(async (key) => {
   }
 });
 
-onMounted(bootstrap);
+onMounted(async () => {
+  await startSessionAgentListener();
+  await bootstrap();
+});
+
+onBeforeUnmount(() => {
+  appUnmounted = true;
+  if (agentListenerRetry) clearTimeout(agentListenerRetry);
+  unlistenSessionAgent?.();
+  unlistenSessionAgent = null;
+});
 </script>
 
 <template>
@@ -392,7 +443,7 @@ onMounted(bootstrap);
         <SideBar />
       </div>
       <div
-        v-if="panels.left.open && !panels.left.collapsed"
+        v-if="panels.left.open"
         class="region-splitter"
         title="Drag to resize"
         @mousedown="startRegionResize('left', $event)"

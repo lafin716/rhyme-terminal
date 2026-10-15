@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+export type AgentKind = "terminal" | "claude" | "codex";
+export type AgentTaskStatus = "working" | "completed" | "error";
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -8,6 +11,7 @@ export interface SessionInfo {
   cwd?: string | null;
   cols: number;
   rows: number;
+  agent: AgentKind;
 }
 
 export interface FilePreview {
@@ -57,6 +61,16 @@ export interface PtyExitPayload {
 export interface SessionActivityPayload {
   id: string;
   bell: boolean;
+}
+
+export interface SessionAgentPayload {
+  id: string;
+  agent: AgentKind;
+}
+
+export interface SessionAgentStatusPayload {
+  id: string;
+  status: AgentTaskStatus;
 }
 
 export const api = {
@@ -131,6 +145,18 @@ export function onSessionActivity(
   handler: (payload: SessionActivityPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<SessionActivityPayload>("session-activity", (e) => handler(e.payload));
+}
+
+export function onSessionAgentChanged(
+  handler: (payload: SessionAgentPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SessionAgentPayload>("session-agent-changed", (e) => handler(e.payload));
+}
+
+export function onSessionAgentStatusChanged(
+  handler: (payload: SessionAgentStatusPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SessionAgentStatusPayload>("session-agent-status-changed", (e) => handler(e.payload));
 }
 
 // Helpers for base64 <-> binary

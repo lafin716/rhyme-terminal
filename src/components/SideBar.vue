@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
-import { Icon, type IconifyIcon } from "@iconify/vue";
-import { useWorkspaces } from "../composables/useWorkspaces";
+import { Icon } from "@iconify/vue";
+import { useWorkspaces, workspaceDefaultCwd } from "../composables/useWorkspaces";
 import { useSessions } from "../composables/useSessions";
 import { useResources } from "../composables/useResources";
-import { useShellPanels } from "../composables/useShellPanels";
 import { useFocus } from "../composables/useFocus";
 import {
   collectAllSessionIds,
@@ -15,11 +14,10 @@ import {
 import { buildNavigatorTree } from "../lib/navigator";
 import {
   bellIcon,
-  chevronLeftIcon,
-  chevronRightIcon,
+  folderIcon,
   plusIcon,
-  terminalIcon,
 } from "../lib/offline-icons";
+import { sessionAgentIcon } from "../lib/session-agent-icon";
 
 const {
   state,
@@ -28,12 +26,16 @@ const {
   renameWorkspace,
   setActiveWorkspace,
 } = useWorkspaces();
-const { state: sessState, focusedSession, activity, kill } = useSessions();
+const {
+  state: sessState,
+  focusedSession,
+  activity,
+  agentTaskStatus,
+  createForWorkspace,
+  kill,
+} = useSessions();
 const { setFocusedLeaf } = useFocus();
 const resources = useResources();
-const { panels, toggleLeftCollapsed } = useShellPanels();
-
-const collapsed = computed(() => panels.left.collapsed);
 
 // Grouped Workspace -> Session tree the Navigator renders. Derivation and its
 // active/focused flags are unit-tested in `../lib/navigator`; this component
@@ -45,6 +47,7 @@ const tree = computed(() =>
     activeWorkspaceId: state.activeWorkspaceId,
     focusedSessionId: focusedSession.value?.id ?? null,
     activityById: activity,
+    agentStatusById: agentTaskStatus,
   }),
 );
 
@@ -52,11 +55,6 @@ const editingId = ref<string | null>(null);
 const editValue = ref("");
 const menuFor = ref<string | null>(null);
 const menuPos = ref({ x: 0, y: 0 });
-
-function initialOf(name: string, icon?: string): string {
-  if (icon && icon.length) return icon.slice(0, 2);
-  return name.trim().slice(0, 1).toUpperCase() || "?";
-}
 
 function activate(id: string) {
   setActiveWorkspace(id);
@@ -80,6 +78,21 @@ function addWorkspace() {
   const ws = createWorkspace(`WS${state.workspaces.length}`);
   editingId.value = ws.id;
   editValue.value = ws.name;
+}
+
+async function addTerminal(workspaceId: string) {
+  const ws = state.workspaces.find((workspace) => workspace.id === workspaceId);
+  if (!ws) return;
+
+  // A terminal created from the Navigator belongs to the Workspace whose
+  // button was clicked, rather than whichever Workspace happened to be active.
+  setActiveWorkspace(ws.id);
+  const info = await createForWorkspace(ws, { cwd: workspaceDefaultCwd(ws) });
+  if (!info) return;
+
+  const leaf = findFirstLeaf(ws.layout);
+  addTabToLeaf(ws.layout, leaf.id, info.id);
+  setFocusedLeaf(leaf.id);
 }
 
 function startRename(id: string) {
@@ -136,13 +149,10 @@ function closeMenu() {
 
 const canDelete = computed(() => state.workspaces.length > 1);
 
-const toggleIcon = computed<IconifyIcon>(() =>
-  collapsed.value ? chevronRightIcon : chevronLeftIcon,
-);
 </script>
 
 <template>
-  <aside :class="['sidebar', collapsed ? 'mode-collapsed' : 'mode-expanded']" @click="closeMenu">
+  <aside class="sidebar" @click="closeMenu">
     <div class="ws-list">
       <div v-for="ws in tree" :key="ws.id" class="ws-group">
         <div
@@ -165,13 +175,18 @@ const toggleIcon = computed<IconifyIcon>(() =>
             />
           </template>
           <template v-else>
-            <div v-if="collapsed" class="icon">
-              {{ initialOf(ws.name, ws.icon) }}
-            </div>
-            <span v-else class="ws-name">{{ ws.name }}</span>
+            <Icon class="ws-icon" :icon="folderIcon" />
+            <span class="ws-name">{{ ws.name }}</span>
+            <button
+              class="add-terminal"
+              :title="`${ws.name}에 터미널 추가`"
+              @click.stop="addTerminal(ws.id)"
+            >
+              <Icon :icon="plusIcon" />
+            </button>
           </template>
         </div>
-        <div v-if="!collapsed && ws.sessions.length" class="sessions">
+        <div v-if="ws.sessions.length" class="sessions">
           <div
             v-for="s in ws.sessions"
             :key="s.id"
@@ -179,7 +194,15 @@ const toggleIcon = computed<IconifyIcon>(() =>
             :title="s.displayName"
             @click.stop="focusSession(ws.id, s.id)"
           >
-            <Icon class="s-ico" :icon="terminalIcon" />
+            <span
+              v-if="s.agent !== 'terminal' && s.agentStatus"
+              :class="['agent-status', `is-${s.agentStatus}`]"
+              :title="s.agentStatus"
+            />
+            <Icon
+              :class="['s-ico', `agent-${s.agent}`]"
+              :icon="sessionAgentIcon(s.agent)"
+            />
             <span class="s-name">{{ s.displayName }}</span>
             <Icon
               v-if="s.hasBell"
@@ -199,15 +222,6 @@ const toggleIcon = computed<IconifyIcon>(() =>
     <button class="add" title="New workspace" @click.stop="addWorkspace">
       <Icon class="ico" :icon="plusIcon" />
     </button>
-    <button
-      class="mode-toggle"
-      :class="collapsed ? 'mt-collapsed' : 'mt-expanded'"
-      :title="(collapsed ? 'Expand Navigator' : 'Collapse Navigator')"
-      @click.stop="toggleLeftCollapsed"
-    >
-      <Icon class="chev" :icon="toggleIcon" />
-    </button>
-
     <div
       v-if="menuFor"
       class="menu"
@@ -235,8 +249,8 @@ const toggleIcon = computed<IconifyIcon>(() =>
   border-right: 1px solid #111;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  padding: 6px 0;
+  align-items: stretch;
+  padding: 6px 8px;
   gap: 6px;
   user-select: none;
   overflow: hidden;
@@ -244,7 +258,7 @@ const toggleIcon = computed<IconifyIcon>(() =>
 .ws-list {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   gap: 6px;
   width: 100%;
   flex: 1;
@@ -257,12 +271,14 @@ const toggleIcon = computed<IconifyIcon>(() =>
 }
 .ws {
   position: relative;
-  width: 44px;
-  height: 44px;
+  width: 100%;
+  height: 36px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  border-radius: 8px;
+  justify-content: flex-start;
+  padding: 0 10px;
+  gap: 10px;
+  border-radius: 6px;
   background: #2a2a2a;
   color: #d4d4d4;
   cursor: pointer;
@@ -285,21 +301,17 @@ const toggleIcon = computed<IconifyIcon>(() =>
   background: transparent;
 }
 .ws.active .bar { background: #4ec9b0; }
-.icon {
-  width: 100%;
-  text-align: center;
-}
 input {
   background: #1e1e1e;
   color: #e6e6e6;
   border: 1px solid #4ec9b0;
-  width: 36px;
-  text-align: center;
+  width: 100%;
+  text-align: left;
   font: inherit;
   padding: 0;
 }
 .add {
-  width: 44px;
+  width: 100%;
   height: 36px;
   background: transparent;
   border: 1px dashed #444;
@@ -313,62 +325,42 @@ input {
   color: #e6e6e6;
   border-color: #4ec9b0;
 }
-.mode-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  font-size: 12px;
-  line-height: 1;
-  color: #1a1a1a;
-  background: #4ec9b0;
-  font-weight: 700;
-  border-radius: 6px;
-  flex-shrink: 0;
-  transition: background 120ms ease;
-}
-.mode-toggle:hover { background: #5fd9c0; }
-.mode-toggle .chev {
-  display: inline-block;
-  font-size: 18px;
-}
-.mode-toggle.mt-collapsed {
-  width: 44px;
-  height: 28px;
-}
-.mode-toggle.mt-expanded {
-  width: 100%;
-  height: 32px;
-}
-.ws-name { display: none; }
-
-.sidebar.mode-expanded {
-  align-items: stretch;
-  padding: 6px 8px;
-}
-.sidebar.mode-expanded .ws {
-  width: 100%;
-  height: 36px;
-  border-radius: 6px;
-  justify-content: flex-start;
-  padding: 0 10px;
-  gap: 10px;
-}
-.sidebar.mode-expanded .ws-name {
+.ws-name {
   display: inline;
   color: inherit;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-size: 12px;
   font-weight: 500;
+  flex: 1;
+  min-width: 0;
 }
-.sidebar.mode-expanded .add { width: 100%; }
-.sidebar.mode-expanded .ws-list { align-items: stretch; }
-.sidebar.mode-expanded input {
-  width: 100%;
-  text-align: left;
+.ws-icon {
+  flex-shrink: 0;
+  font-size: 15px;
+  opacity: 0.85;
+}
+.add-terminal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #9a9a9a;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.add-terminal:hover {
+  background: #3a3a3a;
+  color: #e6e6e6;
+}
+.add-terminal :deep(svg) {
+  font-size: 16px;
 }
 .sessions {
   display: flex;
@@ -399,6 +391,29 @@ input {
   flex-shrink: 0;
   font-size: 14px;
   opacity: 0.85;
+}
+.session .s-ico.agent-codex {
+  font-size: 17px;
+}
+.session .s-ico.agent-claude {
+  color: #d97757;
+  opacity: 1;
+}
+.agent-status {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+.agent-status.is-working {
+  background: #e2b341;
+  animation: agent-working 900ms ease-in-out infinite alternate;
+}
+.agent-status.is-completed { background: #4ec9b0; }
+.agent-status.is-error { background: #e06c75; }
+@keyframes agent-working {
+  from { opacity: 0.35; transform: scale(0.8); }
+  to { opacity: 1; transform: scale(1); }
 }
 .session .s-name {
   flex: 1;

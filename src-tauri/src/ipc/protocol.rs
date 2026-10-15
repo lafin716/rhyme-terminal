@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::pty::SessionInfo;
+use crate::pty::{agent_status::AgentTaskStatus, AgentKind, SessionInfo};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Request {
@@ -68,6 +68,8 @@ pub enum Event {
     SessionRemoved { id: Uuid },
     SessionRenamed { id: Uuid, name: String },
     SessionActivity { id: Uuid, bell: bool },
+    SessionAgentChanged { id: Uuid, agent: AgentKind },
+    SessionAgentStatusChanged { id: Uuid, status: AgentTaskStatus },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -79,6 +81,7 @@ pub struct AttachResult {
 #[cfg(test)]
 mod tests {
     use super::{Event, Method, Request};
+    use crate::pty::{AgentKind, SessionInfo};
     use uuid::Uuid;
 
     #[test]
@@ -125,5 +128,34 @@ mod tests {
         assert_eq!(value["event"], serde_json::json!("session_activity"));
         assert_eq!(value["id"], serde_json::json!(id.to_string()));
         assert_eq!(value["bell"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn session_agent_changed_serializes_with_agent_kind() {
+        let id = Uuid::nil();
+        let value = serde_json::to_value(Event::SessionAgentChanged {
+            id,
+            agent: crate::pty::AgentKind::Codex,
+        })
+        .expect("event should serialize");
+
+        assert_eq!(value["event"], serde_json::json!("session_agent_changed"));
+        assert_eq!(value["id"], serde_json::json!(id.to_string()));
+        assert_eq!(value["agent"], serde_json::json!("codex"));
+    }
+
+    #[test]
+    fn legacy_session_info_defaults_a_missing_agent_to_terminal() {
+        let info: SessionInfo = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(),
+            "name": "legacy",
+            "shell": "powershell.exe",
+            "cwd": null,
+            "cols": 120,
+            "rows": 30
+        }))
+        .expect("legacy session info should deserialize");
+
+        assert_eq!(info.agent, AgentKind::Terminal);
     }
 }

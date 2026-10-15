@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   createDefaultPanelsState,
   togglePanelOpen,
-  toggleLeftCollapsed,
   clampPanelWidth,
   setPanelWidth,
   serializePanels,
@@ -13,6 +12,13 @@ import {
 } from "./shell-panels";
 
 describe("panel open/closed", () => {
+  it("defaults the left panel to fully open", () => {
+    expect(createDefaultPanelsState().left).toEqual({
+      open: true,
+      width: PANEL_LIMITS.left.default,
+    });
+  });
+
   it("toggles a panel from open to closed and back", () => {
     const state = createDefaultPanelsState();
     state.right.open = true;
@@ -35,16 +41,6 @@ describe("panel open/closed", () => {
     expect(state.right.open).toBe(true);
   });
 
-  it("toggles the left panel between full and collapsed icon-rail", () => {
-    const state = createDefaultPanelsState();
-    state.left.collapsed = false;
-
-    toggleLeftCollapsed(state);
-    expect(state.left.collapsed).toBe(true);
-
-    toggleLeftCollapsed(state);
-    expect(state.left.collapsed).toBe(false);
-  });
 });
 
 describe("width clamping", () => {
@@ -72,7 +68,6 @@ describe("persistence round-trip", () => {
   it("serialize then deserialize reproduces the same state", () => {
     const state = createDefaultPanelsState();
     state.left.open = false;
-    state.left.collapsed = true;
     state.left.width = 240;
     state.right.open = true;
     state.right.width = 320;
@@ -113,23 +108,29 @@ describe("persistence round-trip", () => {
     expect(deserializePanels("nope")).toEqual(createDefaultPanelsState());
   });
 
-  it("never reports the right panel as collapsed", () => {
-    const restored = deserializePanels({ right: { open: true, collapsed: true } });
-    expect(restored.right.collapsed).toBe(false);
+  it("drops a persisted collapsed rail and restores the full left panel", () => {
+    const restored = deserializePanels({
+      left: { open: true, collapsed: true, width: 240 },
+    });
+    expect(restored.left).toEqual({ open: true, width: 240 });
   });
 });
 
 describe("legacy sidebarMode migration", () => {
-  it("maps expanded to an open, uncollapsed left panel", () => {
+  it("maps expanded to a fully open left panel", () => {
     const state = migrateLegacySidebarMode("expanded");
-    expect(state.left.open).toBe(true);
-    expect(state.left.collapsed).toBe(false);
+    expect(state.left).toEqual({
+      open: true,
+      width: PANEL_LIMITS.left.default,
+    });
   });
 
-  it("maps compact to a collapsed icon-rail (open but collapsed)", () => {
+  it("maps compact to a fully open left panel", () => {
     const state = migrateLegacySidebarMode("compact");
-    expect(state.left.open).toBe(true);
-    expect(state.left.collapsed).toBe(true);
+    expect(state.left).toEqual({
+      open: true,
+      width: PANEL_LIMITS.left.default,
+    });
   });
 
   it("maps minimal to a closed left panel", () => {

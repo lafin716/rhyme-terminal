@@ -1,7 +1,7 @@
 // Headless panel-state for the Shell's left Navigator and right Explorer.
 //
-// This module owns the non-visual panel state only — open/collapsed flags and
-// pixel widths — plus the pure operations over it (toggle, clamp, serialize,
+// This module owns the non-visual panel state only — open flags and pixel
+// widths — plus the pure operations over it (toggle, clamp, serialize,
 // migrate). It has no Vue or DOM dependency so it can be unit-tested directly.
 
 export type PanelSide = "left" | "right";
@@ -9,9 +9,7 @@ export type PanelSide = "left" | "right";
 export interface PanelState {
   /** Whether the panel is shown at all (false = fully hidden). */
   open: boolean;
-  /** Left-only: shown as a compact icon-rail instead of full width. */
-  collapsed: boolean;
-  /** Pixel width when open and not collapsed. */
+  /** Pixel width when open. */
   width: number;
 }
 
@@ -31,23 +29,15 @@ export const PANEL_LIMITS: Record<PanelSide, PanelLimits> = {
   right: { min: 180, max: 560, default: 300 },
 };
 
-/** Fixed width of the left Navigator's collapsed icon-rail. */
-export const RAIL_WIDTH = 56;
-
 export function createDefaultPanelsState(): ShellPanelsState {
   return {
-    left: { open: true, collapsed: true, width: PANEL_LIMITS.left.default },
-    right: { open: false, collapsed: false, width: PANEL_LIMITS.right.default },
+    left: { open: true, width: PANEL_LIMITS.left.default },
+    right: { open: false, width: PANEL_LIMITS.right.default },
   };
 }
 
 export function togglePanelOpen(state: ShellPanelsState, side: PanelSide): void {
   state[side].open = !state[side].open;
-}
-
-/** Toggle the left Navigator between full width and its collapsed icon-rail. */
-export function toggleLeftCollapsed(state: ShellPanelsState): void {
-  state.left.collapsed = !state.left.collapsed;
 }
 
 export function clampPanelWidth(side: PanelSide, width: number): number {
@@ -84,7 +74,6 @@ function readPanel(
   const src = asRecord(raw);
   return {
     open: typeof src.open === "boolean" ? src.open : fallback.open,
-    collapsed: typeof src.collapsed === "boolean" ? src.collapsed : fallback.collapsed,
     width: typeof src.width === "number" ? clampPanelWidth(side, src.width) : fallback.width,
   };
 }
@@ -92,35 +81,29 @@ function readPanel(
 /**
  * Rebuild panel state from persisted (possibly partial or foreign) data.
  * Missing fields fall back to defaults; unknown fields are dropped; widths are
- * clamped. The right panel never carries the left-only collapsed flag.
+ * clamped. Legacy collapsed flags are ignored so an open panel is always full.
  */
 export function deserializePanels(data: unknown): ShellPanelsState {
   const defaults = createDefaultPanelsState();
   const raw = asRecord(data);
-  const right = readPanel("right", raw.right, defaults.right);
-  right.collapsed = false;
   return {
     left: readPanel("left", raw.left, defaults.left),
-    right,
+    right: readPanel("right", raw.right, defaults.right),
   };
 }
 
 /**
  * Translate the old 3-mode sidebar preference (compact | expanded | minimal)
- * into panel state so upgrading users keep their layout instead of a reset:
- *   expanded → open (full), compact → collapsed icon-rail, minimal → closed.
+ * into the current two-state panel model:
+ *   expanded/compact → open (full), minimal → closed.
  * The right panel is new, so it starts at its default (hidden).
  */
 export function migrateLegacySidebarMode(mode: unknown): ShellPanelsState {
   const state = createDefaultPanelsState();
   switch (mode) {
     case "expanded":
-      state.left.open = true;
-      state.left.collapsed = false;
-      break;
     case "compact":
       state.left.open = true;
-      state.left.collapsed = true;
       break;
     case "minimal":
       state.left.open = false;

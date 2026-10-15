@@ -2,7 +2,6 @@ import { usePrefs, persistPrefs } from "./usePrefs";
 import {
   setPanelWidth,
   togglePanelOpen,
-  toggleLeftCollapsed as toggleLeftCollapsedState,
   type PanelSide,
 } from "../lib/shell-panels";
 
@@ -28,11 +27,6 @@ export function useShellPanels() {
     persistPrefs();
   }
 
-  function toggleLeftCollapsed(): void {
-    toggleLeftCollapsedState(panels);
-    persistPrefs();
-  }
-
   /** Live width update during a splitter drag; does not persist. */
   function resize(side: PanelSide, width: number): void {
     setPanelWidth(panels, side, width);
@@ -43,5 +37,5 @@ export function useShellPanels() {
     persistPrefs();
   }
 
-  return { panels, toggleLeft, toggleRight, toggleLeftCollapsed, resize, commit };
+  return { panels, toggleLeft, toggleRight, resize, commit };
 }

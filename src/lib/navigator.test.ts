@@ -2,6 +2,17 @@ import { describe, it, expect } from "vitest";
 import { buildNavigatorTree } from "./navigator";
 
 describe("buildNavigatorTree", () => {
+  it("carries each session's agent into the Navigator node", () => {
+    const tree = buildNavigatorTree({
+      workspaces: [{ id: "ws-a", name: "Alpha", index: 1 }],
+      sessions: [{ id: "s1", name: "w1.assistant", agent: "codex" }],
+      activeWorkspaceId: "ws-a",
+      focusedSessionId: null,
+    });
+
+    expect(tree[0].sessions[0].agent).toBe("codex");
+  });
+
   it("nests each session under the workspace named by its daemon-name prefix", () => {
     const tree = buildNavigatorTree({
       workspaces: [
@@ -9,9 +20,9 @@ describe("buildNavigatorTree", () => {
         { id: "ws-b", name: "Beta", index: 2 },
       ],
       sessions: [
-        { id: "s1", name: "w1.session-1" },
-        { id: "s2", name: "w2.build" },
-        { id: "s3", name: "w1.logs" },
+        { id: "s1", name: "w1.session-1", agent: "terminal" },
+        { id: "s2", name: "w2.build", agent: "terminal" },
+        { id: "s3", name: "w1.logs", agent: "terminal" },
       ],
       activeWorkspaceId: "ws-a",
       focusedSessionId: null,
@@ -40,8 +51,8 @@ describe("buildNavigatorTree", () => {
     const tree = buildNavigatorTree({
       workspaces: [{ id: "ws-a", name: "Alpha", index: 1 }],
       sessions: [
-        { id: "s1", name: "w1.session-1" },
-        { id: "s2", name: "w1.build" },
+        { id: "s1", name: "w1.session-1", agent: "terminal" },
+        { id: "s2", name: "w1.build", agent: "terminal" },
       ],
       activeWorkspaceId: "ws-a",
       focusedSessionId: "s2",
@@ -60,7 +71,7 @@ describe("buildNavigatorTree", () => {
         { id: "ws-a", name: "Alpha", index: 1 },
         { id: "ws-b", name: "Beta", index: 2 },
       ],
-      sessions: [{ id: "s1", name: "w1.only" }],
+      sessions: [{ id: "s1", name: "w1.only", agent: "terminal" }],
       activeWorkspaceId: "ws-a",
       focusedSessionId: null,
     });
@@ -73,9 +84,9 @@ describe("buildNavigatorTree", () => {
     const tree = buildNavigatorTree({
       workspaces: [{ id: "ws-a", name: "Alpha", index: 1 }],
       sessions: [
-        { id: "s1", name: "w1.kept" },
-        { id: "s2", name: "orphan-no-prefix" },
-        { id: "s3", name: "w9.unmatched-index" },
+        { id: "s1", name: "w1.kept", agent: "terminal" },
+        { id: "s2", name: "orphan-no-prefix", agent: "terminal" },
+        { id: "s3", name: "w9.unmatched-index", agent: "terminal" },
       ],
       activeWorkspaceId: "ws-a",
       focusedSessionId: null,
@@ -89,7 +100,7 @@ describe("buildNavigatorTree", () => {
     expect(
       buildNavigatorTree({
         workspaces: [],
-        sessions: [{ id: "s1", name: "w1.session-1" }],
+        sessions: [{ id: "s1", name: "w1.session-1", agent: "terminal" }],
         activeWorkspaceId: null,
         focusedSessionId: null,
       }),
@@ -100,9 +111,9 @@ describe("buildNavigatorTree", () => {
     const tree = buildNavigatorTree({
       workspaces: [{ id: "ws-a", name: "Alpha", index: 1 }],
       sessions: [
-        { id: "s1", name: "w1.plain" },
-        { id: "s2", name: "w1.rang" },
-        { id: "s3", name: "w1.quiet" },
+        { id: "s1", name: "w1.plain", agent: "terminal" },
+        { id: "s2", name: "w1.rang", agent: "terminal" },
+        { id: "s3", name: "w1.quiet", agent: "terminal" },
       ],
       activeWorkspaceId: "ws-a",
       focusedSessionId: null,
@@ -124,7 +135,7 @@ describe("buildNavigatorTree", () => {
   it("defaults activity flags to false when no activity map is given", () => {
     const tree = buildNavigatorTree({
       workspaces: [{ id: "ws-a", name: "Alpha", index: 1 }],
-      sessions: [{ id: "s1", name: "w1.only" }],
+      sessions: [{ id: "s1", name: "w1.only", agent: "terminal" }],
       activeWorkspaceId: "ws-a",
       focusedSessionId: null,
     });

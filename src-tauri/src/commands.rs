@@ -403,7 +403,9 @@ fn collect_files(root: &std::path::Path, cap: usize) -> Vec<FileEntry> {
                 break;
             }
             let Ok(item) = item else { continue };
-            let Ok(file_type) = item.file_type() else { continue };
+            let Ok(file_type) = item.file_type() else {
+                continue;
+            };
             if file_type.is_symlink() {
                 continue;
             }
@@ -539,8 +541,8 @@ mod directory_tests {
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("winmux-dir-test-{}-{}", tag, uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("winmux-dir-test-{}-{}", tag, uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -624,8 +626,11 @@ mod file_walk_tests {
     use std::path::{Path, PathBuf};
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("winmux-files-test-{}-{}", tag, uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "winmux-files-test-{}-{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -748,8 +753,11 @@ mod write_tests {
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("winmux-write-test-{}-{}", tag, uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "winmux-write-test-{}-{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -800,8 +808,11 @@ mod preview_tests {
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("winmux-preview-test-{}-{}", tag, uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!(
+            "winmux-preview-test-{}-{}",
+            tag,
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

@@ -5,6 +5,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::broadcast;
@@ -14,6 +15,7 @@ use uuid::Uuid;
 
 use super::protocol::{AttachResult, Event, Method, Request, ServerMsg};
 use super::{pipe_name, read_frame, write_frame};
+use crate::pty::agent::process_snapshot;
 use crate::pty::manager::SessionManager;
 use crate::pty::{scrollback_snapshot, spawn_session};
 
@@ -44,6 +46,35 @@ pub async fn run_server(state: Arc<DaemonState>) -> Result<()> {
             anyhow!("failed to bind named pipe {name}: {e} (another daemon already running?)")
         })?;
     info!("daemon listening on {name}");
+
+    let monitor_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            if !monitor_state.manager.has_sessions() {
+                continue;
+            }
+            let processes = match tokio::task::spawn_blocking(process_snapshot).await {
+                Ok(processes) => processes,
+                Err(error) => {
+                    warn!("agent monitor snapshot task failed: {error}");
+                    continue;
+                }
+            };
+            let changes = monitor_state.manager.refresh_agents(&processes);
+            for (id, agent) in changes {
+                let _ = monitor_state
+                    .events
+                    .send(Event::SessionAgentChanged { id, agent });
+            }
+            for (id, status) in monitor_state.manager.complete_idle_tasks(Duration::from_secs(2)) {
+                let _ = monitor_state
+                    .events
+                    .send(Event::SessionAgentStatusChanged { id, status });
+            }
+        }
+    });
 
     let mut server = first;
     loop {
@@ -206,12 +237,17 @@ async fn dispatch(
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data)
                 .map_err(|e| anyhow!("invalid base64: {e}"))?;
-            let mut map = state.manager.sessions.lock();
-            let session = map
-                .get_mut(&id)
-                .ok_or_else(|| anyhow!("session not found"))?;
-            session.writer.write_all(&bytes)?;
-            session.writer.flush()?;
+            {
+                let mut map = state.manager.sessions.lock();
+                let session = map
+                    .get_mut(&id)
+                    .ok_or_else(|| anyhow!("session not found"))?;
+                session.writer.write_all(&bytes)?;
+                session.writer.flush()?;
+            }
+            if let Some(status) = state.manager.note_input(id) {
+                let _ = state.events.send(Event::SessionAgentStatusChanged { id, status });
+            }
             Ok(json!(null))
         }
         Method::ResizeSession { id, cols, rows } => {

@@ -1,11 +1,23 @@
 import { reactive, computed, watch } from "vue";
-import { api, onSessionActivity, type SessionInfo } from "../lib/tauri";
+import {
+  api,
+  onSessionActivity,
+  onSessionAgentStatusChanged,
+  type SessionAgentPayload,
+  type AgentTaskStatus,
+  type SessionInfo,
+} from "../lib/tauri";
 import {
   applyActivity,
   clearActivity,
   type ActivityState,
   type SessionActivityFlags,
 } from "../lib/session-activity";
+import {
+  applySessionAgent,
+  applySessionAgentUpdates,
+  type VersionedSessionAgentPayload,
+} from "../lib/session-agent";
 import type { Workspace } from "../lib/layout-types";
 import { useWorkspaces, workspaceDefaultCwd } from "./useWorkspaces";
 import { useFocus } from "./useFocus";
@@ -41,7 +53,28 @@ const currentCwds = reactive<Record<string, string>>({});
 // `session-activity.ts` returns new objects, so `commitActivity` reconciles the
 // reactive map in place to keep readers (Navigator badges, Ticket 2) reactive.
 const activity = reactive<ActivityState>({});
+const agentTaskStatus = reactive<Record<string, AgentTaskStatus>>({});
 let activityListenerStarted = false;
+let agentTaskStatusListenerStarted = false;
+let sessionAgentRevision = 0;
+const latestSessionAgentUpdates = new Map<string, VersionedSessionAgentPayload>();
+
+function applyAgentUpdate(payload: SessionAgentPayload): void {
+  const update = { revision: ++sessionAgentRevision, payload };
+  latestSessionAgentUpdates.set(payload.id, update);
+  state.sessions = applySessionAgent(state.sessions, payload);
+}
+
+function reconcileAgentUpdates(
+  sessions: SessionInfo[],
+  snapshotRevision: number,
+): SessionInfo[] {
+  return applySessionAgentUpdates(
+    sessions,
+    latestSessionAgentUpdates.values(),
+    snapshotRevision,
+  );
+}
 
 function commitActivity(next: ActivityState) {
   for (const id of Object.keys(activity)) {
@@ -147,6 +180,13 @@ export function useSessions() {
     });
   }
 
+  if (!agentTaskStatusListenerStarted) {
+    agentTaskStatusListenerStarted = true;
+    void onSessionAgentStatusChanged((payload) => {
+      agentTaskStatus[payload.id] = payload.status;
+    });
+  }
+
   const workspaceSessions = computed<SessionInfo[]>(() => {
     const ws = activeWorkspace.value;
     if (!ws) return [];
@@ -160,7 +200,8 @@ export function useSessions() {
   });
 
   async function refresh() {
-    state.sessions = await api.listSessions();
+    const snapshotRevision = sessionAgentRevision;
+    state.sessions = reconcileAgentUpdates(await api.listSessions(), snapshotRevision);
     for (const session of state.sessions) {
       if (session.cwd && !currentCwds[session.id]) currentCwds[session.id] = session.cwd;
     }
@@ -197,12 +238,13 @@ export function useSessions() {
       return null;
     }
     try {
-      const info = await api.createSession({
+      const snapshotRevision = sessionAgentRevision;
+      const [info] = reconcileAgentUpdates([await api.createSession({
         name,
         shell,
         shellArgs: [...shellArgs],
         cwd,
-      });
+      })], snapshotRevision);
       state.sessions.push(info);
       if (info.cwd) currentCwds[info.id] = info.cwd;
       if (ws) {
@@ -250,8 +292,10 @@ export function useSessions() {
     await api.killSession(id);
     const idx = state.sessions.findIndex((s) => s.id === id);
     if (idx >= 0) state.sessions.splice(idx, 1);
+    latestSessionAgentUpdates.delete(id);
     delete currentCwds[id];
     delete activity[id];
+    delete agentTaskStatus[id];
     for (const ws of wsState.workspaces) {
       if (findLeafBySession(ws.layout, id)) {
         const { root } = removeTab(ws.layout, id);
@@ -281,7 +325,12 @@ export function useSessions() {
     kill,
     rename,
     getById,
+    applyAgentUpdate,
     activity,
+    agentTaskStatus,
+    sessionAgentStatus(id: string): AgentTaskStatus | undefined {
+      return agentTaskStatus[id];
+    },
     sessionActivity(id: string): SessionActivityFlags | undefined {
       return activity[id];
     },

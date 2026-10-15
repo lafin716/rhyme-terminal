@@ -44,7 +44,13 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let mut rx = client.events();
             rt.spawn(async move {
-                while let Ok(ev) = rx.recv().await {
+                loop {
+                    let ev = match rx.recv().await {
+                        Ok(ev) => ev,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        // Drop the overrun batch but keep forwarding later state changes.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    };
                     match ev {
                         Event::PtyOutput { id, data } => {
                             let _ = app_handle
@@ -73,6 +79,18 @@ pub fn run() {
                             let _ = app_handle.emit(
                                 "session-activity",
                                 serde_json::json!({ "id": id, "bell": bell }),
+                            );
+                        }
+                        Event::SessionAgentChanged { id, agent } => {
+                            let _ = app_handle.emit(
+                                "session-agent-changed",
+                                serde_json::json!({ "id": id, "agent": agent }),
+                            );
+                        }
+                        Event::SessionAgentStatusChanged { id, status } => {
+                            let _ = app_handle.emit(
+                                "session-agent-status-changed",
+                                serde_json::json!({ "id": id, "status": status }),
                             );
                         }
                     }

@@ -81,7 +81,10 @@ mod tests {
     fn plain_bell_is_a_bell() {
         assert_eq!(
             detect_activity(b"done\x07"),
-            ChunkSignal { output: true, bell: true }
+            ChunkSignal {
+                output: true,
+                bell: true
+            }
         );
     }
 
@@ -90,7 +93,10 @@ mod tests {
         // The PowerShell prompt integration emits `ESC ] 9 ; 9 ; <path> BEL`.
         assert_eq!(
             detect_activity(b"\x1b]9;9;C:\\x\x07"),
-            ChunkSignal { output: true, bell: false }
+            ChunkSignal {
+                output: true,
+                bell: false
+            }
         );
     }
 
@@ -98,7 +104,10 @@ mod tests {
     fn ordinary_output_is_output_without_bell() {
         assert_eq!(
             detect_activity(b"hello world"),
-            ChunkSignal { output: true, bell: false }
+            ChunkSignal {
+                output: true,
+                bell: false
+            }
         );
     }
 
@@ -106,7 +115,10 @@ mod tests {
     fn empty_chunk_is_no_output() {
         assert_eq!(
             detect_activity(b""),
-            ChunkSignal { output: false, bell: false }
+            ChunkSignal {
+                output: false,
+                bell: false
+            }
         );
     }
 
@@ -115,7 +127,10 @@ mod tests {
         // OSC closed by ST (ESC \) rather than BEL — still not an alert.
         assert_eq!(
             detect_activity(b"\x1b]0;title\x1b\\"),
-            ChunkSignal { output: true, bell: false }
+            ChunkSignal {
+                output: true,
+                bell: false
+            }
         );
     }
 
@@ -124,7 +139,10 @@ mod tests {
         // First BEL closes the OSC; the second, outside any OSC, is a real bell.
         assert_eq!(
             detect_activity(b"\x1b]9;9;p\x07\x07"),
-            ChunkSignal { output: true, bell: true }
+            ChunkSignal {
+                output: true,
+                bell: true
+            }
         );
     }
 }
