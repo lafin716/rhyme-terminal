@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Terminal,
@@ -24,13 +25,20 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { openPalette } from "../composables/usePalette";
 import { useResources } from "../composables/useResources";
 import { useSessions } from "../composables/useSessions";
-import { FILE_DRAG_MIME, formatPathForInsertion } from "../lib/path-insert";
+import { FILE_DRAG_MIME, formatPathsForShell, parseDragPayload } from "../lib/path-insert";
+import { presetForProgram } from "../lib/terminal-config";
+import { TERMINAL_BASE_FONT_SIZE, useTerminalZoom } from "../composables/useTerminalZoom";
+import { useKeybindings } from "../composables/useKeybindings";
+import TerminalLinkMenu from "./TerminalLinkMenu.vue";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { matchesEvent } from "../lib/keybindings";
 
 const props = defineProps<{
   sessionId: string;
   active: boolean;
 }>();
 
+const linkMenu = ref<{ target: string; x: number; y: number; web: boolean } | null>(null);
 const host = ref<HTMLDivElement | null>(null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -42,6 +50,12 @@ let suppressUntil = 0;
 let disposed = false;
 const resources = useResources();
 const sessions = useSessions();
+const { bindingFor } = useKeybindings();
+const { onZoomKeyDown, onZoomWheel, toastPercent } = useTerminalZoom((fontSize) => {
+  if (!term) return;
+  term.options.fontSize = fontSize;
+  safeFit();
+});
 
 const FILE_LINK_RE = /(?:"[^"\r\n]+"|'[^'\r\n]+'|(?:[a-zA-Z]:[\\/]|\.{1,2}[\\/]|[\\/])[^ \t<>|?"'\r\n]+|(?:[\w.@()-]+[\\/])+[\w.@()-]+|[\w.@()-]+\.[a-zA-Z0-9]{1,10})(?::\d+){0,2}/g;
 
@@ -61,7 +75,7 @@ async function init() {
     allowProposedApi: true,
     allowTransparency: false,
     fontFamily: '"Cascadia Mono", "Consolas", "Courier New", monospace',
-    fontSize: 13,
+    fontSize: TERMINAL_BASE_FONT_SIZE,
     fontWeight: "normal",
     fontWeightBold: "bold",
     lineHeight: 1.0,
@@ -79,7 +93,7 @@ async function init() {
     windowsPty: { backend: "conpty", buildNumber: detectWindowsBuild() },
     linkHandler: {
       activate: (event, text) => {
-        if (event.ctrlKey) openResource(text);
+        activateResource(event, text);
       },
     },
     theme: {
@@ -90,8 +104,7 @@ async function init() {
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new WebLinksAddon((event, uri) => {
-    if (!event.ctrlKey) return;
-    resources.openBrowser(uri).catch(showOpenError);
+    activateResource(event, uri);
   }));
   term.registerLinkProvider(createFileLinkProvider(term));
   term.parser.registerOscHandler(7, (data) => {
@@ -231,7 +244,7 @@ function createFileLinkProvider(terminal: Terminal): ILinkProvider {
           },
           decorations,
           activate(event, target) {
-            if (event.ctrlKey) openResource(target);
+            activateResource(event, target);
           },
         };
         links.push(link);
@@ -256,6 +269,33 @@ function cwdFromOsc7(data: string): string | null {
   }
 }
 
+function activateResource(event: MouseEvent, raw: string) {
+  event.preventDefault();
+  const text = raw.trim();
+  const matches = (id: string) => {
+    const b = bindingFor(id);
+    return b?.key === "Click" && !!b.ctrl === event.ctrlKey && !!b.shift === event.shiftKey
+      && !!b.alt === event.altKey && !!b.meta === event.metaKey;
+  };
+  if (matches("terminal.openLinkExternal")) { void openExternal(text).catch(showOpenError); return; }
+  if (matches("terminal.openLink")) { openResource(text); return; }
+  linkMenu.value = { target: text, x: event.clientX, y: event.clientY, web: /^https?:\/\//i.test(text) };
+}
+
+async function openExternal(text: string) {
+  if (/^https?:\/\//i.test(text)) await openUrl(text);
+  else await revealItemInDir(await api.resolveResourcePath(text, sessions.currentCwd(props.sessionId)));
+}
+
+function closeLinkMenu() { linkMenu.value = null; if (props.active) term?.focus(); }
+function openMenuResource(external: boolean) {
+  const text = linkMenu.value?.target;
+  closeLinkMenu();
+  if (!text) return;
+  if (external) void openExternal(text).catch(showOpenError);
+  else openResource(text);
+}
+
 function openResource(raw: string) {
   const text = raw.trim();
   if (/^https?:\/\//i.test(text)) {
@@ -267,36 +307,39 @@ function openResource(raw: string) {
 
 function showOpenError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  alert(`Unable to open resource:\n${message}`);
+  alert(t("Unable to open resource: {message}", { message }));
 }
 
 function handleKeyEvent(ev: KeyboardEvent): boolean {
-  if (ev.type !== "keydown" || !term) return true;
-  const key = ev.key.toLowerCase();
+  if (ev.type !== "keydown" || !term || ev.isComposing) return true;
+  const matches = (id: string) => matchesEvent(bindingFor(id), ev);
 
-  // Ctrl+Shift+C / Ctrl+Shift+V — always copy/paste
-  if (ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "c") {
+  // Clipboard commands use the current settings, including alternate bindings.
+  if (matches("terminal.copy")) {
+    ev.preventDefault();
     copySelection();
     return false;
   }
-  if (ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "v") {
-    // Suppress xterm's keydown; the browser's separate `paste` event will
-    // trigger xterm's built-in paste handler once. Manually calling paste here
-    // would result in double insertion.
+  if (matches("terminal.paste") || matches("terminal.pasteAlternate")) {
+    ev.preventDefault();
+    pasteFromClipboard();
     return false;
   }
 
-  // Ctrl+C — copy if selection, else fall through to ^C (SIGINT)
-  if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && key === "c") {
+  // Copy the selection, or send the terminal interrupt byte when none is selected.
+  if (matches("terminal.copyOrInterrupt")) {
+    ev.preventDefault();
     if (term.hasSelection()) {
       copySelection();
-      return false;
+    } else {
+      api.writeSession(props.sessionId, stringToBase64("\x03")).catch(console.error);
     }
-    return true;
+    return false;
   }
 
-  // Ctrl+V — paste clipboard
-  if (ev.ctrlKey && !ev.shiftKey && !ev.altKey && key === "v") {
+  // Do not let the browser's native paste bypass a remapped/cleared binding.
+  if (ev.ctrlKey && !ev.altKey && ev.key.toLowerCase() === "v") {
+    ev.preventDefault();
     return false;
   }
 
@@ -354,12 +397,19 @@ function onHostDragOver(ev: DragEvent) {
 }
 
 function onHostDrop(ev: DragEvent) {
-  const path = ev.dataTransfer?.getData(FILE_DRAG_MIME);
-  if (!path) return; // directory / non-file / unrelated drag — ignore
+  const payload = ev.dataTransfer?.getData(FILE_DRAG_MIME);
+  if (!payload) return; // unrelated drag — ignore
+  const paths = parseDragPayload(payload);
+  if (!paths.length) return;
   ev.preventDefault();
-  // Write the (quoted-if-spaced) path to the PTY the same way typed/pasted text
-  // is written. No newline: the path is inserted, not executed.
-  api.writeSession(props.sessionId, stringToBase64(formatPathForInsertion(path)))
+  // Quote for the shell that will parse this text, not for a generic one: a
+  // path means different things to PowerShell, cmd and a shell inside WSL.
+  const shell = sessions.state.sessions.find((s) => s.id === props.sessionId)?.shell ?? "";
+  const text = formatPathsForShell(paths, presetForProgram(shell), shell);
+  if (!text) return;
+  // Written to the PTY the same way typed/pasted text is. No newline, ever:
+  // the path is inserted at the cursor, and running it stays the user's call.
+  api.writeSession(props.sessionId, stringToBase64(text))
     .catch((e) => console.error("write failed", e));
   term?.focus();
 }
@@ -381,6 +431,7 @@ function nextRaf(): Promise<void> {
 watch(
   () => props.active,
   async (isActive) => {
+    if (!isActive) linkMenu.value = null;
     if (isActive) {
       await nextRaf();
       safeFit();
@@ -430,12 +481,22 @@ defineExpose({
 </script>
 
 <template>
+  <TerminalLinkMenu v-if="linkMenu" :key="`${linkMenu.target}:${linkMenu.x}:${linkMenu.y}`" v-bind="linkMenu" @close="closeLinkMenu" @open="openMenuResource" />
   <div
     ref="host"
     class="term-host"
+    @keydown.capture="onZoomKeyDown"
+    @wheel.capture="onZoomWheel"
     @dragover="onHostDragOver"
     @drop="onHostDrop"
   />
+  <Teleport to="body">
+    <Transition name="terminal-zoom">
+      <div v-if="toastPercent !== null" class="terminal-zoom-toast" role="status" aria-live="polite" aria-atomic="true">
+        {{ toastPercent }}%
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -446,5 +507,43 @@ defineExpose({
   padding: 4px;
   box-sizing: border-box;
   overflow: hidden;
+}
+
+.terminal-zoom-toast {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10000;
+  pointer-events: none;
+  user-select: none;
+  padding: 16px 28px;
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 14px;
+  background: rgb(30 30 30 / 78%);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 8px 32px rgb(0 0 0 / 24%);
+  color: #f5f5f5;
+  font-size: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.terminal-zoom-enter-active,
+.terminal-zoom-leave-active {
+  transition: opacity 150ms ease;
+}
+
+.terminal-zoom-enter-from,
+.terminal-zoom-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-zoom-enter-active,
+  .terminal-zoom-leave-active {
+    transition: none;
+  }
 }
 </style>

@@ -1,10 +1,10 @@
 [package]
-name = "winmux"
-version = "0.1.0"
-description = "A Tauri App"
+name = "rhyme-terminal"
+version = "0.0.1"
+description = "Rhyme Terminal - Windows terminal multiplexer"
 authors = ["you"]
 edition = "2021"
-default-run = "winmux"
+default-run = "rhyme-terminal"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -16,7 +16,7 @@ name = "winmux_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "winmux"
+name = "rhyme-terminal"
 path = "src/main.rs"
 
 [[bin]]
@@ -31,19 +31,42 @@ path = "src/bin/winmuxctl.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tauri = { version = "2", features = [] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 portable-pty = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
 parking_lot = "0.12"
 base64 = "0.22"
 anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 sysinfo = "0.33"
+axum = { version = "0.8", features = ["ws"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+if-addrs = "0.14"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+
+[target.'cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))'.dependencies]
+libc = "0.2"
+
+# Explorer context menus and the rhyme:// scheme are HKCU registry entries, so
+# they install without elevation and uninstall with the user's profile.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"

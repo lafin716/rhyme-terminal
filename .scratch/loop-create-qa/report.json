@@ -1,0 +1,16 @@
+{
+  "errors": [],
+  "checks": [
+    "open-without-execution",
+    "prompt-required",
+    "explicit-session-choice",
+    "search",
+    "error-retains-form",
+    "exact-selected-session",
+    "draft-preserved",
+    "narrow-viewport",
+    "exact-prompt",
+    "empty-list",
+    "cancel-without-execution"
+  ]
+}

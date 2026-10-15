@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Webview } from "@tauri-apps/api/webview";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
@@ -7,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../lib/tauri";
 import type { BrowserTab } from "../composables/useResources";
 import { useResources } from "../composables/useResources";
+import { useFlowPage } from "../composables/useFlowPage";
 import { useSettings } from "../composables/useSettings";
 import { confirmState } from "../composables/useConfirm";
 import { useDragState } from "../composables/useDragState";
@@ -17,6 +19,7 @@ const viewport = ref<HTMLDivElement | null>(null);
 const address = ref(props.tab.url);
 const error = ref("");
 const { settingsOpen } = useSettings();
+const { flowOpen } = useFlowPage();
 const drag = useDragState();
 let child: Webview | null = null;
 let observer: ResizeObserver | null = null;
@@ -49,13 +52,13 @@ async function createChild() {
     y: rect.top,
     width: Math.max(1, rect.width),
     height: Math.max(1, rect.height),
-    focus: props.active,
+    focus: props.active && !flowOpen.value,
     dragDropEnabled: false,
   });
   child.once("tauri://error", (event) => {
     error.value = String(event.payload);
   });
-  if (props.active) {
+  if (props.active && !flowOpen.value && !settingsOpen.value && !confirmState.open && !drag.state.active) {
     await syncBounds();
     await child.show().catch(() => {});
   } else {
@@ -66,7 +69,7 @@ async function createChild() {
 async function navigate() {
   try {
     const url = new URL(address.value.trim());
-    if (!["http:", "https:"].includes(url.protocol)) throw new Error("Only HTTP(S) URLs are allowed.");
+    if (!["http:", "https:"].includes(url.protocol)) throw new Error(t("Only HTTP(S) URLs are allowed."));
     address.value = url.toString();
     useResources().updateBrowserUrl(props.tab.id, address.value);
     await api.browserNavigate(props.tab.webviewLabel, address.value);
@@ -76,10 +79,10 @@ async function navigate() {
 }
 
 watch(
-  [() => props.active, settingsOpen, () => confirmState.open, () => drag.state.active],
-  async ([active, settings, confirming, dragging]) => {
+  [() => props.active, settingsOpen, flowOpen, () => confirmState.open, () => drag.state.active],
+  async ([active, settings, flow, confirming, dragging]) => {
     if (!child) return;
-    if (active && !settings && !confirming && !dragging) {
+    if (active && !settings && !flow && !confirming && !dragging) {
       await nextTick();
       await syncBounds();
       await child.show().catch(() => {});
@@ -113,11 +116,11 @@ onBeforeUnmount(() => {
 <template>
   <div class="browser-view" :class="{ hidden: !active }">
     <div class="toolbar">
-      <button title="Back" @click="api.browserBack(tab.webviewLabel)">‹</button>
-      <button title="Forward" @click="api.browserForward(tab.webviewLabel)">›</button>
-      <button title="Reload" @click="api.browserReload(tab.webviewLabel)">↻</button>
+      <button :title="t('Back')" @click="api.browserBack(tab.webviewLabel)">‹</button>
+      <button :title="t('Forward')" @click="api.browserForward(tab.webviewLabel)">›</button>
+      <button :title="t('Reload')" @click="api.browserReload(tab.webviewLabel)">↻</button>
       <input v-model="address" @keydown.enter="navigate" />
-      <button title="Open in default browser" @click="openUrl(address)">↗</button>
+      <button :title="t('Open in default browser')" @click="openUrl(address)">↗</button>
     </div>
     <div ref="viewport" class="viewport">
       <span v-if="error" class="error">{{ error }}</span>

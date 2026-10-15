@@ -1,0 +1,1788 @@
+﻿diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index ca4937c..0b45340 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -36,6 +36,7 @@ tauri-plugin-opener = "2"
+ tauri-plugin-dialog = "2"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
++reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+ portable-pty = "0.8"
+ uuid = { version = "1", features = ["v4", "serde"] }
+ parking_lot = "0.12"
+@@ -47,3 +48,13 @@ tracing = "0.1"
+ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ tracing-appender = "0.2"
+ sysinfo = "0.33"
++axum = { version = "0.8", features = ["ws"] }
++hyper = { version = "1", features = ["server", "http1"] }
++hyper-util = { version = "0.1", features = ["tokio"] }
++tower = { version = "0.5", features = ["util"] }
++if-addrs = "0.14"
++qrcode = { version = "0.14", default-features = false, features = ["svg"] }
++
++[dev-dependencies]
++tokio-tungstenite = "0.29"
++futures-util = "0.3"
+diff --git a/src-tauri/build.rs b/src-tauri/build.rs
+index d860e1e..0a926b7 100644
+--- a/src-tauri/build.rs
++++ b/src-tauri/build.rs
+@@ -1,3 +1,48 @@
++use std::{
++    env, fs,
++    path::{Path, PathBuf},
++};
++fn collect(root: &Path, dir: &Path, entries: &mut Vec<(String, PathBuf)>) {
++    if !dir.exists() {
++        return;
++    }
++    for entry in fs::read_dir(dir).expect("read mobile asset directory") {
++        let entry = entry.expect("read mobile asset");
++        let kind = entry.file_type().expect("mobile asset type");
++        if kind.is_symlink() {
++            continue;
++        }
++        let path = entry.path();
++        if kind.is_dir() {
++            collect(root, &path, entries);
++        } else if kind.is_file() {
++            let relative = path
++                .strip_prefix(root)
++                .unwrap()
++                .to_string_lossy()
++                .replace('\\', "/");
++            entries.push((relative, path));
++        }
++    }
++}
+ fn main() {
++    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../dist-mobile");
++    println!("cargo:rerun-if-changed={}", root.display());
++    let mut entries = Vec::new();
++    collect(&root, &root, &mut entries);
++    entries.sort_by(|a, b| a.0.cmp(&b.0));
++    let mut generated = String::from("static MOBILE_ASSETS: &[(&str, &[u8])] = &[\n");
++    if !root.join("mobile.html").is_file() {
++        println!("cargo:warning=Mobile assets unavailable; run pnpm build before building a usable mobile app");
++    }
++    for (relative, path) in entries {
++        generated.push_str(&format!("({relative:?}, include_bytes!({:?})),\n", path));
++    }
++    generated.push_str("];\n");
++    fs::write(
++        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("mobile_assets.rs"),
++        generated,
++    )
++    .expect("write mobile asset index");
+     tauri_build::build()
+ }
+diff --git a/src-tauri/src/ipc/client.rs b/src-tauri/src/ipc/client.rs
+index 78c54ec..a39ba85 100644
+--- a/src-tauri/src/ipc/client.rs
++++ b/src-tauri/src/ipc/client.rs
+@@ -12,13 +12,34 @@ use tokio::time::sleep;
+ use super::protocol::{Event, Method, Request, ServerMsg};
+ use super::{pipe_name, read_frame, write_frame};
+ 
+-type Pending = Arc<AsyncMutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value>>>>>;
++struct Reply {
++    value: serde_json::Value,
++    events: broadcast::Receiver<Event>,
++}
++type Pending = Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<Result<Reply>>>>>;
++struct PendingGuard {
++    pending: Pending,
++    id: u64,
++}
++impl Drop for PendingGuard {
++    fn drop(&mut self) {
++        self.pending.lock().remove(&self.id);
++    }
++}
++struct ReaderTask(tokio::task::AbortHandle);
++impl Drop for ReaderTask {
++    fn drop(&mut self) {
++        self.0.abort();
++    }
++}
+ 
+ pub struct DaemonClient {
+     writer: AsyncMutex<tokio::io::WriteHalf<NamedPipeClient>>,
+     pending: Pending,
+     events: broadcast::Sender<Event>,
+     next_id: AtomicU64,
++    _reader: ReaderTask,
++    disconnected: tokio::sync::watch::Receiver<bool>,
+ }
+ 
+ impl DaemonClient {
+@@ -51,20 +72,24 @@ impl DaemonClient {
+         Self::from_pipe(client).await
+     }
+ 
++    pub async fn connect_mobile() -> Result<Arc<Self>> {
++        let client = ClientOptions::new().open(pipe_name())?;
++        Self::from_pipe_capacity(client, 64).await
++    }
++
+     async fn from_pipe(pipe: NamedPipeClient) -> Result<Arc<Self>> {
+-        let (read_half, write_half) = tokio::io::split(pipe);
+-        let (events_tx, _) = broadcast::channel(1024);
+-        let pending: Pending = Arc::new(AsyncMutex::new(HashMap::new()));
++        Self::from_pipe_capacity(pipe, 1024).await
++    }
+ 
+-        let client = Arc::new(Self {
+-            writer: AsyncMutex::new(write_half),
+-            pending: pending.clone(),
+-            events: events_tx.clone(),
+-            next_id: AtomicU64::new(1),
+-        });
++    async fn from_pipe_capacity(pipe: NamedPipeClient, capacity: usize) -> Result<Arc<Self>> {
++        let (read_half, write_half) = tokio::io::split(pipe);
++        let (events_tx, _) = broadcast::channel(capacity);
++        let pending: Pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
++        let events_client = events_tx.clone();
+ 
++        let (disconnected_tx, disconnected) = tokio::sync::watch::channel(false);
+         let pending_bg = pending.clone();
+-        tokio::spawn(async move {
++        let reader_task = tokio::spawn(async move {
+             let mut reader = read_half;
+             loop {
+                 let bytes = match read_frame(&mut reader).await {
+@@ -77,12 +102,15 @@ impl DaemonClient {
+                 };
+                 match msg {
+                     ServerMsg::Response { id, result } => {
+-                        if let Some(tx) = pending_bg.lock().await.remove(&id) {
+-                            let _ = tx.send(Ok(result));
++                        if let Some(tx) = pending_bg.lock().remove(&id) {
++                            let _ = tx.send(Ok(Reply {
++                                value: result,
++                                events: events_tx.subscribe(),
++                            }));
+                         }
+                     }
+                     ServerMsg::Error { id, message } => {
+-                        if let Some(tx) = pending_bg.lock().await.remove(&id) {
++                        if let Some(tx) = pending_bg.lock().remove(&id) {
+                             let _ = tx.send(Err(anyhow!(message)));
+                         }
+                     }
+@@ -91,26 +119,49 @@ impl DaemonClient {
+                     }
+                 }
+             }
+-            let mut p = pending_bg.lock().await;
++            disconnected_tx.send_replace(true);
++            let mut p = pending_bg.lock();
+             for (_, tx) in p.drain() {
+                 let _ = tx.send(Err(anyhow!("daemon disconnected")));
+             }
+         });
+ 
+-        Ok(client)
++        Ok(Arc::new(Self {
++            writer: AsyncMutex::new(write_half),
++            pending,
++            events: events_client,
++            next_id: AtomicU64::new(1),
++            _reader: ReaderTask(reader_task.abort_handle()),
++            disconnected,
++        }))
+     }
+ 
+     pub async fn request_raw(&self, method: Method) -> Result<serde_json::Value> {
++        self.request_with_events(method)
++            .await
++            .map(|(value, _)| value)
++    }
++
++    /// Subscribe in the pipe reader at the response boundary, before subsequent live events.
++    pub async fn request_with_events(
++        &self,
++        method: Method,
++    ) -> Result<(serde_json::Value, broadcast::Receiver<Event>)> {
+         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+         let req = Request { id, method };
+         let (tx, rx) = oneshot::channel();
+-        self.pending.lock().await.insert(id, tx);
++        self.pending.lock().insert(id, tx);
++        let _guard = PendingGuard {
++            pending: self.pending.clone(),
++            id,
++        };
+         let bytes = serde_json::to_vec(&req)?;
+         {
+             let mut w = self.writer.lock().await;
+             write_frame(&mut *w, &bytes).await?;
+         }
+-        rx.await.map_err(|_| anyhow!("response channel closed"))?
++        let reply = rx.await.map_err(|_| anyhow!("response channel closed"))??;
++        Ok((reply.value, reply.events))
+     }
+ 
+     pub async fn request<T: DeserializeOwned>(&self, method: Method) -> Result<T> {
+@@ -118,6 +169,14 @@ impl DaemonClient {
+         Ok(serde_json::from_value(value)?)
+     }
+ 
++    pub async fn disconnected(&self) {
++        let mut rx = self.disconnected.clone();
++        let closed = *rx.borrow();
++        if !closed {
++            let _ = rx.changed().await;
++        }
++    }
++
+     pub fn events(&self) -> broadcast::Receiver<Event> {
+         self.events.subscribe()
+     }
+@@ -183,3 +242,83 @@ fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
+         standalone_daemon.display()
+     )
+ }
++
++#[cfg(test)]
++mod mobile_lifetime_tests {
++    use super::*;
++    use tokio::net::windows::named_pipe::ServerOptions;
++    async fn pair() -> (
++        Arc<DaemonClient>,
++        tokio::net::windows::named_pipe::NamedPipeServer,
++    ) {
++        let name = format!(r"\\.\pipe\winmux-test-{}", uuid::Uuid::new_v4());
++        let server = ServerOptions::new()
++            .first_pipe_instance(true)
++            .create(&name)
++            .unwrap();
++        let pipe = ClientOptions::new().open(&name).unwrap();
++        server.connect().await.unwrap();
++        (DaemonClient::from_pipe(pipe).await.unwrap(), server)
++    }
++    #[tokio::test]
++    async fn response_receiver_excludes_old_output_and_preserves_immediate_new_output() {
++        let (client, mut server) = pair().await;
++        let server_task = tokio::spawn(async move {
++            let request: Request =
++                serde_json::from_slice(&read_frame(&mut server).await.unwrap()).unwrap();
++            for message in [
++                ServerMsg::Event(Event::PtyOutput {
++                    id: uuid::Uuid::nil(),
++                    data: "b2xk".into(),
++                }),
++                ServerMsg::Response {
++                    id: request.id,
++                    result: serde_json::json!({"scrollback":"b2xk"}),
++                },
++                ServerMsg::Event(Event::PtyOutput {
++                    id: uuid::Uuid::nil(),
++                    data: "bmV3".into(),
++                }),
++            ] {
++                write_frame(&mut server, &serde_json::to_vec(&message).unwrap())
++                    .await
++                    .unwrap();
++            }
++        });
++        let (value, mut events) = client
++            .request_with_events(Method::AttachSessionAtomic {
++                id: uuid::Uuid::nil(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(value["scrollback"], "b2xk");
++        match tokio::time::timeout(Duration::from_secs(2), events.recv())
++            .await
++            .unwrap()
++            .unwrap()
++        {
++            Event::PtyOutput { data, .. } => assert_eq!(data, "bmV3"),
++            _ => panic!("wrong event"),
++        }
++        assert!(events.try_recv().is_err());
++        server_task.await.unwrap();
++    }
++    #[tokio::test]
++    async fn cancelling_request_removes_pending_and_dropping_client_closes_pipe() {
++        let (client, mut server) = pair().await;
++        let pending = client.pending.clone();
++        let request = client.request_raw(Method::Ping);
++        assert!(tokio::time::timeout(Duration::from_millis(30), request)
++            .await
++            .is_err());
++        assert!(pending.lock().is_empty());
++        let _ = read_frame(&mut server).await.unwrap();
++        drop(client);
++        assert!(
++            tokio::time::timeout(Duration::from_secs(2), read_frame(&mut server))
++                .await
++                .unwrap()
++                .is_err()
++        );
++    }
++}
+diff --git a/src-tauri/src/ipc/protocol.rs b/src-tauri/src/ipc/protocol.rs
+index 39abdf0..07ba4b1 100644
+--- a/src-tauri/src/ipc/protocol.rs
++++ b/src-tauri/src/ipc/protocol.rs
+@@ -47,6 +47,10 @@ pub enum Method {
+     AttachSession {
+         id: Uuid,
+     },
++    /// Snapshot/live barrier for a dedicated mobile connection.
++    AttachSessionAtomic {
++        id: Uuid,
++    },
+     DetachSession {
+         id: Uuid,
+     },
+@@ -105,7 +109,9 @@ mod tests {
+         .expect("request should deserialize");
+ 
+         match request.method {
+-            Method::CreateSession { shell_args, env, .. } => {
++            Method::CreateSession {
++                shell_args, env, ..
++            } => {
+                 assert!(shell_args.is_empty());
+                 assert!(env.is_none());
+             }
+@@ -134,7 +140,10 @@ mod tests {
+     #[test]
+     fn create_session_preserves_env_overrides() {
+         let mut env = std::collections::HashMap::new();
+-        env.insert("CLAUDE_CONFIG_DIR".to_string(), r"C:\accounts\claude\work".to_string());
++        env.insert(
++            "CLAUDE_CONFIG_DIR".to_string(),
++            r"C:\accounts\claude\work".to_string(),
++        );
+         let request = Request {
+             id: 1,
+             method: Method::CreateSession {
+diff --git a/src-tauri/src/ipc/server.rs b/src-tauri/src/ipc/server.rs
+index ea726cb..4e1ef8b 100644
+--- a/src-tauri/src/ipc/server.rs
++++ b/src-tauri/src/ipc/server.rs
+@@ -68,7 +68,10 @@ pub async fn run_server(state: Arc<DaemonState>) -> Result<()> {
+                     .events
+                     .send(Event::SessionAgentChanged { id, agent });
+             }
+-            for (id, status) in monitor_state.manager.complete_idle_tasks(Duration::from_secs(2)) {
++            for (id, status) in monitor_state
++                .manager
++                .complete_idle_tasks(Duration::from_secs(2))
++            {
+                 let _ = monitor_state
+                     .events
+                     .send(Event::SessionAgentStatusChanged { id, status });
+@@ -99,38 +102,16 @@ async fn handle_client(state: Arc<DaemonState>, pipe: NamedPipeServer) -> Result
+     let writer = Arc::new(AsyncMutex::new(write_half));
+     let attached: Arc<AsyncMutex<HashSet<Uuid>>> = Arc::new(AsyncMutex::new(HashSet::new()));
+ 
+-    let mut events_rx = state.events.subscribe();
+-    let writer_evt = writer.clone();
+-    let attached_evt = attached.clone();
+-    let event_task = tokio::spawn(async move {
+-        loop {
+-            let ev = match events_rx.recv().await {
+-                Ok(ev) => ev,
+-                Err(broadcast::error::RecvError::Closed) => break,
+-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+-            };
+-            let forward = match &ev {
+-                Event::PtyOutput { id, .. } => attached_evt.lock().await.contains(id),
+-                Event::PtyExit { id, .. } => attached_evt.lock().await.contains(id),
+-                _ => true,
+-            };
+-            if !forward {
+-                continue;
+-            }
+-            let msg = ServerMsg::Event(ev);
+-            let bytes = match serde_json::to_vec(&msg) {
+-                Ok(b) => b,
+-                Err(_) => continue,
+-            };
+-            let mut w = writer_evt.lock().await;
+-            if write_frame(&mut *w, &bytes).await.is_err() {
+-                break;
+-            }
+-        }
+-    });
+-
++    let failed = Arc::new(tokio::sync::Notify::new());
++    let mut event_task = forward_events(
++        state.events.subscribe(),
++        writer.clone(),
++        attached.clone(),
++        false,
++        failed.clone(),
++    );
+     let mut reader = read_half;
+-    let result: Result<()> = async {
++    let result = async {
+         loop {
+             let frame = read_frame(&mut reader).await?;
+             let req: Request = match serde_json::from_slice(&frame) {
+@@ -149,6 +130,63 @@ async fn handle_client(state: Arc<DaemonState>, pipe: NamedPipeServer) -> Result
+ 
+             let req_id = req.id;
+             let kill_server = matches!(req.method, Method::KillServer);
++            if let Method::AttachSessionAtomic { id } = req.method {
++                // Wait for a complete frame before stopping the old relay.
++                let mut atomic_writer = writer.lock().await;
++                event_task.abort();
++                let _ = (&mut event_task).await;
++                let snapshot = {
++                    let map = state.manager.sessions.lock();
++                    map.get(&id).map(|session| {
++                        let (scrollback, receiver) =
++                            snapshot_and_subscribe(&session.scrollback, &state.events);
++                        (
++                            AttachResult {
++                                info: session.info.clone(),
++                                scrollback,
++                            },
++                            receiver,
++                        )
++                    })
++                };
++                match snapshot {
++                    Some((snapshot, receiver)) => {
++                        {
++                            let mut ids = attached.lock().await;
++                            ids.clear();
++                            ids.insert(id);
++                        }
++                        let response = ServerMsg::Response {
++                            id: req_id,
++                            result: serde_json::to_value(snapshot)?,
++                        };
++                        write_frame(&mut *atomic_writer, &serde_json::to_vec(&response)?).await?;
++                        event_task = forward_events(
++                            receiver,
++                            writer.clone(),
++                            attached.clone(),
++                            true,
++                            failed.clone(),
++                        );
++                    }
++                    None => {
++                        attached.lock().await.clear();
++                        let response = ServerMsg::Error {
++                            id: req_id,
++                            message: "session not found".into(),
++                        };
++                        write_frame(&mut *atomic_writer, &serde_json::to_vec(&response)?).await?;
++                        event_task = forward_events(
++                            state.events.subscribe(),
++                            writer.clone(),
++                            attached.clone(),
++                            true,
++                            failed.clone(),
++                        );
++                    }
++                }
++                continue;
++            }
+             let response = match dispatch(state.clone(), attached.clone(), req).await {
+                 Ok(value) => ServerMsg::Response {
+                     id: req_id,
+@@ -171,19 +209,55 @@ async fn handle_client(state: Arc<DaemonState>, pipe: NamedPipeServer) -> Result
+                 std::process::exit(0);
+             }
+         }
+-    }
+-    .await;
+-
++    };
++    let result: Result<()> = tokio::select! { value=result=>value, _=failed.notified()=>Err(anyhow!("event stream disconnected or lagged")) };
+     event_task.abort();
++    let _ = event_task.await;
+     result
+ }
+ 
++fn forward_events(
++    mut receiver: broadcast::Receiver<Event>,
++    writer: Arc<AsyncMutex<tokio::io::WriteHalf<NamedPipeServer>>>,
++    attached: Arc<AsyncMutex<HashSet<Uuid>>>,
++    strict: bool,
++    failed: Arc<tokio::sync::Notify>,
++) -> tokio::task::JoinHandle<()> {
++    tokio::spawn(async move {
++        loop {
++            let event = match receiver.recv().await {
++                Ok(event) => event,
++                Err(broadcast::error::RecvError::Lagged(_)) if !strict => continue,
++                Err(_) => break,
++            };
++            if matches!(&event, Event::PtyOutput {id,..}|Event::PtyExit {id,..} if !attached.lock().await.contains(id))
++            {
++                continue;
++            }
++            let Ok(bytes) = serde_json::to_vec(&ServerMsg::Event(event)) else {
++                break;
++            };
++            let write = async { write_frame(&mut *writer.lock().await, &bytes).await };
++            if tokio::time::timeout(Duration::from_secs(5), write)
++                .await
++                .map_or(true, |result| result.is_err())
++            {
++                break;
++            }
++        }
++        failed.notify_one();
++    })
++}
++
+ async fn dispatch(
+     state: Arc<DaemonState>,
+     attached: Arc<AsyncMutex<HashSet<Uuid>>>,
+     req: Request,
+ ) -> Result<serde_json::Value> {
+     match req.method {
++        Method::AttachSessionAtomic { .. } => {
++            Err(anyhow!("atomic attach requires connection handler"))
++        }
+         Method::Ping => Ok(json!("pong")),
+         Method::CreateSession {
+             name,
+@@ -248,7 +322,9 @@ async fn dispatch(
+                 session.writer.flush()?;
+             }
+             if let Some(status) = state.manager.note_input(id) {
+-                let _ = state.events.send(Event::SessionAgentStatusChanged { id, status });
++                let _ = state
++                    .events
++                    .send(Event::SessionAgentStatusChanged { id, status });
+             }
+             Ok(json!(null))
+         }
+@@ -297,3 +373,130 @@ async fn dispatch(
+         Method::KillServer => Ok(json!(null)),
+     }
+ }
++
++/// PTY append and publish use this same lock, so every output byte is in exactly one side of the barrier.
++fn snapshot_and_subscribe(
++    scrollback: &parking_lot::Mutex<std::collections::VecDeque<u8>>,
++    events: &broadcast::Sender<Event>,
++) -> (String, broadcast::Receiver<Event>) {
++    let sb = scrollback.lock();
++    let receiver = events.subscribe();
++    let bytes: Vec<u8> = sb.iter().copied().collect();
++    (
++        base64::engine::general_purpose::STANDARD.encode(bytes),
++        receiver,
++    )
++}
++
++#[cfg(test)]
++mod mobile_stream_tests {
++    use super::*;
++    use tokio::io::{AsyncReadExt, AsyncWriteExt};
++    use tokio::net::windows::named_pipe::ClientOptions;
++    #[test]
++    fn concurrent_snapshot_and_live_output_have_no_missing_or_duplicate_bytes() {
++        let scrollback = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
++        let (events, _) = broadcast::channel(2048);
++        let producer_sb = scrollback.clone();
++        let producer_events = events.clone();
++        let start = Arc::new(std::sync::Barrier::new(2));
++        let producer_start = start.clone();
++        let producer = std::thread::spawn(move || {
++            producer_start.wait();
++            for _ in 0..1000 {
++                let mut sb = producer_sb.lock();
++                sb.push_back(b'x');
++                producer_events
++                    .send(Event::PtyOutput {
++                        id: Uuid::nil(),
++                        data: "eA==".into(),
++                    })
++                    .ok();
++                drop(sb);
++                std::thread::yield_now();
++            }
++        });
++        start.wait();
++        let (snapshot, mut receiver) = snapshot_and_subscribe(&scrollback, &events);
++        producer.join().unwrap();
++        let mut all = base64::engine::general_purpose::STANDARD
++            .decode(snapshot)
++            .unwrap();
++        while let Ok(Event::PtyOutput { data, .. }) = receiver.try_recv() {
++            all.extend(
++                base64::engine::general_purpose::STANDARD
++                    .decode(data)
++                    .unwrap(),
++            );
++        }
++        assert_eq!(all, vec![b'x'; 1000]);
++    }
++    #[tokio::test]
++    async fn atomic_switch_waits_for_inflight_frame_before_replacing_relay() {
++        let name = format!(r"\\.\pipe\winmux-mobile-frame-test-{}", Uuid::new_v4());
++        let server = ServerOptions::new()
++            .first_pipe_instance(true)
++            .out_buffer_size(512)
++            .create(&name)
++            .unwrap();
++        let mut client = ClientOptions::new().open(&name).unwrap();
++        server.connect().await.unwrap();
++        let state = Arc::new(DaemonState::new());
++        let task = tokio::spawn(handle_client(state.clone(), server));
++        write_frame(
++            &mut client,
++            &serde_json::to_vec(&Request {
++                id: 1,
++                method: Method::Ping,
++            })
++            .unwrap(),
++        )
++        .await
++        .unwrap();
++        read_frame(&mut client).await.unwrap();
++        state
++            .events
++            .send(Event::SessionRenamed {
++                id: Uuid::nil(),
++                name: "x".repeat(100_000),
++            })
++            .unwrap();
++        let mut length = [0u8; 4];
++        client.read_exact(&mut length).await.unwrap();
++        let attach = serde_json::to_vec(&Request {
++            id: 2,
++            method: Method::AttachSessionAtomic { id: Uuid::nil() },
++        })
++        .unwrap();
++        client
++            .write_all(&(attach.len() as u32).to_le_bytes())
++            .await
++            .unwrap();
++        client.write_all(&attach).await.unwrap();
++        client.flush().await.unwrap();
++        tokio::time::sleep(Duration::from_millis(20)).await;
++        let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
++        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut body))
++            .await
++            .unwrap()
++            .unwrap();
++        match serde_json::from_slice::<ServerMsg>(&body).unwrap() {
++            ServerMsg::Event(Event::SessionRenamed { name, .. }) => assert_eq!(name.len(), 100_000),
++            _ => panic!("expected intact output frame"),
++        }
++        let response = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client))
++            .await
++            .unwrap()
++            .unwrap();
++        assert!(matches!(
++            serde_json::from_slice::<ServerMsg>(&response).unwrap(),
++            ServerMsg::Error { id: 2, .. }
++        ));
++        drop(client);
++        tokio::time::timeout(Duration::from_secs(2), task)
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap_err();
++    }
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index acffd52..655a774 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -1,8 +1,11 @@
+ pub mod commands;
+ pub mod daemon;
+ pub mod ipc;
++pub mod mobile_pairing;
+ pub mod pty;
+ pub mod tray;
++pub mod usage;
++pub mod usage_bridge;
+ 
+ use std::sync::Arc;
+ use tauri::{Emitter, Manager, WindowEvent};
+@@ -29,6 +32,7 @@ pub fn run() {
+     tauri::Builder::default()
+         .plugin(tauri_plugin_opener::init())
+         .plugin(tauri_plugin_dialog::init())
++        .manage(mobile_pairing::MobilePairing::default())
+         .manage(client.clone())
+         .manage(rt.clone())
+         .setup(move |app| {
+@@ -107,6 +111,13 @@ pub fn run() {
+             }
+         })
+         .invoke_handler(tauri::generate_handler![
++            mobile_pairing::mobile_pairing_interfaces,
++            mobile_pairing::mobile_pairing_status,
++            mobile_pairing::mobile_pairing_start,
++            mobile_pairing::mobile_pairing_stop,
++            mobile_pairing::mobile_pairing_invite,
++            mobile_pairing::mobile_pairing_approve,
++            mobile_pairing::mobile_pairing_revoke,
+             commands::create_session,
+             commands::list_sessions,
+             commands::kill_session,
+@@ -117,6 +128,7 @@ pub fn run() {
+             commands::resolve_account_dir,
+             commands::set_account_token,
+             commands::get_account_token,
++            usage::get_account_usage,
+             commands::read_file_preview,
+             commands::write_file,
+             commands::read_directory,
+diff --git a/src-tauri/src/pty/mod.rs b/src-tauri/src/pty/mod.rs
+index 8b1ecf0..0335287 100644
+--- a/src-tauri/src/pty/mod.rs
++++ b/src-tauri/src/pty/mod.rs
+@@ -161,9 +161,10 @@ pub fn spawn_session(
+                             while sb.len() > SCROLLBACK_BYTES {
+                                 sb.pop_front();
+                             }
++                            // Atomic attach subscribes and snapshots under this same lock.
++                            let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
++                            let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
+                         }
+-                        let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+-                        let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
+                         let _ = events_clone.send(Event::SessionActivity { id, bell: sig.bell });
+                         let agent = *agent_kind_clone.lock();
+                         if let Some(status) = task_tracker_clone.lock().observe(agent, AgentTaskEvent::Output(chunk)) {
+NEW FILE: C:\Users\user\orca\winmux\src-tauri\src\mobile_pairing\gateway.rs
+use super::*;
+use crate::ipc::{
+    client::DaemonClient,
+    protocol::{Event, Method},
+};
+use axum::{
+    body::Body,
+    extract::{
+        ws::{Message, WebSocket},
+        State, WebSocketUpgrade,
+    },
+    http::{HeaderMap, Request, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
+use base64::Engine;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+use tower::ServiceExt;
+
+include!(concat!(env!("OUT_DIR"), "/mobile_assets.rs"));
+const MESSAGE_LIMIT: usize = 24 * 1024;
+const SEND_TIMEOUT: Duration = Duration::from_secs(5);
+#[derive(Clone)]
+struct Gateway {
+    address: SocketAddr,
+    pairings: Arc<Mutex<Pairings>>,
+    stop: watch::Receiver<bool>,
+    slots: Arc<Semaphore>,
+    attempts: Arc<Mutex<(Instant, u32)>>,
+}
+pub(super) async fn serve(
+    listener: tokio::net::TcpListener,
+    address: SocketAddr,
+    pairings: Arc<Mutex<Pairings>>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let state = Gateway {
+        address,
+        pairings: pairings.clone(),
+        stop: stop.clone(),
+        slots: Arc::new(Semaphore::new(16)),
+        attempts: Arc::new(Mutex::new((Instant::now(), 0))),
+    };
+    let app = Router::new()
+        .route("/ws", get(upgrade))
+        .fallback(get(asset))
+        .with_state(state);
+    let mut tasks = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _=stop.changed()=>break,
+            Some(_)=tasks.join_next(), if !tasks.is_empty()=>{},
+            accepted=listener.accept()=>{
+                let Ok((stream,_))=accepted else {break};
+                if tasks.len()>=32 { drop(stream); continue; }
+                let router=app.clone();
+                tasks.spawn(async move {
+                    let service=hyper::service::service_fn(move |request:Request<hyper::body::Incoming>| { let app=router.clone(); async move { app.oneshot(request.map(Body::new)).await } });
+                    let mut builder=hyper::server::conn::http1::Builder::new();
+                    builder.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(5)).max_buf_size(16*1024).keep_alive(true);
+                    let connection=builder.serve_connection(hyper_util::rt::TokioIo::new(stream),service).with_upgrades();
+                    let _=tokio::time::timeout(Duration::from_secs(10),connection).await;
+                });
+            }
+        }
+    }
+    pairings.lock().clear();
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+fn headers_ok(state: &Gateway, headers: &HeaderMap, ws: bool) -> bool {
+    !headers.contains_key("transfer-encoding")
+        && headers.get("content-length").is_none_or(|v| v == "0")
+        && headers.get("origin").is_none_or(|v| v.to_str().is_ok())
+        && headers.get_all("host").iter().count() == 1
+        && headers.get_all("origin").iter().count() <= 1
+        && valid_headers(
+            state.address,
+            headers.get("host").and_then(|v| v.to_str().ok()),
+            headers.get("origin").and_then(|v| v.to_str().ok()),
+            ws,
+        )
+}
+async fn asset(State(state): State<Gateway>, headers: HeaderMap, uri: Uri) -> Response {
+    if !headers_ok(&state, &headers, false) || uri.query().is_some() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let path = if uri.path() == "/" {
+        "mobile.html"
+    } else {
+        uri.path().trim_start_matches('/')
+    };
+    let Some((_, bytes)) = MOBILE_ASSETS.iter().find(|(p, _)| *p == path) else {
+        return if path == "mobile.html" {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "모바일 화면이 빌드되지 않았습니다. pnpm build 후 앱을 다시 빌드하세요.",
+            )
+                .into_response()
+        } else {
+            StatusCode::NOT_FOUND.into_response()
+        };
+    };
+    let mime = if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "text/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else {
+        "application/octet-stream"
+    };
+    ([("content-type",mime),("cache-control","no-store"),("x-content-type-options","nosniff"),("referrer-policy","no-referrer"),("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")],*bytes).into_response()
+}
+async fn upgrade(
+    State(state): State<Gateway>,
+    headers: HeaderMap,
+    uri: Uri,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !headers_ok(&state, &headers, true) || uri.query().is_some() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    {
+        let mut rate = state.attempts.lock();
+        if rate.0.elapsed() >= Duration::from_secs(60) {
+            *rate = (Instant::now(), 0);
+        }
+        if rate.1 >= 30 {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        rate.1 += 1;
+    }
+    let Ok(permit) = state.slots.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    ws.max_message_size(MESSAGE_LIMIT)
+        .max_frame_size(MESSAGE_LIMIT)
+        .read_buffer_size(4096)
+        .write_buffer_size(0)
+        .max_write_buffer_size(2 * 1024 * 1024)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            socket_session(socket, state).await;
+        })
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum Hello {
+    Pair { invite: String, name: String },
+    Auth { token: String },
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum Command {
+    List {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+    },
+    Attach {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+        id: Uuid,
+    },
+    Detach {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+        id: Uuid,
+    },
+    Input {
+        #[serde(rename = "requestId")]
+        request_id: u64,
+        id: Uuid,
+        data: String,
+    },
+}
+async fn send(socket: &mut WebSocket, value: Value) -> Result<(), String> {
+    tokio::time::timeout(
+        SEND_TIMEOUT,
+        socket.send(Message::Text(value.to_string().into())),
+    )
+    .await
+    .map_err(|_| "수신 속도가 느려 연결을 종료합니다.".to_string())?
+    .map_err(|_| "연결이 종료되었습니다.".into())
+}
+async fn read_json<T: serde::de::DeserializeOwned>(socket: &mut WebSocket) -> Result<T, String> {
+    match socket.recv().await {
+        Some(Ok(Message::Text(text))) => {
+            serde_json::from_str(&text).map_err(|_| "잘못된 요청입니다.".into())
+        }
+        _ => Err("연결이 종료되었거나 잘못된 메시지입니다.".into()),
+    }
+}
+struct Registration {
+    pairings: Arc<Mutex<Pairings>>,
+    token: String,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let Some(d) = self.pairings.lock().devices.get_mut(&self.token) {
+            d.connections = d.connections.saturating_sub(1);
+        }
+    }
+}
+struct PendingGuard {
+    pairings: Arc<Mutex<Pairings>>,
+    id: String,
+}
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pairings.lock().pending.remove(&self.id);
+    }
+}
+async fn authenticate(
+    socket: &mut WebSocket,
+    state: &Gateway,
+) -> Result<(String, String, watch::Receiver<bool>, Registration), String> {
+    let hello = tokio::time::timeout(Duration::from_secs(10), read_json::<Hello>(socket))
+        .await
+        .map_err(|_| "인증 시간이 초과되었습니다.".to_string())??;
+    let token = match hello {
+        Hello::Auth { token } => token,
+        Hello::Pair { invite, name } => {
+            let (pending, mut result, expires) = {
+                let mut pairings = state.pairings.lock();
+                let pending = pairings.pair(&invite, &name, now_ms())?;
+                let p = &pairings.pending[&pending.request_id];
+                (pending, p.result.subscribe(), p.expires)
+            };
+            let _guard = PendingGuard {
+                pairings: state.pairings.clone(),
+                id: pending.request_id,
+            };
+            send(
+                socket,
+                json!({"type":"pending","verification":pending.verification}),
+            )
+            .await?;
+            let waiting = async {
+                loop {
+                    if let Some(result) = result.borrow().clone() {
+                        return result;
+                    }
+                    tokio::select! {
+                        changed=result.changed()=>if changed.is_err() {return Err("승인 요청이 종료되었습니다.".into());},
+                        _=socket.recv()=>return Err("승인 대기 중 연결이 종료되었거나 요청을 보냈습니다.".into()),
+                    }
+                }
+            };
+            tokio::time::timeout(
+                Duration::from_millis(expires.saturating_sub(now_ms())),
+                waiting,
+            )
+            .await
+            .map_err(|_| "승인 시간이 만료되었습니다.".to_string())??
+        }
+    };
+    let (id, cancel) = {
+        let mut p = state.pairings.lock();
+        let d = p
+            .devices
+            .get_mut(&token)
+            .ok_or("기기 인증에 실패했습니다. PC에서 다시 페어링하세요.")?;
+        if d.connections >= 4 {
+            return Err("이 기기의 동시 연결 수를 초과했습니다.".into());
+        }
+        d.connections += 1;
+        (d.device_id.clone(), d.cancel.subscribe())
+    };
+    let registration = Registration {
+        pairings: state.pairings.clone(),
+        token: token.clone(),
+    };
+    Ok((token, id, cancel, registration))
+}
+async fn socket_session(mut socket: WebSocket, state: Gateway) {
+    let mut stop = state.stop.clone();
+    let auth = tokio::select! {biased; _=stop.changed()=>return,auth=authenticate(&mut socket,&state)=>auth};
+    let (token, id, mut cancel, _registration) = match auth {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = send(&mut socket, json!({"type":"error","message":message})).await;
+            return;
+        }
+    };
+    if *cancel.borrow() {
+        return;
+    }
+    let work = async {
+        send(
+            &mut socket,
+            json!({"type":"authenticated","token":token,"deviceId":id}),
+        )
+        .await?;
+        let daemon = DaemonClient::connect_mobile()
+            .await
+            .map_err(|_| "터미널 서버에 연결할 수 없습니다.".to_string())?;
+        let mut events = daemon.events();
+        let mut attached = None;
+        let mut rate = (Instant::now(), 0u32);
+        loop {
+            tokio::select! {
+                _=daemon.disconnected()=>return Err("터미널 서버 연결이 종료되었습니다.".into()),
+                command=read_json::<Command>(&mut socket)=>{
+                    if rate.0.elapsed()>=Duration::from_secs(1) {rate=(Instant::now(),0);}
+                    rate.1+=1; if rate.1>60 {return Err("요청이 너무 많습니다.".into());}
+                    let command=command?;
+                    let (request_id,method,next)=match command {
+                        Command::List {request_id}=>(request_id,Method::ListSessions,attached),
+                        Command::Attach {request_id,id}=>{
+                            // A fresh receiver is installed before issuing atomic attach. The daemon sends its snapshot before live events.
+
+                            (request_id,Method::AttachSessionAtomic {id},Some(id))
+                        },
+                        Command::Detach {request_id,id} if attached==Some(id)=>(request_id,Method::DetachSession {id},None),
+                        Command::Input {request_id,id,data} if attached==Some(id)=>{
+                            if base64::engine::general_purpose::STANDARD.decode(&data).map_or(true,|bytes|bytes.len()>16*1024 || std::str::from_utf8(&bytes).is_err()) {
+                                send(&mut socket,json!({"type":"error","requestId":request_id,"message":"입력은 16KB 이하의 UTF-8이어야 합니다."})).await?; continue;
+                            }
+                            (request_id,Method::WriteSession {id,data},attached)
+                        },
+                        Command::Input {request_id,..}|Command::Detach {request_id,..}=>{send(&mut socket,json!({"type":"error","requestId":request_id,"message":"연결된 터미널이 아닙니다."})).await?;continue;}
+                    };
+                    let attaching=matches!(method,Method::AttachSessionAtomic {..});
+                    match tokio::time::timeout(Duration::from_secs(10),daemon.request_with_events(method)).await {
+                        Ok(Ok((data,receiver)))=>{if attaching {events=receiver;} attached=next;send(&mut socket,json!({"type":"result","requestId":request_id,"data":data})).await?;},
+                        Ok(Err(error))=>{if attaching {attached=None;} send(&mut socket,json!({"type":"error","requestId":request_id,"message":format!("터미널 요청 실패: {error}. 연결 실패 시 daemon 업데이트가 필요할 수 있습니다.")})).await?;},
+                        Err(_)=>return Err(if attaching {"연결 응답 시간이 초과되었습니다. daemon을 업데이트한 후 다시 시작하세요.".into()} else {"터미널 응답 시간이 초과되었습니다. 입력은 자동 재전송하지 않습니다.".into()}),
+                    }
+                },
+                event=events.recv()=>{
+                    let event=event.map_err(|_|"출력이 지연되었거나 터미널 연결이 종료되었습니다. 다시 연결하세요.".to_string())?;
+                    let allowed=match &event {
+                        Event::PtyOutput {id,..}|Event::PtyExit {id,..}=>attached==Some(*id),
+                        Event::SessionAdded {..}|Event::SessionRemoved {..}|Event::SessionRenamed {..}=>true,
+                        _=>false,
+                    };
+                    if !allowed {continue;}
+                    send(&mut socket,json!({"type":"event","data":event})).await?;
+                }
+            }
+        }
+    };
+    let result: Result<(), String> = tokio::select! {biased; _=stop.changed()=>Err("모바일 연결 서버가 중지되었습니다.".into()),_=cancel.changed()=>Err("기기 연결이 해제되었습니다.".into()),result=work=>result};
+    if let Err(message) = result {
+        let _ = send(&mut socket, json!({"type":"error","message":message})).await;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(1), socket.send(Message::Close(None))).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Message as ClientMessage},
+    };
+    async fn running() -> (
+        SocketAddr,
+        Arc<Mutex<Pairings>>,
+        watch::Sender<bool>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let pairings = Arc::new(Mutex::new(Pairings::default()));
+        let (stop, rx) = watch::channel(false);
+        let task = tokio::spawn(serve(listener, address, pairings.clone(), rx));
+        (address, pairings, stop, task)
+    }
+    async fn socket(
+        address: SocketAddr,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("origin", format!("http://{address}").parse().unwrap());
+        connect_async(request).await.unwrap().0
+    }
+    async fn response(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Value {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+    #[tokio::test]
+    async fn http_host_origin_asset_and_unknown_path_policy() {
+        let (address, _, stop, task) = running().await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let root = client.get(base_url(address)).send().await.unwrap();
+        assert_eq!(
+            root.status().as_u16(),
+            if MOBILE_ASSETS.iter().any(|(path, _)| *path == "mobile.html") {
+                200
+            } else {
+                503
+            }
+        );
+        assert_eq!(
+            client
+                .get(base_url(address))
+                .header("host", "evil.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            client
+                .get(base_url(address))
+                .header("origin", "http://evil.example")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(
+            client
+                .get(format!("{}missing.js", base_url(address)))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        assert_eq!(
+            client
+                .get(format!("{}?invite=secret", base_url(address)))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn websocket_requires_exact_origin_and_rejects_session_access_before_auth() {
+        let (address, _, stop, task) = running().await;
+        let request = format!("ws://{address}/ws").into_client_request().unwrap();
+        assert!(connect_async(request).await.is_err());
+        let mut ws = socket(address).await;
+        ws.send(ClientMessage::Text(
+            json!({"type":"list","requestId":1}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let value = response(&mut ws).await;
+        assert_eq!(value["type"], "error");
+        assert!(value.get("data").is_none());
+        let mut ws = socket(address).await;
+        ws.send(ClientMessage::Text(
+            json!({"type":"auth","token":"wrong"}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response(&mut ws).await["type"], "error");
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn pending_pairing_is_single_use_and_removed_when_socket_closes() {
+        let (address, pairings, stop, task) = running().await;
+        let invite = pairings.lock().invite(now_ms());
+        let mut first = socket(address).await;
+        first
+            .send(ClientMessage::Text(
+                json!({"type":"pair","invite":invite,"name":"테스트 기기"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        let pending = response(&mut first).await;
+        assert_eq!(pending["type"], "pending");
+        assert_eq!(pending["verification"].as_str().unwrap().len(), 6);
+        assert_eq!(pairings.lock().pending.len(), 1);
+        let mut second = socket(address).await;
+        second
+            .send(ClientMessage::Text(
+                json!({"type":"pair","invite":invite,"name":"second"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response(&mut second).await["type"], "error");
+        first.close(None).await.unwrap();
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pairings.lock().pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(pairings.lock().devices.is_empty());
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn rejection_reaches_waiting_socket_and_server_stop_closes_pending_socket() {
+        let (address, pairings, stop, task) = running().await;
+        for reject in [true, false] {
+            let invite = pairings.lock().invite(now_ms());
+            let mut ws = socket(address).await;
+            ws.send(ClientMessage::Text(
+                json!({"type":"pair","invite":invite,"name":"phone"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(response(&mut ws).await["type"], "pending");
+            if reject {
+                let id = pairings.lock().pending.keys().next().unwrap().clone();
+                pairings.lock().approve(&id, false, now_ms()).unwrap();
+            } else {
+                stop.send_replace(true);
+            }
+            let frame = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap();
+            if reject {
+                assert_eq!(
+                    serde_json::from_str::<Value>(frame.unwrap().unwrap().to_text().unwrap())
+                        .unwrap()["type"],
+                    "error"
+                );
+            }
+        }
+        task.await.unwrap();
+        assert!(pairings.lock().pending.is_empty());
+    }
+    #[test]
+    fn protocol_whitelist_disallows_resize_kill_create_and_extra_fields() {
+        for value in [
+            json!({"type":"resize","requestId":1,"cols":20}),
+            json!({"type":"kill","requestId":1}),
+            json!({"type":"create","requestId":1}),
+            json!({"type":"list","requestId":1,"method":"kill_server"}),
+        ] {
+            assert!(serde_json::from_value::<Command>(value).is_err());
+        }
+    }
+}
+NEW FILE: C:\Users\user\orca\winmux\src-tauri\src\mobile_pairing\mod.rs
+use parking_lot::Mutex;
+use serde::Serialize;
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
+use tokio::sync::watch;
+use uuid::Uuid;
+
+mod gateway;
+const INVITE_MS: u64 = 120_000;
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+fn secret() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+fn base_url(addr: SocketAddr) -> String {
+    format!("http://{addr}/")
+}
+fn valid_headers(addr: SocketAddr, host: Option<&str>, origin: Option<&str>, ws: bool) -> bool {
+    let authority = if addr.port() == 80 {
+        match addr.ip() { IpAddr::V4(ip) => ip.to_string(), IpAddr::V6(ip) => format!("[{ip}]") }
+    } else { addr.to_string() };
+    (host == Some(authority.as_str()) || host == Some(addr.to_string().as_str()))
+        && match origin {
+            Some(value) => value == format!("http://{authority}"),
+            None => !ws,
+        }
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInterface {
+    name: String,
+    ip: String,
+    is_tailscale: bool,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDevice {
+    request_id: String,
+    name: String,
+    verification: String,
+}
+struct Pending {
+    view: PendingDevice,
+    expires: u64,
+    result: watch::Sender<Option<Result<String, String>>>,
+}
+struct Device {
+    device_id: String,
+    name: String,
+    cancel: watch::Sender<bool>,
+    connections: usize,
+}
+#[derive(Default)]
+struct Pairings {
+    invite: Option<(String, u64)>,
+    pending: HashMap<String, Pending>,
+    devices: HashMap<String, Device>,
+}
+impl Pairings {
+    fn invite(&mut self, now: u64) -> String {
+        let token = secret();
+        self.invite = Some((token.clone(), now + INVITE_MS));
+        token
+    }
+    fn expire(&mut self, now: u64) {
+        if self
+            .invite
+            .as_ref()
+            .is_some_and(|(_, expiry)| now >= *expiry)
+        {
+            self.invite = None;
+        }
+        self.pending.retain(|_, p| {
+            if now >= p.expires {
+                p.result
+                    .send_replace(Some(Err("승인 시간이 만료되었습니다.".into())));
+                false
+            } else {
+                true
+            }
+        });
+    }
+    fn pair(&mut self, token: &str, name: &str, now: u64) -> Result<PendingDevice, String> {
+        self.expire(now);
+        if self.pending.len() >= 8 || self.devices.len() >= 16 {
+            return Err("등록 가능한 기기 수를 초과했습니다.".into());
+        }
+        if !self
+            .invite
+            .as_ref()
+            .is_some_and(|(value, _)| value == token)
+        {
+            return Err("초대가 유효하지 않거나 만료되었습니다.".into());
+        }
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
+            return Err("기기 이름은 1~64자로 입력하세요.".into());
+        }
+        let (_, expires) = self.invite.take().unwrap();
+        let view = PendingDevice {
+            request_id: Uuid::new_v4().to_string(),
+            name: name.into(),
+            verification: format!("{:06}", Uuid::new_v4().as_u128() % 1_000_000),
+        };
+        self.pending.insert(
+            view.request_id.clone(),
+            Pending {
+                view: view.clone(),
+                expires,
+                result: watch::channel(None).0,
+            },
+        );
+        Ok(view)
+    }
+    fn approve(&mut self, id: &str, approve: bool, now: u64) -> Result<Option<String>, String> {
+        self.expire(now);
+        let p = self
+            .pending
+            .remove(id)
+            .ok_or("승인 요청이 없거나 만료되었습니다.")?;
+        if !approve {
+            p.result
+                .send_replace(Some(Err("PC에서 연결을 거절했습니다.".into())));
+            return Ok(None);
+        }
+        let token = secret();
+        self.devices.insert(
+            token.clone(),
+            Device {
+                device_id: Uuid::new_v4().to_string(),
+                name: p.view.name,
+                cancel: watch::channel(false).0,
+                connections: 0,
+            },
+        );
+        p.result.send_replace(Some(Ok(token.clone())));
+        Ok(Some(token))
+    }
+    #[cfg(test)]
+    fn authenticate(&self, token: &str) -> Option<&Device> {
+        self.devices.get(token)
+    }
+    fn revoke(&mut self, id: &str) -> Result<(), String> {
+        let token = self
+            .devices
+            .iter()
+            .find(|(_, d)| d.device_id == id)
+            .map(|(t, _)| t.clone())
+            .ok_or("등록된 기기가 없습니다.")?;
+        let device = self.devices.remove(&token).unwrap();
+        device.cancel.send_replace(true);
+        Ok(())
+    }
+    fn clear(&mut self) {
+        for d in self.devices.values() {
+            d.cancel.send_replace(true);
+        }
+        for p in self.pending.values() {
+            p.result
+                .send_replace(Some(Err("모바일 연결 서버가 중지되었습니다.".into())));
+        }
+        *self = Self::default();
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InviteView {
+    url: String,
+    qr_svg: String,
+    expires_at: u64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedDevice {
+    device_id: String,
+    name: String,
+    connected: bool,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingStatus {
+    running: bool,
+    ip: Option<String>,
+    port: Option<u16>,
+    url: Option<String>,
+    invite: Option<InviteView>,
+    pending: Vec<PendingDevice>,
+    devices: Vec<PairedDevice>,
+}
+struct Running {
+    address: SocketAddr,
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+#[derive(Default)]
+pub struct MobilePairing {
+    running: tokio::sync::Mutex<Option<Running>>,
+    pairings: Arc<Mutex<Pairings>>,
+}
+impl Drop for MobilePairing {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.get_mut().take() {
+            running.stop.send_replace(true);
+            running.task.abort();
+        }
+        self.pairings.lock().clear();
+    }
+}
+impl MobilePairing {
+    async fn status(&self) -> PairingStatus {
+        let running = self.running.lock().await;
+        let address = running
+            .as_ref()
+            .filter(|r| !r.task.is_finished())
+            .map(|r| r.address);
+        let mut p = self.pairings.lock();
+        p.expire(now_ms());
+        let invite = address.and_then(|addr| {
+            p.invite.as_ref().map(|(token, expires)| {
+                let url = format!("{}#invite={token}", base_url(addr));
+                let code = qrcode::QrCode::new(url.as_bytes()).expect("bounded invite fits QR");
+                InviteView {
+                    url,
+                    qr_svg: code
+                        .render::<qrcode::render::svg::Color>()
+                        .min_dimensions(240, 240)
+                        .build(),
+                    expires_at: *expires,
+                }
+            })
+        });
+        PairingStatus {
+            running: address.is_some(),
+            ip: address.map(|a| a.ip().to_string()),
+            port: address.map(|a| a.port()),
+            url: address.map(base_url),
+            invite,
+            pending: p.pending.values().map(|p| p.view.clone()).collect(),
+            devices: p
+                .devices
+                .values()
+                .map(|d| PairedDevice {
+                    device_id: d.device_id.clone(),
+                    name: d.name.clone(),
+                    connected: d.connections > 0,
+                })
+                .collect(),
+        }
+    }
+    async fn start(&self, ip: String, port: u16) -> Result<PairingStatus, String> {
+        let mut current = self.running.lock().await;
+        if current.as_ref().is_some_and(|r| !r.task.is_finished()) {
+            return Err("먼저 모바일 연결 서버를 중지하세요.".into());
+        }
+        let ip: IpAddr = ip.parse().map_err(|_| "IP 주소가 올바르지 않습니다.")?;
+        if port == 0 || !interfaces()?.iter().any(|i| i.ip == ip.to_string()) {
+            return Err("선택한 IP 또는 포트를 사용할 수 없습니다. 목록을 새로고침하세요.".into());
+        }
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(ip, port))
+            .await
+            .map_err(|e| format!("선택한 주소에서 서버를 시작할 수 없습니다: {e}"))?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        let (stop, rx) = watch::channel(false);
+        self.pairings.lock().clear();
+        self.pairings.lock().invite(now_ms());
+        let task = tokio::spawn(gateway::serve(listener, address, self.pairings.clone(), rx));
+        *current = Some(Running {
+            address,
+            stop,
+            task,
+        });
+        drop(current);
+        Ok(self.status().await)
+    }
+    async fn stop(&self) -> PairingStatus {
+        let mut current = self.running.lock().await;
+        if let Some(mut running) = current.take() {
+            running.stop.send_replace(true);
+            self.pairings.lock().clear();
+            if tokio::time::timeout(std::time::Duration::from_secs(3), &mut running.task)
+                .await
+                .is_err()
+            {
+                running.task.abort();
+                let _ = running.task.await;
+            }
+        }
+        drop(current);
+        self.status().await
+    }
+}
+fn interfaces() -> Result<Vec<NetworkInterface>, String> {
+    let mut result = if_addrs::get_if_addrs()
+        .map_err(|e| format!("네트워크 목록을 읽을 수 없습니다: {e}"))?
+        .into_iter()
+        .filter(|i| usable_ip(i.ip()))
+        .map(|i| NetworkInterface {
+            ip: i.ip().to_string(),
+            is_tailscale: i.name.to_ascii_lowercase().contains("tailscale"),
+            name: i.name,
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|a, b| {
+        b.is_tailscale
+            .cmp(&a.is_tailscale)
+            .then(a.name.cmp(&b.name))
+            .then(a.ip.cmp(&b.ip))
+    });
+    result.dedup_by(|a, b| a.ip == b.ip && a.name == b.name);
+    Ok(result)
+}
+fn usable_ip(ip: IpAddr) -> bool {
+    !ip.is_unspecified()
+        && !ip.is_multicast()
+        && match ip {
+            IpAddr::V4(a) => !a.is_broadcast(),
+            IpAddr::V6(a) => !a.is_unicast_link_local(),
+        }
+}
+#[tauri::command]
+pub async fn mobile_pairing_interfaces() -> Result<Vec<NetworkInterface>, String> {
+    interfaces()
+}
+#[tauri::command]
+pub async fn mobile_pairing_status(
+    state: tauri::State<'_, MobilePairing>,
+) -> Result<PairingStatus, String> {
+    Ok(state.status().await)
+}
+#[tauri::command]
+pub async fn mobile_pairing_start(
+    state: tauri::State<'_, MobilePairing>,
+    ip: String,
+    port: u16,
+) -> Result<PairingStatus, String> {
+    state.start(ip, port).await
+}
+#[tauri::command]
+pub async fn mobile_pairing_stop(
+    state: tauri::State<'_, MobilePairing>,
+) -> Result<PairingStatus, String> {
+    Ok(state.stop().await)
+}
+#[tauri::command]
+pub async fn mobile_pairing_invite(
+    state: tauri::State<'_, MobilePairing>,
+) -> Result<PairingStatus, String> {
+    let running = state.running.lock().await;
+    if !running.as_ref().is_some_and(|r| !r.task.is_finished()) {
+        return Err("먼저 서버를 시작하세요.".into());
+    }
+    state.pairings.lock().invite(now_ms());
+    drop(running);
+    Ok(state.status().await)
+}
+#[tauri::command]
+pub async fn mobile_pairing_approve(
+    state: tauri::State<'_, MobilePairing>,
+    request_id: String,
+    approve: bool,
+) -> Result<PairingStatus, String> {
+    state
+        .pairings
+        .lock()
+        .approve(&request_id, approve, now_ms())?;
+    Ok(state.status().await)
+}
+#[tauri::command]
+pub async fn mobile_pairing_revoke(
+    state: tauri::State<'_, MobilePairing>,
+    device_id: String,
+) -> Result<PairingStatus, String> {
+    state.pairings.lock().revoke(&device_id)?;
+    Ok(state.status().await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invitation_is_consumed_before_approval_and_cannot_be_reused() {
+        let mut state = Pairings::default();
+        let invite = state.invite(1000);
+        let pending = state.pair(&invite, "phone", 1001).unwrap();
+        assert!(state.pair(&invite, "other", 1002).is_err());
+        assert!(state.authenticate(&invite).is_none());
+        let token = state
+            .approve(&pending.request_id, true, 1003)
+            .unwrap()
+            .unwrap();
+        assert!(state.authenticate(&token).is_some());
+        assert!(state.approve(&pending.request_id, true, 1004).is_err());
+    }
+
+    #[test]
+    fn expiration_and_rejection_never_issue_credentials() {
+        let mut state = Pairings::default();
+        let invite = state.invite(1000);
+        assert!(state.pair(&invite, "phone", 121000).is_err());
+        let invite = state.invite(200000);
+        let pending = state.pair(&invite, "phone", 200001).unwrap();
+        assert!(state.approve(&pending.request_id, true, 320000).is_err());
+        let invite = state.invite(400000);
+        let pending = state.pair(&invite, "phone", 400001).unwrap();
+        assert!(state
+            .approve(&pending.request_id, false, 400002)
+            .unwrap()
+            .is_none());
+        assert!(state.devices.is_empty());
+    }
+
+    #[test]
+    fn revocation_invalidates_token_and_signals_all_connections() {
+        let mut state = Pairings::default();
+        let invite = state.invite(0);
+        let p = state.pair(&invite, "phone", 1).unwrap();
+        let token = state.approve(&p.request_id, true, 2).unwrap().unwrap();
+        let device = state.authenticate(&token).unwrap();
+        let cancel = device.cancel.subscribe();
+        let id = device.device_id.clone();
+        state.revoke(&id).unwrap();
+        assert!(*cancel.borrow());
+        assert!(state.authenticate(&token).is_none());
+    }
+
+    #[test]
+    fn address_and_origin_match_exact_bound_endpoint() {
+        assert!(valid_headers("127.0.0.1:80".parse().unwrap(),Some("127.0.0.1"),Some("http://127.0.0.1"),true));
+        let address: std::net::SocketAddr = "[fd7a:115c:a1e0::1]:43123".parse().unwrap();
+        assert_eq!(base_url(address), "http://[fd7a:115c:a1e0::1]:43123/");
+        assert!(valid_headers(
+            address,
+            Some("[fd7a:115c:a1e0::1]:43123"),
+            Some("http://[fd7a:115c:a1e0::1]:43123"),
+            true
+        ));
+        assert!(!valid_headers(
+            address,
+            Some("evil.example"),
+            Some("http://[fd7a:115c:a1e0::1]:43123"),
+            true
+        ));
+        assert!(!valid_headers(
+            address,
+            Some("[fd7a:115c:a1e0::1]:43123"),
+            None,
+            true
+        ));
+        assert!(!valid_headers(
+            address,
+            Some("[fd7a:115c:a1e0::1]:43123"),
+            Some("null"),
+            false
+        ));
+    }
+}

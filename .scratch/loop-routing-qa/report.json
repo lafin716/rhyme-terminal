@@ -1,0 +1,38 @@
+{
+  "defaults": [
+    false,
+    false,
+    false,
+    false
+  ],
+  "tabBefore": "루프 1",
+  "tabAfter": "루프 1",
+  "errors": [],
+  "loopCalls": [
+    "configure",
+    "list",
+    "list",
+    "configure",
+    "configure",
+    "create",
+    "list",
+    "list",
+    "next",
+    "list",
+    "history",
+    "list",
+    "pause",
+    "list",
+    "move",
+    "list",
+    "list",
+    "stop",
+    "list",
+    "configure",
+    "create",
+    "list",
+    "list",
+    "stop",
+    "list"
+  ]
+}

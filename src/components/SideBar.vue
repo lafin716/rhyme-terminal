@@ -1,23 +1,34 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { t } from "../composables/useI18n";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Icon } from "@iconify/vue";
+import { useLoopRouting } from '../composables/useLoopRouting';
+import { loopNavigatorSessions, loopTabId, loopStatusLabel } from '../lib/loop-routing';
+import SessionProfileTag from "./SessionProfileTag.vue";
 import { useWorkspaces, workspaceDefaultCwd } from "../composables/useWorkspaces";
 import { useSessions } from "../composables/useSessions";
 import { useResources } from "../composables/useResources";
 import { useFocus } from "../composables/useFocus";
+import { useFlowPage } from "../composables/useFlowPage";
+import { useSettings } from "../composables/useSettings";
+import { useConfirm } from "../composables/useConfirm";
+import { displayName } from "../lib/session-names";
 import {
   collectAllSessionIds,
   addTabToLeaf,
   findFirstLeaf,
   activateSessionTab,
+  findLeafById,
 } from "../composables/useLayout";
-import { buildNavigatorTree } from "../lib/navigator";
+import { buildNavigatorTree, reorderSessionIds } from "../lib/navigator";
 import {
   bellIcon,
   folderIcon,
   plusIcon,
+  moreHorizontalIcon,
 } from "../lib/offline-icons";
 import { sessionAgentIcon } from "../lib/session-agent-icon";
+import { sessionIndicatorClass } from "../lib/session-indicator";
 
 const {
   state,
@@ -33,21 +44,34 @@ const {
   agentTaskStatus,
   createForWorkspace,
   kill,
+  rename,
 } = useSessions();
-const { setFocusedLeaf } = useFocus();
+const { confirm: confirmSessionDelete } = useConfirm();
+const { focusedLeafId, setFocusedLeaf } = useFocus();
+const loops = useLoopRouting();
+const { openSettings } = useSettings();
+const { openFlow } = useFlowPage();
 const resources = useResources();
 
 // Grouped Workspace -> Session tree the Navigator renders. Derivation and its
 // active/focused flags are unit-tested in `../lib/navigator`; this component
 // only renders the result and wires clicks back to focus/activation.
+const focusedLoopTab = computed(() => {
+  const ws = state.workspaces.find(ws => ws.id === state.activeWorkspaceId);
+  return ws && focusedLeafId.value ? findLeafById(ws.layout, focusedLeafId.value)?.activeTabId ?? null : null;
+});
 const tree = computed(() =>
   buildNavigatorTree({
     workspaces: state.workspaces,
-    sessions: sessState.sessions,
+    sessions: loopNavigatorSessions(sessState.sessions, loops.state.groups, state.workspaces),
     activeWorkspaceId: state.activeWorkspaceId,
-    focusedSessionId: focusedSession.value?.id ?? null,
+    focusedSessionId: focusedSession.value?.id ?? focusedLoopTab.value,
     activityById: activity,
-    agentStatusById: agentTaskStatus,
+    agentStatusById: {
+      ...agentTaskStatus,
+      ...Object.fromEntries(loops.state.groups.filter(group => group.runtime?.pid).map(group => [loopTabId(group.id),
+        (group.activeSessionId && agentTaskStatus[group.activeSessionId]) || 'working'])),
+    },
   }),
 );
 
@@ -55,7 +79,92 @@ const editingId = ref<string | null>(null);
 const editValue = ref("");
 const menuFor = ref<string | null>(null);
 const menuPos = ref({ x: 0, y: 0 });
+const menuKind = ref<"workspace" | "session">("workspace");
+const menuRef = ref<HTMLElement | null>(null);
+const editingSessionId = ref<string | null>(null);
+const sessionEditValue = ref("");
 
+async function startSessionRename(id: string) {
+  closeMenu();
+  const session = sessState.sessions.find(s => s.id === id);
+  const group = loops.getByTab(id);
+  if (!session && !group) return;
+  editingSessionId.value = id;
+  sessionEditValue.value = group?.name ?? displayName(session!.name);
+  await nextTick();
+  const input = document.querySelector<HTMLInputElement>(".session-rename-input");
+  input?.focus();
+  input?.select();
+}
+
+async function commitSessionRename() {
+  const id = editingSessionId.value;
+  const name = sessionEditValue.value.trim();
+  editingSessionId.value = null;
+  if (id && name) {
+    const group = loops.getByTab(id);
+    try {
+      if (group) await loops.rename(group.id, name);
+      else await rename(id, name);
+    } catch (error) { window.alert(String(error)); }
+  }
+}
+
+async function removeSession(id: string) {
+  const group = loops.getByTab(id);
+  if (group) {
+    closeMenu();
+    const ok = await confirmSessionDelete({ message: `루프 "${group.name}"을 중지하고 닫을까요?`, confirmLabel: t('Kill'), rememberKey: 'skipKillSessionConfirm' });
+    if (ok) await loops.close(group.id);
+    return;
+  }
+  closeMenu();
+  const session = sessState.sessions.find(s => s.id === id);
+  if (!session) return;
+  const ok = await confirmSessionDelete({
+    message: t('Kill session "{name}"?', { name: displayName(session.name) }),
+    confirmLabel: t("Kill"),
+    rememberKey: "skipKillSessionConfirm",
+  });
+  if (ok && sessState.sessions.some(s => s.id === id)) await kill(id);
+}
+
+const draggedSession = ref<{ workspaceId: string; sessionId: string } | null>(null);
+const sessionDrop = ref<{ workspaceId: string; sessionId: string; after: boolean } | null>(null);
+function endSessionDrag() {
+  draggedSession.value = null;
+  sessionDrop.value = null;
+}
+function startSessionDrag(ev: DragEvent, workspaceId: string, sessionId: string) {
+  if (!ev.dataTransfer) return;
+  ev.dataTransfer.effectAllowed = "move";
+  ev.dataTransfer.setData("text/plain", sessionId);
+  draggedSession.value = { workspaceId, sessionId };
+}
+function overSession(ev: DragEvent, workspaceId: string, sessionId: string) {
+  if (draggedSession.value?.workspaceId !== workspaceId) return;
+  ev.preventDefault();
+  if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+  sessionDrop.value = { workspaceId, sessionId, after: ev.clientY >= rect.top + rect.height / 2 };
+}
+function dropSession(ev: DragEvent, workspaceId: string, sessionId: string) {
+  overSession(ev, workspaceId, sessionId);
+  const source = draggedSession.value;
+  const target = sessionDrop.value;
+  const ws = state.workspaces.find(w => w.id === workspaceId);
+  const group = tree.value.find(w => w.id === workspaceId);
+  if (source?.workspaceId === workspaceId && target && ws && group) {
+    ev.preventDefault();
+    ws.sessionOrder = reorderSessionIds(group.sessions.map(s => s.id), source.sessionId, sessionId, target.after);
+  }
+  endSessionDrag();
+}
+function sessionDropClass(workspaceId: string, sessionId: string) {
+  const target = sessionDrop.value;
+  if (!target || target.workspaceId !== workspaceId || target.sessionId !== sessionId) return "";
+  return target.after ? "insert-after" : "insert-before";
+}
 function activate(id: string) {
   setActiveWorkspace(id);
   closeMenu();
@@ -81,6 +190,7 @@ function addWorkspace() {
 }
 
 async function addTerminal(workspaceId: string) {
+  closeMenu();
   const ws = state.workspaces.find((workspace) => workspace.id === workspaceId);
   if (!ws) return;
 
@@ -115,21 +225,27 @@ async function removeWorkspace(id: string) {
   if (state.workspaces.length <= 1) return;
   const ws = state.workspaces.find((w) => w.id === id);
   if (!ws) return;
-  const sessionIds = collectAllSessionIds(ws.layout);
+  const sessionIds = [...new Set([...collectAllSessionIds(ws.layout), ...loops.state.groups.filter(group => group.workspaceId === id && group.status !== 'stopped').map(group => loopTabId(group.id))])];
   if (sessionIds.length > 0) {
     const choice = confirm(
-      `Workspace "${ws.name}" has ${sessionIds.length} session(s).\n\nOK: move them to the previous workspace.\nCancel: kill them.`,
+      t('Workspace "{name}" has {count} session(s). OK: move them to the previous workspace. Cancel: kill them.', { name: ws.name, count: sessionIds.length }),
     );
     if (choice) {
       const idx = state.workspaces.findIndex((w) => w.id === id);
-      const target = state.workspaces[Math.max(0, idx - 1)] ?? state.workspaces[1];
+      const target = state.workspaces[idx > 0 ? idx - 1 : 1];
       if (target && target.id !== id) {
         const leaf = findFirstLeaf(target.layout);
-        for (const sid of sessionIds) addTabToLeaf(target.layout, leaf.id, sid);
+        for (const sid of sessionIds) {
+          const group = loops.getByTab(sid);
+          if (group) await loops.move(group.id, target.id, target.index);
+          addTabToLeaf(target.layout, leaf.id, sid);
+        }
       }
     } else {
       for (const sid of sessionIds) {
-        if (resources.getById(sid)) resources.forgetResource(sid);
+        const group = loops.getByTab(sid);
+        if (group) await loops.close(group.id);
+        else if (resources.getById(sid)) resources.forgetResource(sid);
         else await kill(sid);
       }
     }
@@ -137,22 +253,59 @@ async function removeWorkspace(id: string) {
   deleteWorkspace(id);
 }
 
-function openContextMenu(ev: MouseEvent, id: string) {
+async function openContextMenu(ev: MouseEvent, id: string, kind: "workspace" | "session" = "workspace", anchor = { x: ev.clientX, y: ev.clientY }) {
   ev.preventDefault();
+  ev.stopPropagation();
+  menuKind.value = kind;
   menuFor.value = id;
-  menuPos.value = { x: ev.clientX, y: ev.clientY };
+  menuPos.value = anchor;
+  await nextTick();
+  const rect = menuRef.value?.getBoundingClientRect();
+  if (rect) menuPos.value = {
+    x: Math.max(8, Math.min(anchor.x, window.innerWidth - rect.width - 8)),
+    y: Math.max(8, Math.min(anchor.y, window.innerHeight - rect.height - 8)),
+  };
+  menuRef.value?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
 }
 
 function closeMenu() {
   menuFor.value = null;
 }
 
+function openWorkspaceOptions(ev: MouseEvent, id: string) {
+  const rect = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+  void openContextMenu(ev, id, "workspace", { x: rect.left, y: rect.bottom + 4 });
+}
+
 const canDelete = computed(() => state.workspaces.length > 1);
+
+function onOutsidePointerDown(ev: PointerEvent) {
+  if (!menuRef.value?.contains(ev.target as Node)) closeMenu();
+}
+function onMenuKeydown(ev: KeyboardEvent) {
+  if (ev.key === "Escape") closeMenu();
+}
+onMounted(() => {
+  document.addEventListener("pointerdown", onOutsidePointerDown);
+  document.addEventListener("keydown", onMenuKeydown);
+  window.addEventListener("resize", closeMenu);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onOutsidePointerDown);
+  document.removeEventListener("keydown", onMenuKeydown);
+  window.removeEventListener("resize", closeMenu);
+});
 
 </script>
 
 <template>
   <aside class="sidebar" @click="closeMenu">
+    <header class="project-header">
+      <h2>Project</h2>
+      <button class="add" :title="t('Add project')" :aria-label="t('Add project')" @click.stop="addWorkspace">
+        <Icon class="ico" :icon="plusIcon" />
+      </button>
+    </header>
     <div class="ws-list">
       <div v-for="ws in tree" :key="ws.id" class="ws-group">
         <div
@@ -178,11 +331,28 @@ const canDelete = computed(() => state.workspaces.length > 1);
             <Icon class="ws-icon" :icon="folderIcon" />
             <span class="ws-name">{{ ws.name }}</span>
             <button
-              class="add-terminal"
-              :title="`${ws.name}에 터미널 추가`"
-              @click.stop="addTerminal(ws.id)"
+              class="open-flow"
+              :title="ws.name + ' - Rhyme Flow'"
+              :aria-label="ws.name + ' - Rhyme Flow'"
+              @click.stop="openFlow(ws.id)"
+              @dblclick.stop
             >
-              <Icon :icon="plusIcon" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <rect x="3" y="3" width="6" height="6" rx="1.5" />
+                <rect x="15" y="15" width="6" height="6" rx="1.5" />
+                <path d="M6 9v6a3 3 0 0 0 3 3h6M9 6h6a3 3 0 0 1 3 3v6" />
+              </svg>
+            </button>
+            <button
+              class="workspace-options"
+              :title="t('Project options')"
+              :aria-label="ws.name + ' - ' + t('Project options')"
+              aria-haspopup="menu"
+              :aria-expanded="menuFor === ws.id && menuKind === 'workspace'"
+              @click.stop="openWorkspaceOptions($event, ws.id)"
+              @dblclick.stop
+            >
+              <Icon :icon="moreHorizontalIcon" />
             </button>
           </template>
         </div>
@@ -190,57 +360,93 @@ const canDelete = computed(() => state.workspaces.length > 1);
           <div
             v-for="s in ws.sessions"
             :key="s.id"
-            :class="['session', { focused: s.isFocusedSession }]"
+            :class="['session', sessionDropClass(ws.id, s.id), { focused: s.isFocusedSession }]"
             :title="s.displayName"
+            :draggable="editingSessionId !== s.id"
+            @dragstart="startSessionDrag($event, ws.id, s.id)"
+            @dragend="endSessionDrag"
+            @dragover.stop="overSession($event, ws.id, s.id)"
+            @dragleave="sessionDrop = null"
+            @drop.stop="dropSession($event, ws.id, s.id)"
             @click.stop="focusSession(ws.id, s.id)"
+            @contextmenu="openContextMenu($event, s.id, 'session')"
           >
             <span
-              v-if="s.agent !== 'terminal' && s.agentStatus"
-              :class="['agent-status', `is-${s.agentStatus}`]"
-              :title="s.agentStatus"
+              :class="['agent-status', sessionIndicatorClass(s.agentStatus)]"
+              :title="t(s.agentStatus ?? 'ready')"
             />
             <Icon
               :class="['s-ico', `agent-${s.agent}`]"
               :icon="sessionAgentIcon(s.agent)"
             />
-            <span class="s-name">{{ s.displayName }}</span>
+            <span v-if="loops.getByTab(s.id)" class="loop-profile">↻ {{ loops.getByTab(s.id)!.attempts.slice(-1)[0]?.label }}</span>
+            <SessionProfileTag v-else :session-id="s.id" />
+            <input
+              v-if="editingSessionId === s.id"
+              v-model="sessionEditValue"
+              maxlength="256"
+              class="session-rename-input"
+              :aria-label="t('Rename')"
+              @blur="commitSessionRename"
+              @keydown.enter.prevent.stop="!$event.isComposing && commitSessionRename()"
+              @keydown.escape.prevent.stop="editingSessionId = null"
+              @keydown.stop
+              @click.stop
+              @contextmenu.stop
+            />
+            <span v-else class="s-name">{{ s.displayName }}<small v-if="loops.getByTab(s.id)" class="loop-state"> · {{ loopStatusLabel(loops.getByTab(s.id)!.status) }}</small></span>
             <Icon
               v-if="s.hasBell"
               class="s-badge bell"
               :icon="bellIcon"
-              title="Rang the bell"
+              :title="t('Rang the bell')"
             />
             <span
               v-else-if="s.hasActivity"
               class="s-badge dot"
-              title="New output"
+              :title="t('New output')"
             />
           </div>
         </div>
       </div>
     </div>
-    <button class="add" title="New workspace" @click.stop="addWorkspace">
-      <Icon class="ico" :icon="plusIcon" />
-    </button>
+    <div class="sidebar-footer">
+      <div class="footer-left">
+        <button class="settings-button" :title="t('Settings')" @click="openSettings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 1 3h4l1-3 3-1 2-3-2-2 1-3-3-2-1-3Z" />
+            <circle cx="10.5" cy="11.5" r="3" />
+          </svg>
+          <span>{{ t('Settings') }}</span>
+        </button>
+      </div>
+      <div class="footer-right" />
+    </div>
     <div
       v-if="menuFor"
+      ref="menuRef"
       class="menu"
+      role="menu"
       :style="{ left: menuPos.x + 'px', top: menuPos.y + 'px' }"
       @click.stop
     >
-      <div class="menu-item" @click="startRename(menuFor)">Rename</div>
-      <div
+      <button v-if="menuKind === 'workspace'" class="menu-item" role="menuitem" @click="addTerminal(menuFor)">{{ t("New terminal") }}</button>
+      <button class="menu-item" role="menuitem" @click="menuKind === 'session' ? startSessionRename(menuFor) : startRename(menuFor)">{{ t("Rename") }}</button>
+      <button
         class="menu-item"
-        :class="{ disabled: !canDelete }"
-        @click="canDelete && removeWorkspace(menuFor)"
-      >
-        Delete
-      </div>
+        role="menuitem"
+        :disabled="menuKind === 'workspace' && !canDelete"
+        @click="menuKind === 'session' ? removeSession(menuFor) : removeWorkspace(menuFor)"
+      >{{ t("Delete") }}</button>
     </div>
   </aside>
 </template>
 
 <style scoped>
+.loop-profile { color: var(--accent); font-size: 10px; white-space: nowrap; }
+.loop-state { color: #aaa; font-size: 10px; }
+.session.insert-before { box-shadow: inset 0 2px var(--accent); }
+.session.insert-after { box-shadow: inset 0 -2px var(--accent); }
 .sidebar {
   position: relative;
   width: 100%;
@@ -264,6 +470,43 @@ const canDelete = computed(() => state.workspaces.length > 1);
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  min-height: 40px;
+  padding-top: 6px;
+  border-top: 1px solid #333;
+}
+.footer-left,
+.footer-right {
+  display: flex;
+  align-items: center;
+}
+.settings-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #b8b8b8;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.settings-button:hover {
+  background: #333;
+  color: #e6e6e6;
+}
+.settings-button:focus-visible,
+.add:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 .ws-group {
   display: flex;
@@ -289,7 +532,7 @@ const canDelete = computed(() => state.workspaces.length > 1);
 .ws:hover { background: #333; }
 .ws.active {
   background: #1e1e1e;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .ws .bar {
   position: absolute;
@@ -300,30 +543,48 @@ const canDelete = computed(() => state.workspaces.length > 1);
   border-radius: 2px;
   background: transparent;
 }
-.ws.active .bar { background: #4ec9b0; }
+.ws.active .bar { background: var(--accent); }
 input {
   background: #1e1e1e;
   color: #e6e6e6;
-  border: 1px solid #4ec9b0;
+  border: 1px solid var(--accent);
   width: 100%;
   text-align: left;
   font: inherit;
   padding: 0;
 }
+.project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.project-header h2 {
+  margin: 0;
+  color: #b8b8b8;
+  font-size: 12px;
+  font-weight: 600;
+}
 .add {
-  width: 100%;
-  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   background: transparent;
-  border: 1px dashed #444;
-  border-radius: 8px;
-  color: #888;
-  font-size: 18px;
+  border: 0;
+  border-radius: 4px;
+  color: #9a9a9a;
+  font-size: 16px;
   cursor: pointer;
   flex-shrink: 0;
 }
 .add:hover {
   color: #e6e6e6;
-  border-color: #4ec9b0;
+  background: #3a3a3a;
 }
 .ws-name {
   display: inline;
@@ -341,7 +602,8 @@ input {
   font-size: 15px;
   opacity: 0.85;
 }
-.add-terminal {
+.open-flow,
+.workspace-options {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -355,11 +617,13 @@ input {
   cursor: pointer;
   flex-shrink: 0;
 }
-.add-terminal:hover {
+.open-flow:hover,
+.workspace-options:hover {
   background: #3a3a3a;
   color: #e6e6e6;
 }
-.add-terminal :deep(svg) {
+.open-flow:focus-visible, .workspace-options:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.workspace-options :deep(svg) {
   font-size: 16px;
 }
 .sessions {
@@ -385,7 +649,7 @@ input {
 }
 .session.focused {
   background: #223532;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .session .s-ico {
   flex-shrink: 0;
@@ -404,12 +668,13 @@ input {
   height: 7px;
   flex-shrink: 0;
   border-radius: 50%;
+  background: #22c55e;
 }
 .agent-status.is-working {
   background: #e2b341;
   animation: agent-working 900ms ease-in-out infinite alternate;
 }
-.agent-status.is-completed { background: #4ec9b0; }
+.agent-status.is-completed { background: #22c55e; }
 .agent-status.is-error { background: #e06c75; }
 @keyframes agent-working {
   from { opacity: 0.35; transform: scale(0.8); }
@@ -433,7 +698,7 @@ input {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #4ec9b0;
+  background: var(--accent);
 }
 /* The focused Session is cleared upstream, but guard against a residual badge. */
 .session.focused .s-badge {
@@ -450,14 +715,32 @@ input {
   font-size: 12px;
 }
 .menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font: inherit;
   padding: 6px 12px;
   color: #d4d4d4;
   cursor: pointer;
 }
 .menu-item:hover { background: #2e2e2e; }
-.menu-item.disabled {
+.menu-item:disabled {
   color: #555;
   cursor: not-allowed;
 }
-.menu-item.disabled:hover { background: transparent; }
+.menu-item:disabled:hover { background: transparent; }
+.session-rename-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: #1e1e1e;
+  color: inherit;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 2px 4px;
+  font: inherit;
+  outline: none;
+}
 </style>

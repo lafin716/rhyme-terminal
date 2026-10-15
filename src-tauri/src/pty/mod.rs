@@ -1,14 +1,16 @@
 pub mod activity;
 pub mod agent;
 pub mod agent_status;
+mod claude_title;
 pub mod manager;
+pub mod runtime_monitor;
 
 use anyhow::{anyhow, Result};
 use base64::Engine;
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -66,7 +68,8 @@ pub struct Session {
     pub scrollback: Arc<Mutex<VecDeque<u8>>>,
     pub agent_kind: Arc<Mutex<AgentKind>>,
     pub task_tracker: Arc<Mutex<AgentTaskTracker>>,
-    shell_pid: u32,
+    pub(crate) shell_pid: u32,
+    pub(crate) exited: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub fn spawn_session(
@@ -75,6 +78,7 @@ pub fn spawn_session(
     shell: String,
     shell_args: Vec<String>,
     cwd: Option<String>,
+    env: Option<HashMap<String, String>>,
     cols: u16,
     rows: u16,
 ) -> Result<Session> {
@@ -94,10 +98,41 @@ pub fn spawn_session(
         .filter(|s| !s.is_empty())
         .map(Path::new)
         .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok());
+        .or_else(|| {
+            if cfg!(unix) {
+                crate::platform::home_dir()
+            } else {
+                std::env::current_dir().ok()
+            }
+        });
 
     let mut cmd = CommandBuilder::new(&shell);
     cmd.args(shell_args);
+    if env
+        .as_ref()
+        .is_some_and(|values| values.contains_key("RHYME_LOOP_ATTEMPT_DIR"))
+    {
+        // Only managed launches remove inherited provider identity. The chosen
+        // profile's explicit values are reapplied below; ordinary PTYs are unchanged.
+        for key in [
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "CODEX_API_KEY",
+        ] {
+            cmd.env_remove(key);
+        }
+    }
+    if let Some(env) = env.as_ref() {
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+    }
     if let Some(cwd) = effective_cwd.as_deref() {
         if !cwd.is_dir() {
             return Err(anyhow!(
@@ -130,7 +165,24 @@ pub fn spawn_session(
     let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
     let agent_kind = Arc::new(Mutex::new(AgentKind::Terminal));
     let task_tracker = Arc::new(Mutex::new(AgentTaskTracker::new()));
+    let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let exited_clone = exited.clone();
 
+    // ConPTY output can stay open while the master is retained. Observe the
+    // native process independently so managed routing never waits for EOF in
+    // order to decide whether it is safe to release that very master.
+    let (exit_tx, exit_rx) = std::sync::mpsc::channel();
+    thread::Builder::new()
+        .name(format!("pty-wait-{id}"))
+        .spawn(move || {
+            let waited = child.wait();
+            exited_clone.store(waited.is_ok(), std::sync::atomic::Ordering::Release);
+            let status = waited
+                .ok()
+                .and_then(|status| i32::try_from(status.exit_code()).ok());
+            let _ = exit_tx.send(status);
+        })
+        .map_err(|e| anyhow!("failed to spawn child waiter: {e}"))?;
     let scrollback_clone = scrollback.clone();
     let agent_kind_clone = agent_kind.clone();
     let task_tracker_clone = task_tracker.clone();
@@ -155,26 +207,25 @@ pub fn spawn_session(
                             while sb.len() > SCROLLBACK_BYTES {
                                 sb.pop_front();
                             }
+                            // Atomic attach subscribes and snapshots under this same lock.
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                            let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
                         }
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                        let _ = events_clone.send(Event::PtyOutput { id, data: encoded });
                         let _ = events_clone.send(Event::SessionActivity { id, bell: sig.bell });
                         let agent = *agent_kind_clone.lock();
-                        if let Some(status) = task_tracker_clone.lock().observe(agent, AgentTaskEvent::Output(chunk)) {
-                            let _ = events_clone.send(Event::SessionAgentStatusChanged { id, status });
+                        if let Some(status) = task_tracker_clone
+                            .lock()
+                            .observe(agent, AgentTaskEvent::Output(chunk))
+                        {
+                            let _ =
+                                events_clone.send(Event::SessionAgentStatusChanged { id, status });
                         }
                     }
                     Err(_) => break,
                 }
             }
-            let status = child.wait().ok().and_then(|s| {
-                let code = s.exit_code();
-                if code > i32::MAX as u32 {
-                    None
-                } else {
-                    Some(code as i32)
-                }
-            });
+            let status = exit_rx.recv().unwrap_or(None);
+
             let _ = events_clone.send(Event::PtyExit { id, status });
         })
         .map_err(|e| anyhow!("failed to spawn reader thread: {e}"))?;
@@ -197,6 +248,7 @@ pub fn spawn_session(
         agent_kind,
         task_tracker,
         shell_pid,
+        exited,
     })
 }
 

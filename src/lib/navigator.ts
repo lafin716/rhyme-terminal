@@ -38,7 +38,7 @@ export interface NavigatorWorkspaceNode {
 }
 
 export interface NavigatorInput {
-  workspaces: Pick<Workspace, "id" | "name" | "icon" | "index">[];
+  workspaces: Pick<Workspace, "id" | "name" | "icon" | "index" | "sessionOrder">[];
   sessions: Pick<SessionInfo, "id" | "name" | "agent">[];
   activeWorkspaceId: string | null;
   focusedSessionId: string | null;
@@ -84,6 +84,17 @@ export function buildNavigatorTree(input: NavigatorInput): NavigatorWorkspaceNod
     icon: ws.icon,
     index: ws.index,
     isActiveWorkspace: ws.id === activeWorkspaceId,
-    sessions: byIndex.get(ws.index) ?? [],
+    sessions: orderNavigatorSessions(byIndex.get(ws.index) ?? [], ws.sessionOrder),
   }));
+}
+
+export function orderNavigatorSessions<T extends { id: string }>(sessions: T[], order: string[] = []): T[] {
+  const rank = new Map(order.map((id, index) => [id, index]));
+  return [...sessions].sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+}
+export function reorderSessionIds(ids: string[], source: string, target: string, after: boolean): string[] {
+  if (source === target || !ids.includes(source) || !ids.includes(target)) return [...ids];
+  const result = ids.filter(id => id !== source);
+  result.splice(result.indexOf(target) + Number(after), 0, source);
+  return result;
 }

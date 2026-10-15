@@ -1,0 +1,6 @@
+{
+    "identifier":  "com.user.winmux.loop-smoke-ddf2379a6f8a",
+    "build":  {
+                  "beforeBuildCommand":  null
+              }
+}

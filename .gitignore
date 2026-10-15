@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-mobile
 dist-ssr
 *.local
 
@@ -22,3 +23,36 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+target-agent-detection/
+target-agent-state-events/
+target-mobile/
+
+# Local signing material (never publish in the public repository)
+*.jks
+*.keystore
+*.p12
+*.pfx
+src-tauri/gen/android/keystore.properties
+src-tauri/gen/android/local.properties
+
+# Local CI validation tools and collected build output
+.scratch/ci-cd/
+artifacts/
+
+# Throwaway sandboxes the QA scripts create next to their reports:
+# headless Chrome user-data dirs and native-run HOME/config trees.
+.scratch/**/chrome-*/
+.scratch/**/native-*/
+
+# Binaries and databases a QA run copies aside to reproduce a fix. The
+# scripts and reports next to them are worth keeping; a 200 MB pdb is not.
+.scratch/**/*.exe
+.scratch/**/*.pdb
+.scratch/**/*.dll
+.scratch/**/*.d
+.scratch/**/*.sqlite3
+.scratch/**/*.sqlite3-shm
+.scratch/**/*.sqlite3-wal
+
+dist-android/

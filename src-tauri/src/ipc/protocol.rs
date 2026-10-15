@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,6 +16,14 @@ pub struct Request {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Method {
+    LoopRequest {
+        request: serde_json::Value,
+    },
+    AccountUsage {
+        agent: String,
+        dir: std::path::PathBuf,
+        session_usage: bool,
+    },
     CreateSession {
         name: Option<String>,
         shell: Option<String>,
@@ -21,6 +31,11 @@ pub enum Method {
         shell_args: Vec<String>,
         #[serde(default)]
         cwd: Option<String>,
+        /// Extra environment variables merged into the spawned shell's
+        /// environment, e.g. `CLAUDE_CONFIG_DIR`/`CODEX_HOME` overrides for a
+        /// selected account profile (see `commands::resolve_account_dir`).
+        #[serde(default)]
+        env: Option<HashMap<String, String>>,
         cols: u16,
         rows: u16,
     },
@@ -38,6 +53,10 @@ pub enum Method {
         rows: u16,
     },
     AttachSession {
+        id: Uuid,
+    },
+    /// Snapshot/live barrier for a dedicated mobile connection.
+    AttachSessionAtomic {
         id: Uuid,
     },
     DetachSession {
@@ -98,7 +117,12 @@ mod tests {
         .expect("request should deserialize");
 
         match request.method {
-            Method::CreateSession { shell_args, .. } => assert!(shell_args.is_empty()),
+            Method::CreateSession {
+                shell_args, env, ..
+            } => {
+                assert!(shell_args.is_empty());
+                assert!(env.is_none());
+            }
             _ => panic!("unexpected method"),
         }
     }
@@ -112,12 +136,51 @@ mod tests {
                 shell: Some("wsl.exe".to_string()),
                 shell_args: vec!["-d".to_string(), "Ubuntu".to_string()],
                 cwd: None,
+                env: None,
                 cols: 120,
                 rows: 30,
             },
         };
         let value = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(value["shell_args"], serde_json::json!(["-d", "Ubuntu"]));
+    }
+
+    #[test]
+    fn create_session_preserves_env_overrides() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            r"C:\accounts\claude\work".to_string(),
+        );
+        let request = Request {
+            id: 1,
+            method: Method::CreateSession {
+                name: None,
+                shell: Some("powershell.exe".to_string()),
+                shell_args: vec![],
+                cwd: None,
+                env: Some(env),
+                cols: 120,
+                rows: 30,
+            },
+        };
+        let value = serde_json::to_value(&request).expect("request should serialize");
+        assert_eq!(
+            value["env"]["CLAUDE_CONFIG_DIR"],
+            serde_json::json!(r"C:\accounts\claude\work")
+        );
+
+        let round_tripped: Request =
+            serde_json::from_value(value).expect("request should round-trip");
+        match round_tripped.method {
+            Method::CreateSession { env, .. } => {
+                assert_eq!(
+                    env.unwrap().get("CLAUDE_CONFIG_DIR").map(String::as_str),
+                    Some(r"C:\accounts\claude\work")
+                );
+            }
+            _ => panic!("unexpected method"),
+        }
     }
 
     #[test]

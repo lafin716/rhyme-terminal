@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { t } from "../composables/useI18n";
+import appIcon from "../../src-tauri/icons/32x32.png";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Icon } from "@iconify/vue";
 import { useKeybindings } from "../composables/useKeybindings";
@@ -14,7 +16,6 @@ import {
   chevronRightIcon,
   moreHorizontalIcon,
   panelLeftIcon,
-  panelRightIcon,
 } from "../lib/offline-icons";
 
 type MenuItem =
@@ -28,6 +29,8 @@ interface MenuDef {
   items: MenuItem[];
 }
 
+const props = withDefaults(defineProps<{ hideActions?: boolean }>(), { hideActions: false });
+watch(() => props.hideActions, (hidden) => { if (hidden) closeMenu(); });
 const { bindingFor, prefixFor } = useKeybindings();
 const { openSettings } = useSettings();
 const { panels, toggleLeft, toggleRight } = useShellPanels();
@@ -38,10 +41,7 @@ const activeGroupId = ref<string | null>(null);
 const rootRef = ref<HTMLDivElement | null>(null);
 
 const leftToggleTitle = computed(
-  () => `Toggle Left Panel  (${formatKeybinding(bindingFor("view.toggleLeftPanel"))})`,
-);
-const rightToggleTitle = computed(
-  () => `Toggle Right Panel  (${formatKeybinding(bindingFor("view.toggleRightPanel"))})`,
+  () => t("Toggle Left Panel ({shortcut})", { shortcut: formatKeybinding(bindingFor("view.toggleLeftPanel")) }),
 );
 
 async function quitApp() {
@@ -56,53 +56,53 @@ async function quitApp() {
 const menuGroups = computed<MenuDef[]>(() => groupMenuItems<MenuItem>([
   {
     id: "file",
-    label: "File",
+    label: t("File"),
     items: [
-      { kind: "action", label: "New Terminal", actionId: "session.new" },
+      { kind: "action", label: t("New Terminal"), actionId: "session.new" },
       { kind: "separator" },
-      { kind: "cmd", label: "Quit", run: quitApp },
+      { kind: "cmd", label: t("Quit"), run: quitApp },
     ],
   },
   {
     id: "edit",
-    label: "Edit",
+    label: t("Edit"),
     items: [
-      { kind: "action", label: "Rename Session", actionId: "session.rename" },
+      { kind: "action", label: t("Rename Session"), actionId: "session.rename" },
     ],
   },
   {
     id: "view",
-    label: "View",
+    label: t("View"),
     items: [
-      { kind: "cmd", label: "Reload", run: () => location.reload() },
+      { kind: "cmd", label: t("Reload"), run: () => location.reload() },
     ],
   },
   {
     id: "terminal",
-    label: "Terminal",
+    label: t("Terminal"),
     items: [
-      { kind: "action", label: "New Terminal", actionId: "session.new" },
-      { kind: "action", label: "Kill Focused", actionId: "session.kill" },
+      { kind: "action", label: t("New Terminal"), actionId: "session.new" },
+      { kind: "action", label: t("Kill Focused"), actionId: "session.kill" },
       { kind: "separator" },
-      { kind: "action", label: "Split Horizontally", actionId: "pane.splitHorizontal" },
-      { kind: "action", label: "Split Vertically", actionId: "pane.splitVertical" },
+      { kind: "action", label: t("Split Horizontally"), actionId: "pane.splitHorizontal" },
+      { kind: "action", label: t("Split Vertically"), actionId: "pane.splitVertical" },
       { kind: "separator" },
-      { kind: "action", label: "Next Tab", actionId: "session.cycleNext" },
-      { kind: "action", label: "Previous Tab", actionId: "session.cyclePrev" },
+      { kind: "action", label: t("Next Tab"), actionId: "session.cycleNext" },
+      { kind: "action", label: t("Previous Tab"), actionId: "session.cyclePrev" },
     ],
   },
   {
     id: "settings",
-    label: "Settings",
+    label: t("Settings"),
     items: [
-      { kind: "action", label: "Preferences...", actionId: "settings.open" },
+      { kind: "action", label: t("Preferences..."), actionId: "settings.open" },
     ],
   },
   {
     id: "help",
-    label: "Help",
+    label: t("Help"),
     items: [
-      { kind: "cmd", label: "About winmux", run: () => alert("winmux — terminal multiplexer") },
+      { kind: "cmd", label: t("About rhyme-terminal"), run: () => alert(t("rhyme-terminal — terminal multiplexer")) },
     ],
   },
 ]));
@@ -138,7 +138,7 @@ function runItem(item: MenuItem) {
 
 function shortcutLabel(item: MenuItem): string {
   if (item.kind === "action") {
-    return formatKeybinding(bindingFor(item.actionId), prefixFor(item.actionId));
+    return formatKeybinding(bindingFor(item.actionId), prefixFor(item.actionId), bindingFor("prefix.activate"));
   }
   if (item.kind === "cmd" && item.shortcut) return item.shortcut;
   return "";
@@ -167,14 +167,15 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="rootRef" class="menubar">
-    <div class="overflow-menu">
+  <div ref="rootRef" class="menubar" data-tauri-drag-region>
+    <div class="app-icon" data-tauri-drag-region><img :src="appIcon" alt="rhyme-terminal" data-tauri-drag-region draggable="false" /></div>
+    <div v-if="!hideActions" class="overflow-menu">
       <button
         class="corner-toggle"
         :class="{ active: isOverflowMenuOpen }"
-        title="Application menu"
+        :title="t('Application menu')"
         type="button"
-        aria-label="Application menu"
+        :aria-label="t('Application menu')"
         aria-haspopup="menu"
         :aria-expanded="isOverflowMenuOpen"
         @click.stop="toggleOverflowMenu"
@@ -221,10 +222,14 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+    <div class="spacer" data-tauri-drag-region />
     <button
+      v-if="!hideActions"
       class="corner-toggle"
       :class="{ active: panels.left.open }"
       :title="leftToggleTitle"
+      :aria-label="leftToggleTitle"
+      :aria-expanded="panels.left.open"
       type="button"
       @click="toggleLeft"
     >
@@ -255,15 +260,17 @@ onUnmounted(() => {
 .menubar {
   display: flex;
   align-items: stretch;
-  height: 28px;
+  height: var(--titlebar-height);
   background: #252525;
   border-bottom: 1px solid #111;
   user-select: none;
   font-size: 12px;
   flex-shrink: 0;
-  position: relative;
   z-index: 50;
 }
+.app-icon { width: 34px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+.app-icon img { width: 24px; height: 24px; }
+.corner-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
 .overflow-menu {
   position: relative;
   display: flex;

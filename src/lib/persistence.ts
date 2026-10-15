@@ -2,11 +2,14 @@ import type { LayoutNode, TerminalTabSnapshot, WorkspaceStore } from "./layout-t
 import type { Keybinding } from "./keybindings";
 import type { TerminalConfig } from "./terminal-config";
 import type { ShellPanelsState } from "./shell-panels";
+import type { Locale } from "./i18n";
+import type { AccentThemeId } from "./theme";
 
 const STORAGE_KEY = "winmux:workspaces:v1";
 const KEYBINDINGS_KEY = "winmux:keybindings:v1";
 const PREFS_KEY = "winmux:prefs:v1";
 const PALETTE_KEY = "winmux:palette:v1";
+const ACCOUNTS_KEY = "winmux:accounts:v1";
 
 interface Persisted {
   version: 1;
@@ -21,10 +24,25 @@ interface PersistedKeybindings {
 export type PaletteUiMode = "context" | "radial";
 
 export interface Prefs {
+  sessionMenuOrder?: string[];
+  language: Locale;
+  /** Main color the whole shell is tinted with — see `lib/theme.ts`. */
+  accentTheme: AccentThemeId;
+  showAccountProfile: boolean;
   skipKillSessionConfirm: boolean;
   defaultTerminal: TerminalConfig;
   paletteUiMode: PaletteUiMode;
   panels: ShellPanelsState;
+  /**
+   * Per-agent account profile used as that agent's default login — e.g. by
+   * the "Launch Claude" quick action when no profile is picked explicitly.
+   * `null` means the system account (no `CLAUDE_CONFIG_DIR`/`CODEX_HOME`
+   * override) — see `useAccountProfiles.ts` and `resolveDefaultProfile` in
+   * `default-profile.ts`.
+   */
+  defaultProfileId: Record<CliAgentKind, string | null>;
+  toolbarProfileId?: Partial<Record<CliAgentKind, string | null>>;
+  systemAccountEnv?: Partial<Record<CliAgentKind, Record<string, string>>>;
 }
 
 /**
@@ -92,6 +110,8 @@ function terminalSnapshotsForLayout(
   for (const [id, snapshot] of Object.entries(snapshots)) {
     if (!ids.has(id)) continue;
     out[id] = {
+      agent: snapshot.agent,
+      accountProfile: snapshot.accountProfile,
       name: snapshot.name,
       cwd: snapshot.cwd ?? null,
       terminal: {
@@ -203,5 +223,61 @@ export function savePaletteItems(items: PaletteItem[]): void {
     localStorage.setItem(PALETTE_KEY, JSON.stringify(payload));
   } catch (e) {
     console.warn("savePaletteItems failed", e);
+  }
+}
+
+/** A CLI tool that supports isolated multi-account login via an env var override. */
+export type CliAgentKind = "claude" | "codex";
+
+/**
+ * How a profile's login was registered. `"oauth"` (the default) opens a
+ * floating terminal to complete an interactive browser login; `"setup-token"`
+ * (Claude only) links an already-issued `claude setup-token` value instead,
+ * stored separately on disk — see `resolveProfileEnv` in
+ * `useAccountProfiles.ts`. Optional so profiles saved before this field
+ * existed are treated as `"oauth"`.
+ */
+export type AccountAuthMethod = "oauth" | "setup-token" | "environment";
+
+/**
+ * One saved login for a CLI agent: `configDir` is an isolated directory
+ * (created on demand via the `resolve_account_dir` Tauri command) handed to
+ * the agent as `CLAUDE_CONFIG_DIR`/`CODEX_HOME` so its login/session state
+ * never mixes with another profile's. See `useAccountProfiles.ts`.
+ */
+export interface AccountProfile {
+  id: string;
+  agent: CliAgentKind;
+  label: string;
+  configDir: string;
+  createdAt: number;
+  authMethod?: AccountAuthMethod;
+  env?: Record<string, string>;
+}
+
+interface PersistedAccounts {
+  version: 1;
+  items: AccountProfile[];
+}
+
+export function loadAccountProfiles(): AccountProfile[] | null {
+  try {
+    const raw = localStorage.getItem(ACCOUNTS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PersistedAccounts;
+    if (parsed.version !== 1 || !Array.isArray(parsed.items)) return null;
+    return parsed.items;
+  } catch (e) {
+    console.warn("loadAccountProfiles failed", e);
+    return null;
+  }
+}
+
+export function saveAccountProfiles(items: AccountProfile[]): void {
+  try {
+    const payload: PersistedAccounts = { version: 1, items };
+    localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.warn("saveAccountProfiles failed", e);
   }
 }

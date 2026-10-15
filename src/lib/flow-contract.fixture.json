@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "flow_id": "contract-fixture",
+  "revision": 0,
+  "name": "Contract fixture",
+  "inputs": {"type": "object"},
+  "outputs": {},
+  "nodes": [
+    {"id": "source", "kind": "command", "config": {"program": "powershell.exe", "args": ["-NoProfile", "-Command", "Write-Output 'fixture'"]}, "input_bindings": {}, "execution_policy": {"timeout_secs": 30}},
+    {"id": "result", "kind": "output", "config": {}, "input_bindings": {"text": {"source": "source", "path": "/stdout"}}, "execution_policy": {"timeout_secs": 30}}
+  ],
+  "edges": [{"id": "edge", "source": "source", "target": "result", "source_port": "success", "target_port": "input"}],
+  "policies": {"concurrency": 2, "timeout_secs": 300, "capabilities": ["command"]},
+  "layout": {"source": {"x": 40.0, "y": 40.0}, "result": {"x": 300.0, "y": 40.0}}
+}

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Icon, type IconifyIcon } from "@iconify/vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -22,10 +23,10 @@ interface PaletteAction {
 }
 
 const allItems = computed<PaletteAction[]>(() => [
-  { id: "__open_folder", label: "Open Folder", icon: folderOpenIcon, builtin: true },
+  { id: "__open_folder", label: t("Open Folder"), icon: folderOpenIcon, builtin: true },
   ...items.map((item) => ({
     id: item.id,
-    label: item.label || "(unnamed)",
+    label: item.label || t("(unnamed)"),
     icon: terminalIcon,
     builtin: false,
   })),
@@ -52,7 +53,7 @@ async function activate(item: PaletteAction) {
   if (!sid) return;
 
   if (item.builtin && item.id === "__open_folder") {
-    let selected: string | string[] | null = null;
+    let selected: string | string[] | null;
     try {
       selected = await openDialog({ directory: true, multiple: false });
     } catch (e) {
@@ -203,7 +204,7 @@ onBeforeUnmount(() => {
     class="context-menu"
     :style="{ left: menuPosition.left + 'px', top: menuPosition.top + 'px' }"
     role="menu"
-    aria-label="Terminal palette"
+    :aria-label="t('Terminal palette')"
   >
     <template v-for="(item, index) in allItems" :key="item.id">
       <div v-if="index === 1" class="context-separator" role="separator" />
@@ -279,7 +280,7 @@ onBeforeUnmount(() => {
 }
 .context-icon {
   flex: 0 0 16px;
-  color: #4ec9b0;
+  color: var(--accent);
   font-size: 16px;
 }
 .context-label {
@@ -310,7 +311,7 @@ onBeforeUnmount(() => {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #4ec9b0;
+  background: var(--accent);
   left: -5px;
   top: -5px;
   opacity: 0.7;
@@ -335,12 +336,12 @@ onBeforeUnmount(() => {
 }
 .radial-item:hover {
   background: #2e2e2e;
-  border-color: #4ec9b0;
+  border-color: var(--accent);
   transform: scale(1.05);
 }
 .radial-item .ico {
   font-size: 20px;
-  color: #4ec9b0;
+  color: var(--accent);
 }
 .radial-item .lbl {
   font-size: 9px;

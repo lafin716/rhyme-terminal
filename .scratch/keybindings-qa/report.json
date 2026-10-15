@@ -1,0 +1,15 @@
+{
+  "rows": 60,
+  "keyboardRemap": true,
+  "wheelRemap": true,
+  "prefixRemap": true,
+  "globalFunctionKey": true,
+  "persistence": true,
+  "clear": true,
+  "reset": true,
+  "captureEscape": true,
+  "responsive": true,
+  "clipboard": true,
+  "fileSave": true,
+  "errors": []
+}

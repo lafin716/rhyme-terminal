@@ -1,4 +1,6 @@
+import { t } from "./useI18n";
 import { reactive } from "vue";
+import { save as chooseSavePath } from "@tauri-apps/plugin-dialog";
 import { api, type FilePreview } from "../lib/tauri";
 import { nodeId } from "../lib/layout-types";
 import { useWorkspaces } from "./useWorkspaces";
@@ -17,6 +19,10 @@ export interface FileTab {
   preview: FilePreview;
   /** True while the editor holds unsaved changes; drives the tab dirty dot. */
   dirty?: boolean;
+  draftText?: string;
+  untitled?: boolean;
+  projectPath?: string;
+  saving?: boolean;
 }
 
 export interface BrowserTab {
@@ -32,11 +38,14 @@ const state = reactive({
   tabs: {} as Record<string, ResourceTab>,
 });
 
+/** Start page for a browser tab opened without an address of its own. */
+const NEW_BROWSER_URL = "https://www.google.com/";
+
 function normalizeUrl(raw: string): string {
   const trimmed = raw.trim();
   const url = new URL(trimmed);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Only HTTP and HTTPS URLs can be opened inside winmux.");
+    throw new Error(t("Only HTTP and HTTPS URLs can be opened inside rhyme-terminal."));
   }
   url.hash = url.hash;
   return url.toString();
@@ -100,6 +109,19 @@ export function useResources() {
   async function openBrowser(rawUrl: string): Promise<void> {
     const url = normalizeUrl(rawUrl);
     if (activateExisting((tab) => tab.kind === "browser" && tab.url === url)) return;
+    spawnBrowserTab(url);
+  }
+
+  /**
+   * Opens a browser tab from the session tab options menu. Unlike
+   * {@link openBrowser} it never reuses an existing tab: every click asks for
+   * one more browser to type an address into.
+   */
+  function openNewBrowser(): void {
+    spawnBrowserTab(NEW_BROWSER_URL);
+  }
+
+  function spawnBrowserTab(url: string): void {
     const leafId = targetLeafId();
     const ws = activeWorkspace.value;
     if (!leafId || !ws) return;
@@ -112,6 +134,59 @@ export function useResources() {
     };
     addTabToLeaf(ws.layout, leafId, id);
     setFocusedLeaf(leafId);
+  }
+
+  function openNewPage(): void {
+    const ws = activeWorkspace.value;
+    const leafId = targetLeafId();
+    if (!ws || !leafId) return;
+    const id = nodeId("resource-file");
+    state.tabs[id] = {
+      kind: "file", id, untitled: true, draftText: "",
+      projectPath: ws.settings.defaultCwd,
+      preview: {
+        canonicalPath: "", name: t("Untitled"), kind: "text",
+        language: "plaintext", mime: "text/plain", text: "", size: 0,
+      },
+    };
+    addTabToLeaf(ws.layout, leafId, id);
+    setFocusedLeaf(leafId);
+  }
+
+  function updateFileDraft(id: string, text: string): void {
+    const tab = state.tabs[id];
+    if (tab?.kind !== "file") return;
+    tab.draftText = text;
+    tab.dirty = text !== (tab.preview.text ?? "");
+  }
+
+  async function saveFile(id: string): Promise<boolean> {
+    const tab = state.tabs[id];
+    if (tab?.kind !== "file" || tab.saving) return false;
+    tab.saving = true;
+    try {
+      let path = tab.preview.canonicalPath;
+      if (tab.untitled) {
+        const root = tab.projectPath?.replace(/[\\/]+$/, "");
+        const chosen = await chooseSavePath({
+          title: t("Save File"),
+          defaultPath: root ? `${root}\\Untitled.txt` : "Untitled.txt",
+        });
+        if (!chosen) return false;
+        path = chosen;
+      }
+      const text = tab.draftText ?? tab.preview.text ?? "";
+      await api.writeFile(path, text);
+      tab.preview.canonicalPath = path;
+      tab.preview.name = path.split(/[\\/]/).pop() || path;
+      tab.preview.text = text;
+      tab.preview.size = new TextEncoder().encode(text).length;
+      tab.untitled = false;
+      tab.dirty = (tab.draftText ?? text) !== text;
+      return true;
+    } finally {
+      tab.saving = false;
+    }
   }
 
   function closeResource(id: string): void {
@@ -150,7 +225,11 @@ export function useResources() {
     state,
     getById,
     openFile,
+    openNewPage,
+    updateFileDraft,
+    saveFile,
     openBrowser,
+    openNewBrowser,
     closeResource,
     forgetResource,
     updateBrowserUrl,

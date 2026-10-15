@@ -1,0 +1,265 @@
+{
+  "800": {
+    "terminal": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": true
+      },
+      "controls": {
+        "x": 628,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": null,
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 800,
+      "width": 800
+    },
+    "flow": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": false
+      },
+      "controls": {
+        "x": 628,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": {
+        "x": 0,
+        "y": 36,
+        "width": 800,
+        "height": 664,
+        "topHit": true
+      },
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 800,
+      "width": 800
+    },
+    "workerNav": true,
+    "flowReturned": true,
+    "settings": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": false
+      },
+      "controls": {
+        "x": 628,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": {
+        "x": 0,
+        "y": 36,
+        "width": 800,
+        "height": 664,
+        "topHit": true
+      },
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 800,
+      "width": 800
+    },
+    "settingsReturned": true,
+    "after": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": true
+      },
+      "controls": {
+        "x": 628,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": null,
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 800,
+      "width": 800
+    },
+    "menuHit": true,
+    "menuSettings": true
+  },
+  "1440": {
+    "terminal": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": true
+      },
+      "controls": {
+        "x": 1268,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": null,
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 1440,
+      "width": 1440
+    },
+    "flow": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": false
+      },
+      "controls": {
+        "x": 1268,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": {
+        "x": 0,
+        "y": 36,
+        "width": 1440,
+        "height": 964,
+        "topHit": true
+      },
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 1440,
+      "width": 1440
+    },
+    "workerNav": true,
+    "flowReturned": true,
+    "settings": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": false
+      },
+      "controls": {
+        "x": 1268,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": {
+        "x": 0,
+        "y": 36,
+        "width": 1440,
+        "height": 964,
+        "topHit": true
+      },
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 1440,
+      "width": 1440
+    },
+    "settingsReturned": true,
+    "after": {
+      "tab": {
+        "x": 228,
+        "y": 6,
+        "width": 85.390625,
+        "height": 29,
+        "topHit": true
+      },
+      "controls": {
+        "x": 1268,
+        "y": 0,
+        "width": 172,
+        "height": 36,
+        "topHit": true
+      },
+      "logo": {
+        "x": 0,
+        "y": 0,
+        "width": 34,
+        "height": 35,
+        "topHit": true
+      },
+      "page": null,
+      "terminalPreserved": true,
+      "terminalScreen": true,
+      "scrollWidth": 1440,
+      "width": 1440
+    },
+    "menuHit": true,
+    "menuSettings": true
+  },
+  "errors": []
+}

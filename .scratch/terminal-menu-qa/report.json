@@ -1,0 +1,43 @@
+{
+  "menu": [
+    "↻새 에이전트 루프",
+    "새 페이지 열기",
+    "새 브라우저 열기",
+    "ClaudeHome›",
+    "Codex",
+    "PS새 터미널Windows PowerShell›"
+  ],
+  "shellPicker": [
+    "PSWindows PowerShell 기본값",
+    "P7PowerShell 7",
+    "C:\\명령 프롬프트",
+    "WSLWSL",
+    "GBGit Bash"
+  ],
+  "createdDefault": [
+    "powershell.exe"
+  ],
+  "menuClosedAfterCreate": true,
+  "createCalls": 2,
+  "tabs": [
+    "qa×",
+    "qa×",
+    "qa×",
+    "◎www.google.com×"
+  ],
+  "claudeRow": "ClaudeHome›",
+  "codexRowHasArrow": false,
+  "accountPicker": [
+    "시스템",
+    "Work",
+    "Home기본값"
+  ],
+  "claudeLaunch": [
+    {
+      "env": {
+        "CLAUDE_CONFIG_DIR": "C:\\qa\\home"
+      }
+    }
+  ],
+  "errors": []
+}

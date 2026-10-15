@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "webviews": ["main"],
+  "webviews": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview",
@@ -11,7 +13,18 @@
     "core:webview:allow-set-webview-size",
     "core:webview:allow-webview-show",
     "core:webview:allow-webview-hide",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
     "opener:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ],
+  "platforms": [
+    "windows",
+    "macOS",
+    "linux"
   ]
 }

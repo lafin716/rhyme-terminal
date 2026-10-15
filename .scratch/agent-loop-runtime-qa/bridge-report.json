@@ -1,0 +1,17 @@
+[
+  {
+    "cancel": false,
+    "passed": true,
+    "root": "C:\\Users\\user\\AppData\\Local\\Temp\\rhyme-bridge-qa-rHUL3N"
+  },
+  {
+    "cancel": true,
+    "passed": true,
+    "root": "C:\\Users\\user\\AppData\\Local\\Temp\\rhyme-bridge-qa-4hFLvD"
+  },
+  {
+    "cancel": false,
+    "passed": true,
+    "root": "C:\\Users\\user\\AppData\\Local\\Temp\\rhyme-bridge-qa-UzTFAG"
+  }
+]

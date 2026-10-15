@@ -1,0 +1,35 @@
+:root { color-scheme: dark; font-family: Inter, Pretendard, "Segoe UI", sans-serif; background: #070a0e; color: #dce7ef; }
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; min-height: 100%; background: #070a0e; }
+button, select, textarea { font: inherit; }
+main { min-height: 100dvh; display: flex; flex-direction: column; padding: max(12px, env(safe-area-inset-top)) 12px max(14px, env(safe-area-inset-bottom)); gap: 10px; }
+header { display: flex; justify-content: space-between; align-items: center; min-height: 38px; }
+.brand { display: flex; gap: 9px; align-items: center; }
+.brand img { width: 32px; height: 32px; object-fit: contain; }
+.brand-text { display: flex; flex-direction: column; gap: 2px; }
+header strong { font-size: 19px; letter-spacing: -.04em; }
+header div span { color: #8496a5; font-size: 12px; }
+.status { border: 1px solid #293541; border-radius: 999px; padding: 5px 9px; color: #91a3b1; font-size: 12px; }
+.status[data-phase="authenticated"] { border-color: #18563f; color: #70dfa9; background: #0c281e; }
+.status[data-phase="error"] { border-color: #6d3036; color: #ff9ca3; }
+.toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr) 42px; gap: 8px; align-items: center; }
+.toolbar label { color: #91a3b1; font-size: 13px; }
+select, textarea, button { border: 1px solid #293541; border-radius: 8px; background: #111820; color: #dce7ef; }
+select, button { min-height: 42px; padding: 0 11px; }
+button:disabled, select:disabled, textarea:disabled { opacity: .45; }
+button:not(:disabled):active { background: #1d2a35; transform: translateY(1px); }
+.terminal-scroll { flex: 1; min-height: 260px; overflow: auto; border: 1px solid #1e2932; border-radius: 9px; background: #090d12; overscroll-behavior: contain; }
+.terminal-host { display: none; padding: 8px 12px; }
+.terminal-host:not(:empty) { display: block; }
+.terminal-placeholder { display: grid; min-height: 260px; place-items: center; padding: 24px; color: #60717f; text-align: center; font-size: 13px; }
+.input-panel { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+textarea { resize: none; min-height: 58px; padding: 9px 10px; line-height: 1.4; }
+.send { min-width: 64px; background: #153d52; border-color: #25607e; }
+.keys { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+.keys button { min-height: 40px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+.card { margin: auto 0; padding: 24px 18px; border: 1px solid #263440; border-radius: 12px; background: #0e141b; text-align: center; }
+.pairing output { display: block; margin: 20px 0; color: #83d9ff; font: 700 38px/1 "Cascadia Mono", monospace; letter-spacing: .18em; }
+.pairing small { color: #71828f; }
+.error-card h1 { font-size: 19px; }
+.error-card p, .inline-error { color: #ff9ca3; }
+.inline-error { margin: 0; padding: 7px 10px; border-radius: 7px; background: #281418; font-size: 13px; }

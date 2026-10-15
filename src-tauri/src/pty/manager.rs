@@ -2,18 +2,21 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::agent::{agent_for_shell, ProcessEntry};
+use super::agent::ProcessEntry;
 use super::agent_status::{AgentTaskEvent, AgentTaskStatus};
+use super::runtime_monitor::AgentRuntimeMonitor;
 use super::{AgentKind, Session, SessionInfo};
 
 pub struct SessionManager {
     pub sessions: Mutex<HashMap<Uuid, Session>>,
+    pub runtime: Mutex<AgentRuntimeMonitor>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            runtime: Mutex::new(AgentRuntimeMonitor::default()),
         }
     }
 
@@ -23,6 +26,7 @@ impl SessionManager {
             let _ = session.killer.kill();
         }
         map.clear();
+        *self.runtime.lock() = AgentRuntimeMonitor::default();
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
@@ -40,10 +44,20 @@ impl SessionManager {
     pub fn refresh_agents(&self, processes: &[ProcessEntry]) -> Vec<(Uuid, AgentKind)> {
         let changes = {
             let mut sessions = self.sessions.lock();
+            let mut runtime = self.runtime.lock();
+            runtime.states.retain(|id, _| sessions.contains_key(id));
+            if sessions.is_empty() {
+                runtime.processes.clear();
+                runtime.revision += 1;
+                return Vec::new();
+            }
+            runtime.processes = processes.to_vec();
+            runtime.revision += 1;
+            let tree = super::agent::ProcessTree::new(processes);
             sessions
                 .iter_mut()
                 .filter_map(|(id, session)| {
-                    let agent = agent_for_shell(session.shell_pid, processes);
+                    let agent = runtime.observe_tree(*id, session.shell_pid, &tree);
                     if session.info.agent == agent {
                         None
                     } else {
@@ -58,19 +72,33 @@ impl SessionManager {
         changes
     }
 
-    pub fn note_input(&self, id: Uuid) -> Option<AgentTaskStatus> {
+    pub fn note_input(&self, id: Uuid, bytes: &[u8]) -> Option<AgentTaskStatus> {
         let map = self.sessions.lock();
         let session = map.get(&id)?;
         let agent = *session.agent_kind.lock();
-        let status = session.task_tracker.lock().observe(agent, AgentTaskEvent::Input);
+        let status = session
+            .task_tracker
+            .lock()
+            .observe(agent, AgentTaskEvent::Input(bytes));
         status
     }
 
-    pub fn complete_idle_tasks(&self, timeout: std::time::Duration) -> Vec<(Uuid, AgentTaskStatus)> {
-        self.sessions.lock().iter().filter_map(|(id, session)| {
-            let agent = *session.agent_kind.lock();
-            session.task_tracker.lock().complete_if_idle(agent, timeout).map(|status| (*id, status))
-        }).collect()
+    pub fn complete_idle_tasks(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Vec<(Uuid, AgentTaskStatus)> {
+        self.sessions
+            .lock()
+            .iter()
+            .filter_map(|(id, session)| {
+                let agent = *session.agent_kind.lock();
+                session
+                    .task_tracker
+                    .lock()
+                    .complete_if_idle(agent, timeout)
+                    .map(|status| (*id, status))
+            })
+            .collect()
     }
 
     pub fn next_default_name(&self) -> String {
@@ -117,6 +145,34 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    fn shell_fixture() -> (String, Vec<String>, &'static str) {
+        (
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), "exit".to_string()],
+            "cmd.exe",
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn shell_fixture() -> (String, Vec<String>, &'static str) {
+        (
+            "/bin/sh".to_string(),
+            vec!["-c".to_string(), "exit".to_string()],
+            "sh",
+        )
+    }
+
+    #[cfg(windows)]
+    fn claude_image_name() -> &'static str {
+        "claude.exe"
+    }
+
+    #[cfg(not(windows))]
+    fn claude_image_name() -> &'static str {
+        "claude"
+    }
+
     #[test]
     fn has_sessions_is_false_for_a_new_manager() {
         assert!(!SessionManager::new().has_sessions());
@@ -126,11 +182,13 @@ mod tests {
     fn refresh_agents_reports_a_change_only_once() {
         let (events, _) = broadcast::channel(1);
         let manager = SessionManager::new();
+        let (shell, shell_args, shell_image) = shell_fixture();
         let session = spawn_session(
             events,
             "test".to_string(),
-            "cmd.exe".to_string(),
-            vec!["/C".to_string(), "exit".to_string()],
+            shell,
+            shell_args,
+            None,
             None,
             80,
             24,
@@ -142,8 +200,8 @@ mod tests {
         assert!(manager.has_sessions());
 
         let processes = [
-            entry(shell_pid, None, "cmd.exe", 1),
-            entry(2, Some(shell_pid), "claude.exe", 2),
+            entry(shell_pid, None, shell_image, 1),
+            entry(2, Some(shell_pid), claude_image_name(), 2),
         ];
 
         assert_eq!(
@@ -152,7 +210,7 @@ mod tests {
         );
         assert!(manager.refresh_agents(&processes).is_empty());
 
-        let shell_only = [entry(shell_pid, None, "cmd.exe", 1)];
+        let shell_only = [entry(shell_pid, None, shell_image, 1)];
         assert_eq!(
             manager.refresh_agents(&shell_only),
             vec![(id, crate::pty::AgentKind::Terminal)]
@@ -162,5 +220,7 @@ mod tests {
 
         manager.kill_all();
         assert!(!manager.has_sessions());
+        assert!(manager.runtime.lock().states.is_empty());
+        assert!(manager.runtime.lock().processes.is_empty());
     }
 }

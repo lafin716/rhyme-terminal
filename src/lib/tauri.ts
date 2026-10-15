@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { CliAgentKind } from "./persistence";
+import type { LaunchRequest } from "./launch-request";
 
 export type AgentKind = "terminal" | "claude" | "codex";
 export type AgentTaskStatus = "working" | "completed" | "error";
@@ -73,12 +75,36 @@ export interface SessionAgentStatusPayload {
   status: AgentTaskStatus;
 }
 
+/** What `shell_integration_status` reports; see `launch/shell_integration.rs`. */
+export interface ShellIntegrationStatus {
+  /** Every Explorer verb is registered and points at this executable. */
+  contextMenus: boolean;
+  uriScheme: boolean;
+  /** Something is registered, but for an executable that has since moved. */
+  stale: boolean;
+  executable: string;
+}
+
 export const api = {
+  /**
+   * Launch requests that arrived before the page could listen for them — this
+   * process's own command line, and anything Explorer sent during startup.
+   */
+  takeLaunchRequests(): Promise<LaunchRequest[]> {
+    return invoke("take_launch_requests");
+  },
+  shellIntegrationStatus(): Promise<ShellIntegrationStatus> {
+    return invoke("shell_integration_status");
+  },
+  shellIntegrationSet(contextMenus: boolean, uriScheme: boolean): Promise<ShellIntegrationStatus> {
+    return invoke("shell_integration_set", { contextMenus, uriScheme });
+  },
   createSession(opts: {
     name?: string;
     shell?: string;
     shellArgs?: string[];
     cwd?: string;
+    env?: Record<string, string>;
     cols?: number;
     rows?: number;
   } = {}): Promise<SessionInfo> {
@@ -103,6 +129,25 @@ export const api = {
   renameSession(id: string, name: string): Promise<void> {
     return invoke("rename_session", { id, name });
   },
+  /**
+   * Resolves (creating on first use) the isolated login/config directory for
+   * one account profile, e.g. `%LOCALAPPDATA%\winmux\accounts\claude\<id>`.
+   * Backs the Accounts settings tab; see `useAccountProfiles.ts`.
+   */
+  resolveAccountDir(agent: CliAgentKind, profileId: string): Promise<string> {
+    return invoke("resolve_account_dir", { agent, profileId });
+  },
+  /** Persists a `claude setup-token` value for a `"setup-token"`-linked profile. */
+  setAccountToken(agent: CliAgentKind, profileId: string, token: string): Promise<void> {
+    return invoke("set_account_token", { agent, profileId, token });
+  },
+  /** Reads back a token saved by `setAccountToken`, or `null` if none is linked. */
+  getAccountToken(agent: CliAgentKind, profileId: string): Promise<string | null> {
+    return invoke("get_account_token", { agent, profileId });
+  },
+  resolveResourcePath(target: string, cwd?: string): Promise<string> {
+    return invoke("resolve_resource_path", { target, cwd });
+  },
   readFilePreview(target: string, cwd?: string): Promise<FilePreview> {
     return invoke("read_file_preview", { target, cwd });
   },
@@ -111,6 +156,18 @@ export const api = {
   },
   readDirectory(path: string): Promise<DirListing> {
     return invoke("read_directory", { path });
+  },
+  /** Renames an Explorer entry in place; `newName` is a leaf name, not a path. */
+  renamePath(path: string, newName: string): Promise<string> {
+    return invoke("rename_path", { path, newName });
+  },
+  /** Deletes an Explorer entry; directories go recursively. Confirm first. */
+  deletePath(path: string): Promise<void> {
+    return invoke("delete_path", { path });
+  },
+  /** Creates an empty file (or a folder) inside `parent`; returns its path. */
+  createEntry(parent: string, name: string, isDir: boolean): Promise<string> {
+    return invoke("create_entry", { parent, name, isDir });
   },
   listFiles(root: string): Promise<FileIndex> {
     return invoke("list_files", { root });
@@ -178,4 +235,11 @@ export function base64ToBytes(b64: string): Uint8Array {
 
 export function stringToBase64(str: string): string {
   return bytesToBase64(new TextEncoder().encode(str));
+}
+
+/** External launch requests that arrive while the window is already open. */
+export function onLaunchRequest(
+  handler: (request: LaunchRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<LaunchRequest>("launch-request", (e) => handler(e.payload));
 }

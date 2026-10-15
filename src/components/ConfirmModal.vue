@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "../composables/useI18n";
 import { onMounted, onUnmounted } from "vue";
 import { useConfirm } from "../composables/useConfirm";
 
@@ -35,14 +36,14 @@ onUnmounted(() => {
       <div class="message">{{ state.options?.message }}</div>
       <label v-if="state.options?.rememberKey" class="remember">
         <input type="checkbox" v-model="state.dontAsk" />
-        <span>Don't ask again</span>
+        <span>{{ t("Don't ask again") }}</span>
       </label>
       <div class="actions">
         <button class="btn" @click="cancel">
-          {{ state.options?.cancelLabel ?? "Cancel" }}
+          {{ state.options?.cancelLabel ?? t("Cancel") }}
         </button>
         <button class="btn primary" @click="accept">
-          {{ state.options?.confirmLabel ?? "Confirm" }}
+          {{ state.options?.confirmLabel ?? t("Confirm") }}
         </button>
       </div>
     </div>
@@ -106,13 +107,13 @@ onUnmounted(() => {
 }
 .btn:hover { background: #333; }
 .btn.primary {
-  background: #4ec9b0;
-  color: #1e1e1e;
-  border-color: #4ec9b0;
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: var(--accent);
   font-weight: 600;
 }
 .btn.primary:hover {
-  background: #5fd9c0;
-  border-color: #5fd9c0;
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
 }
 </style>

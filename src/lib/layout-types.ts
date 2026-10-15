@@ -31,6 +31,8 @@ export interface WorkspaceSettings {
 }
 
 export interface TerminalTabSnapshot {
+  agent?: import("./tauri").AgentKind;
+  accountProfile?: import("./session-profile").SessionProfile;
   name: string;
   terminal: TerminalConfig;
   cwd?: string | null;
@@ -49,6 +51,7 @@ export interface Workspace {
   settings: WorkspaceSettings;
   layout: LayoutNode;
   terminalSnapshots: Record<string, TerminalTabSnapshot>;
+  sessionOrder?: string[];
 }
 
 export interface WorkspaceStore {

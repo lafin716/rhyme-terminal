@@ -2,23 +2,38 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime,
+    AppHandle, Listener, Manager, Runtime,
 };
 
 use crate::ipc::client::DaemonClient;
 use crate::ipc::protocol::Method;
 
 pub fn build_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let show_i = MenuItem::with_id(app, "show", "Show winmux", true, None::<&str>)?;
-    let hide_i = MenuItem::with_id(app, "hide", "Hide window", true, None::<&str>)?;
+    let show_i = MenuItem::with_id(app, "show", "rhyme-terminal 열기", true, None::<&str>)?;
+    let hide_i = MenuItem::with_id(app, "hide", "창 숨기기", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let quit_i = MenuItem::with_id(app, "quit", "Quit (keep daemon)", true, None::<&str>)?;
-    let kill_server_i = MenuItem::with_id(app, "kill-server", "Kill server", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "종료 (데몬 유지)", true, None::<&str>)?;
+    let kill_server_i = MenuItem::with_id(app, "kill-server", "서버 종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_i, &hide_i, &sep, &quit_i, &kill_server_i])?;
+    app.listen("app-language-changed", move |event| {
+        let english = serde_json::from_str::<String>(event.payload())
+            .map(|language| language == "en")
+            .unwrap_or(false);
+        for (item, ko, en) in [
+            (&show_i, "rhyme-terminal 열기", "Show rhyme-terminal"),
+            (&hide_i, "창 숨기기", "Hide window"),
+            (&quit_i, "종료 (데몬 유지)", "Quit (keep daemon)"),
+            (&kill_server_i, "서버 종료", "Kill server"),
+        ] {
+            if let Err(error) = item.set_text(if english { en } else { ko }) {
+                tracing::warn!("Failed to update tray language: {error}");
+            }
+        }
+    });
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
 
     let _tray = TrayIconBuilder::with_id("winmux-tray")
-        .tooltip("winmux")
+        .tooltip("rhyme-terminal")
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)

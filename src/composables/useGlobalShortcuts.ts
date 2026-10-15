@@ -1,22 +1,23 @@
 import { onMounted, onUnmounted } from "vue";
 import { ACTIONS, matchesEvent, type ActionId } from "../lib/keybindings";
 import { useKeybindings } from "./useKeybindings";
+import { useFlowPage } from "./useFlowPage";
 import { useSettings } from "./useSettings";
 import { confirmState } from "./useConfirm";
 import { quickOpenState } from "./useQuickOpen";
+import { prefixState } from "./usePrefixKey";
 
 type Handler = () => void | Promise<void>;
 
 const handlers = new Map<string, Handler>();
 let installed = false;
-let focusByIndexHandler: ((i: number) => void) | null = null;
 
 export function registerAction(id: ActionId, h: Handler) {
   handlers.set(id, h);
 }
 
 export function registerFocusSessionByIndex(fn: (i: number) => void) {
-  focusByIndexHandler = fn;
+  for (let i = 0; i < 15; i++) registerAction(`session.focusIndex${i + 1}`, () => fn(i));
 }
 
 export function unregisterAction(id: ActionId) {
@@ -38,10 +39,12 @@ function shouldIgnoreTarget(target: EventTarget | null): boolean {
 export function useGlobalShortcuts() {
   const { bindingFor } = useKeybindings();
   const { settingsOpen } = useSettings();
+  const { flowOpen } = useFlowPage();
 
   function onKeyDown(ev: KeyboardEvent) {
+    if (ev.defaultPrevented || ev.isComposing || prefixState.armed) return;
     // Settings modal owns the keyboard while open (for capture mode and Esc-to-close).
-    if (settingsOpen.value) return;
+    if (settingsOpen.value || flowOpen.value) return;
     // Confirm modal also owns the keyboard while open (Esc/Enter, prevent stacking).
     if (confirmState.open) return;
     // Quick Open owns the keyboard while open (typing, ↑/↓/Enter/Esc); its own
@@ -50,27 +53,10 @@ export function useGlobalShortcuts() {
 
     // Never swallow plain typing in inputs/textareas. Modifier-bearing combos still pass.
     const hasMod = ev.ctrlKey || ev.metaKey || ev.altKey;
-    if (!hasMod && shouldIgnoreTarget(ev.target)) return;
-
-    // Alt+1..9 / Alt+A..F: focus session by global index (matches StatusBar labels).
-    if (ev.altKey && !ev.ctrlKey && !ev.shiftKey && !ev.metaKey) {
-      const mDigit = /^Digit([1-9])$/.exec(ev.code);
-      if (mDigit) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        focusByIndexHandler?.(parseInt(mDigit[1], 10) - 1);
-        return;
-      }
-      const mLetter = /^Key([A-F])$/.exec(ev.code);
-      if (mLetter) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        focusByIndexHandler?.(9 + (mLetter[1].charCodeAt(0) - 65));
-        return;
-      }
-    }
+    if (!hasMod && ev.key.length === 1 && shouldIgnoreTarget(ev.target)) return;
 
     for (const a of ACTIONS) {
+      if (a.scope) continue;
       const b = bindingFor(a.id as ActionId);
       if (matchesEvent(b, ev)) {
         ev.preventDefault();

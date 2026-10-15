@@ -45,6 +45,7 @@ src/
 - Every state module is a composable exporting reactive objects and functions
 - Components read state directly from composables (no props drilling for global state)
 - `App.vue` registers all action handlers and wires keybindings on mount
+- Register every app command shortcut in `src/lib/keybindings.ts` and read its current binding through `useKeybindings`; Settings > Keybindings must support viewing, remapping, clearing, and resetting it. This includes terminal/editor commands, zoom wheel gestures, session index selection, and prefix combinations. Do not add hidden hard-coded app shortcuts.
 - Session IDs are strings (UUIDs from backend); layout nodes use `nodeId("leaf")` / `nodeId("split")`
 - **Strict TypeScript:** `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch` are enabled
 - **Persistence:** localStorage keys use `winmux:{domain}:v1` format with `{ version: 1, ... }` envelope (see `lib/persistence.ts`)

@@ -1,10 +1,12 @@
 pub mod client;
 pub mod protocol;
 pub mod server;
+pub mod transport;
 
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(windows)]
 pub fn pipe_name() -> String {
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
     format!(r"\\.\pipe\winmux-{user}")
@@ -28,4 +30,14 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, bytes: &[u8])
     writer.write_all(bytes).await?;
     writer.flush().await?;
     Ok(())
+}
+
+#[cfg(unix)]
+pub fn pipe_name() -> String {
+    let user = unsafe { libc::geteuid() };
+    std::path::PathBuf::from("/tmp")
+        .join(format!("rhyme-terminal-{user}"))
+        .join("ipc.sock")
+        .to_string_lossy()
+        .into_owned()
 }
