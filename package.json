@@ -1,7 +1,7 @@
 {
   "name": "rhyme-terminal",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "packageManager": "pnpm@8.15.0",
   "engines": {
