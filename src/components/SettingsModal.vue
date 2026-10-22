@@ -49,6 +49,7 @@ import type { PaletteUiMode } from "../lib/persistence";
 import { normalizeLocale } from "../lib/i18n";
 import { useTheme } from "../composables/useTheme";
 import { accentCssVars, type AccentTheme } from "../lib/theme";
+import { isMacOS } from "../lib/platform";
 
 const { closeSettings } = useSettings();
 const backButton = ref<HTMLButtonElement>();
@@ -151,6 +152,10 @@ function systemConfigDir(agent: CliAgentKind): string {
   const home = homeDirPath.value.replace(/[\\/]+$/, "");
   return `${home}\\${agent === "claude" ? ".claude" : ".codex"}`;
 }
+const programPlaceholder = isMacOS
+  ? "/bin/zsh or /path/to/shell"
+  : "powershell.exe or C:\\path\\shell.exe";
+const cwdPlaceholder = isMacOS ? "e.g. /Users/me/project" : "e.g. C:\\playground\\project";
 
 function setGlobalTerminal(config: TerminalConfig) {
   setPref("defaultTerminal", cloneTerminalConfig(config));
@@ -193,7 +198,9 @@ async function chooseTerminalProgram() {
     directory: false,
     multiple: false,
     title: t("Select terminal program"),
-    filters: [{ name: "Programs", extensions: ["exe", "cmd", "bat", "com"] }],
+    ...(isMacOS
+      ? {}
+      : { filters: [{ name: "Programs", extensions: ["exe", "cmd", "bat", "com"] }] }),
   });
   if (typeof selected !== "string") return;
   updateGlobalTerminal({ preset: "custom", program: selected });
@@ -459,7 +466,7 @@ onUnmounted(() => {
                     id="terminal-program"
                     class="input mono"
                     :value="prefs.defaultTerminal.program"
-                    :placeholder="t('powershell.exe or C:\\path\\shell.exe')"
+                    :placeholder="t(programPlaceholder)"
                     @input="updateGlobalTerminal({
                       preset: 'custom',
                       program: ($event.target as HTMLInputElement).value,
@@ -683,7 +690,7 @@ onUnmounted(() => {
                   class="input mono"
                   :aria-label="t('Default folder') + ': ' + ws.name"
                   :value="ws.settings?.defaultCwd ?? ''"
-                  :placeholder="t('e.g. C:\\playground\\project')"
+                  :placeholder="t(cwdPlaceholder)"
                   @input="updateDefaultCwd(ws.id, ($event.target as HTMLInputElement).value)"
                 /></label>
                 <div class="row-actions">

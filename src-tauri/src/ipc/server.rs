@@ -19,11 +19,6 @@ use crate::pty::agent::process_snapshot;
 use crate::pty::manager::SessionManager;
 use crate::pty::{scrollback_snapshot, spawn_session};
 
-#[cfg(windows)]
-const DEFAULT_SHELL: &str = "powershell.exe";
-#[cfg(unix)]
-const DEFAULT_SHELL: &str = "/bin/zsh";
-
 pub struct DaemonState {
     pub routing: crate::loop_routing::Service,
     pub manager: Arc<SessionManager>,
@@ -38,6 +33,12 @@ impl DaemonState {
             manager: Arc::new(SessionManager::new()),
             events: tx,
         }
+    }
+}
+
+impl Default for DaemonState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -299,7 +300,7 @@ async fn dispatch(
             cols,
             rows,
         } => {
-            let shell = shell.unwrap_or_else(|| DEFAULT_SHELL.to_string());
+            let shell = shell.unwrap_or_else(default_shell);
             let name = name.unwrap_or_else(|| state.manager.next_default_name());
             let session = spawn_session(
                 state.events.clone(),
@@ -409,6 +410,19 @@ async fn dispatch(
         }
         Method::KillServer => Ok(json!(null)),
     }
+}
+
+#[cfg(windows)]
+fn default_shell() -> String {
+    "powershell.exe".to_string()
+}
+
+#[cfg(unix)]
+fn default_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_string())
 }
 
 /// PTY append and publish use this same lock, so every output byte is in exactly one side of the barrier.
@@ -535,5 +549,15 @@ mod mobile_stream_tests {
             .unwrap()
             .unwrap()
             .unwrap_err();
+    }
+}
+
+#[cfg(test)]
+mod default_shell_tests {
+    use super::default_shell;
+
+    #[test]
+    fn default_shell_is_not_empty() {
+        assert!(!default_shell().trim().is_empty());
     }
 }

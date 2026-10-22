@@ -32,6 +32,7 @@ import { useKeybindings } from "../composables/useKeybindings";
 import TerminalLinkMenu from "./TerminalLinkMenu.vue";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { matchesEvent } from "../lib/keybindings";
+import { isMacOS, isWindows } from "../lib/platform";
 
 const props = defineProps<{
   sessionId: string;
@@ -74,7 +75,9 @@ async function init() {
   term = new Terminal({
     allowProposedApi: true,
     allowTransparency: false,
-    fontFamily: '"Cascadia Mono", "Consolas", "Courier New", monospace',
+    fontFamily: isMacOS
+      ? '"SFMono-Regular", "SF Mono", Menlo, Monaco, monospace'
+      : '"Cascadia Mono", "Consolas", "Courier New", monospace',
     fontSize: TERMINAL_BASE_FONT_SIZE,
     fontWeight: "normal",
     fontWeightBold: "bold",
@@ -90,7 +93,9 @@ async function init() {
     wordSeparator: ' ()[]{}\',"`─',
     macOptionIsMeta: false,
     rightClickSelectsWord: false,
-    windowsPty: { backend: "conpty", buildNumber: detectWindowsBuild() },
+    ...(isWindows
+      ? { windowsPty: { backend: "conpty" as const, buildNumber: detectWindowsBuild() } }
+      : {}),
     linkHandler: {
       activate: (event, text) => {
         activateResource(event, text);
@@ -259,6 +264,7 @@ function cwdFromOsc7(data: string): string | null {
     const url = new URL(data);
     if (url.protocol !== "file:") return null;
     let path = decodeURIComponent(url.pathname);
+    if (!isWindows) return path;
     if (url.hostname && url.hostname !== "localhost") {
       return `\\\\${url.hostname}${path.replace(/\//g, "\\")}`;
     }
@@ -313,6 +319,16 @@ function showOpenError(error: unknown) {
 function handleKeyEvent(ev: KeyboardEvent): boolean {
   if (ev.type !== "keydown" || !term || ev.isComposing) return true;
   const matches = (id: string) => matchesEvent(bindingFor(id), ev);
+
+  // Command+C / Command+V — native clipboard behavior on macOS.
+  const key = ev.key.toLowerCase();
+  if (isMacOS && ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "c") {
+    if (term.hasSelection()) copySelection();
+    return false;
+  }
+  if (isMacOS && ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "v") {
+    return false;
+  }
 
   // Clipboard commands use the current settings, including alternate bindings.
   if (matches("terminal.copy")) {

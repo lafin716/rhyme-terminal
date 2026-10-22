@@ -29,7 +29,7 @@ enum Cmd {
         /// session appears in that workspace's GUI Navigator
         #[arg(short = 'w', long)]
         workspace: Option<u32>,
-        /// Shell to launch (default: powershell.exe)
+        /// Shell to launch (default: PowerShell on Windows, $SHELL or zsh on Unix)
         #[arg(long)]
         shell: Option<String>,
         /// Argument passed to the shell (repeatable)

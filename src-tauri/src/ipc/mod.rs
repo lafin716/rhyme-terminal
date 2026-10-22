@@ -41,3 +41,17 @@ pub fn pipe_name() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::pipe_name;
+
+    #[test]
+    fn endpoint_is_platform_appropriate() {
+        let name = pipe_name();
+        #[cfg(windows)]
+        assert!(name.starts_with(r"\\.\pipe\winmux-"));
+        #[cfg(unix)]
+        assert!(name.ends_with(".sock"));
+    }
+}

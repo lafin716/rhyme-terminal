@@ -33,8 +33,18 @@ fn init_logging() {
 }
 
 fn log_dir() -> PathBuf {
+    #[cfg(windows)]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         return PathBuf::from(local).join("winmux").join("logs");
     }
+
+    #[cfg(target_os = "macos")]
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Logs")
+            .join("winmux");
+    }
+
     std::env::temp_dir().join("winmux-logs")
 }

@@ -1142,6 +1142,14 @@ mod resource_tests {
         assert_eq!(line, Some(8));
         assert_eq!(column, Some(2));
     }
+
+    #[test]
+    fn parses_unix_path_and_location() {
+        let (path, line, column) = split_file_location("/Users/me/work/main.rs:18:7");
+        assert_eq!(path, "/Users/me/work/main.rs");
+        assert_eq!(line, Some(18));
+        assert_eq!(column, Some(7));
+    }
 }
 
 #[cfg(test)]
