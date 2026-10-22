@@ -242,7 +242,8 @@ mod tests {
     fn temp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("rhyme-launch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // macOS hands out /var/... which canonicalizes to /private/var/...
+        strip_verbatim(dir.canonicalize().unwrap())
     }
 
     #[test]
