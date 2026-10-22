@@ -14,6 +14,7 @@ import { toggleFlyoutGroup } from "../lib/menu-flyout";
 import { groupMenuItems } from "../lib/menu-groups";
 import {
   chevronRightIcon,
+  fireworksIcon,
   moreHorizontalIcon,
   panelLeftIcon,
 } from "../lib/offline-icons";
@@ -33,7 +34,7 @@ const props = withDefaults(defineProps<{ hideActions?: boolean }>(), { hideActio
 watch(() => props.hideActions, (hidden) => { if (hidden) closeMenu(); });
 const { bindingFor, prefixFor } = useKeybindings();
 const { openSettings } = useSettings();
-const { panels, toggleLeft, toggleRight } = useShellPanels();
+const { panels, toggleLeft } = useShellPanels();
 const { launch: launchFireworks } = useFireworks();
 
 const isOverflowMenuOpen = ref(false);
@@ -235,7 +236,6 @@ onUnmounted(() => {
     >
       <Icon class="ico" :icon="panelLeftIcon" />
     </button>
-    <div class="spacer" />
     <button
       class="corner-toggle fireworks-btn"
       title="Fireworks!"
@@ -243,15 +243,6 @@ onUnmounted(() => {
       @click="launchFireworks"
     >
       <Icon class="ico" :icon="fireworksIcon" />
-    </button>
-    <button
-      class="corner-toggle"
-      :class="{ active: panels.right.open }"
-      :title="rightToggleTitle"
-      type="button"
-      @click="toggleRight"
-    >
-      <Icon class="ico" :icon="panelRightIcon" />
     </button>
   </div>
 </template>
