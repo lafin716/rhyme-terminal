@@ -192,14 +192,16 @@ fn spawn_daemon_detached() -> Result<()> {
     {
         use std::os::windows::process::CommandExt;
         const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let mut command = std::process::Command::new(&exe);
         if let Some(arg) = arg {
             command.arg(arg);
         }
         command
-            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            // No CREATE_NEW_PROCESS_GROUP: it disables Ctrl+C for the daemon and
+            // every shell it spawns. DETACHED_PROCESS already keeps the daemon off
+            // the caller's console, so console Ctrl+C cannot reach it anyway.
+            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| anyhow!("failed to spawn daemon: {e}"))?;
     }

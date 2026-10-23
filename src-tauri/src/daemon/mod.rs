@@ -7,6 +7,8 @@ use crate::ipc::server::{run_server, DaemonState};
 
 pub fn run() -> Result<()> {
     crate::platform::prepare_environment();
+    #[cfg(windows)]
+    enable_ctrl_c();
     init_logging();
     tracing::info!("winmuxd starting");
 
@@ -18,6 +20,23 @@ pub fn run() -> Result<()> {
         let state = Arc::new(DaemonState::new());
         run_server(state).await
     })
+}
+
+/// A process started with `CREATE_NEW_PROCESS_GROUP` ignores Ctrl+C, and every
+/// shell spawned under it inherits that flag — so `\x03` written to a PTY
+/// would never stop a dev server. Clear it so sessions get normal Ctrl+C.
+#[cfg(windows)]
+fn enable_ctrl_c() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    unsafe {
+        SetConsoleCtrlHandler(None, 0);
+    }
 }
 
 fn init_logging() {
