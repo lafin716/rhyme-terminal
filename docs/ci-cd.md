@@ -7,7 +7,8 @@ Windows는 기존 named pipe와 application 기능을 유지한다. macOS에는 
 프로토콜의 사용자 전용 Unix socket, zsh 기본 shell, CLI 실행 경로와 profile 경로를 추가했다.
 Android에는 desktop daemon/tray 의존성이 없는 mobile entrypoint를 두었다.
 
-Android 앱에서 PC 초대 링크를 입력하면 PC가 제공하는 기존 모바일 client로 이동한다.
+Android 앱의 메인 화면은 저장된 원격 PC 연결 목록이다(사용 방법은 `docs/mobile-pairing.md`).
+PC 초대 링크를 입력하거나 저장 항목을 선택하면 PC가 제공하는 기존 모바일 client로 이동한다.
 따라서 HTTP와 WebSocket이 같은 PC origin을 사용하고 기존 승인/토큰 정책을 유지한다.
 원격 페이지에 Tauri native command 권한을 부여하지 않는다. 직접 LAN/Tailscale HTTP
 연결을 위해 Android manifest에서 cleartext traffic을 허용한다. Android는 PC 원격

@@ -126,7 +126,7 @@ onBeforeUnmount(() => { client.disconnect(); terminal?.dispose(); });
   <main>
     <header>
       <div class="brand"><img :src="appIcon" alt="" /><div class="brand-text"><strong>rhyme-terminal</strong><span>모바일 터미널</span></div></div>
-      <button v-if="nativeRemote" type="button" @click="returnToApp">다른 PC 연결</button>
+      <button v-if="nativeRemote" type="button" @click="returnToApp">연결 목록</button>
       <span class="status" :data-phase="state.phase">{{ statusText }}</span>
     </header>
 
@@ -139,7 +139,10 @@ onBeforeUnmount(() => { client.disconnect(); terminal?.dispose(); });
     <section v-else-if="state.phase === 'error' && !state.sessions.length" class="card error-card">
       <h1>연결할 수 없습니다</h1>
       <p>{{ state.error }}</p>
-      <button type="button" @click="reloadPage">다시 시도</button>
+      <div class="error-actions">
+        <button type="button" @click="reloadPage">다시 시도</button>
+        <button v-if="nativeRemote" type="button" @click="returnToApp">연결 목록에서 새 초대로 연결</button>
+      </div>
     </section>
 
     <template v-else>

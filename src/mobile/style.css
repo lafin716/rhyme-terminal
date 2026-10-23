@@ -32,4 +32,5 @@ textarea { resize: none; min-height: 58px; padding: 9px 10px; line-height: 1.4; 
 .pairing small { color: #71828f; }
 .error-card h1 { font-size: 19px; }
 .error-card p, .inline-error { color: #ff9ca3; }
+.error-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .inline-error { margin: 0; padding: 7px 10px; border-radius: 7px; background: #281418; font-size: 13px; }
