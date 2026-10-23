@@ -71,7 +71,7 @@ jobs:
               exit 1
             fi
           done
-          echo 'Packages labeled unsigned require signing before installation or store submission. macOS builds without Apple credentials use ad-hoc signing.' > "$RUNNER_TEMP/release-notes.md"
+          echo 'Android APK and AAB packages are release-signed and signature-verified. macOS builds without Apple credentials use ad-hoc signing.' > "$RUNNER_TEMP/release-notes.md"
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --generate-notes --notes-file "$RUNNER_TEMP/release-notes.md"
           fi

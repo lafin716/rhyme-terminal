@@ -69,7 +69,7 @@ jobs:
           fi
       - name: Configure direct LAN and Tailscale networking
         run: node scripts/ci/prepare-android.mjs
-      - name: Prepare optional release signing
+      - name: Prepare signing (required for release)
         env:
           RELEASE_BUILD: ${{ inputs.release }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -92,6 +92,14 @@ jobs:
         env:
           RELEASE_BUILD: ${{ inputs.release }}
         run: node scripts/ci/collect-android.mjs
+      - name: Verify release APK and AAB signatures
+        if: inputs.release
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs artifacts/android/rhyme-terminal-android-arm64-release.apk
+          jarsigner -verify -strict -keystore "$ANDROID_SIGNING_STORE_FILE" -storepass:env ANDROID_STORE_PASSWORD artifacts/android/rhyme-terminal-android-arm64-release.aab "$ANDROID_KEY_ALIAS"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: android-arm64-packages

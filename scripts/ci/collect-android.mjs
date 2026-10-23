@@ -7,6 +7,9 @@ function files(directory) {
 }
 const variant = process.env.RELEASE_BUILD === "true" ? "release" : "debug";
 const mode = process.env.ANDROID_SIGNING_MODE || "debug";
+if (variant === "release" && mode !== "release") {
+  throw new Error("Android release packages require release signing");
+}
 const outputs = files("src-tauri/gen/android/app/build/outputs");
 mkdirSync("artifacts/android", { recursive: true });
 for (const extension of ["apk", "aab"]) {

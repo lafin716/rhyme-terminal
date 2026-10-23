@@ -160,12 +160,14 @@ pnpm tauri android build --ci --target aarch64 --apk --aab
 
 Gradle 출력은 `src-tauri/gen/android/app/build/outputs` 아래에서 실제 variant별로 찾는다.
 `collect-android.mjs`는 APK/AAB 각각 한 개가 존재하는지 검사하고
-`artifacts/android/rhyme-terminal-android-arm64-{debug,unsigned,release}.{apk,aab}`로 복사한다.
+`artifacts/android/rhyme-terminal-android-arm64-{debug,release}.{apk,aab}`로 복사한다.
 파일이 없거나 ABI 설정 변경으로 여러 개가 나오면 실패하므로 업로드 누락을 숨기지 않는다.
 
 - `debug`: Android SDK 기본 debug key로 서명됨. Secret 없이 설치 가능한 개발 APK.
-- `unsigned`: tag release이지만 키가 없음. 설치/스토어 제출 전에 별도 서명 필요.
 - `release`: 등록한 keystore로 서명됨.
+- tag release는 서명 Secret이 하나라도 없으면 실패한다. unsigned 패키지는 배포하지 않는다.
+- 업로드 전에 APK는 `apksigner verify`, AAB는 등록한 keystore와 alias를 사용한
+  `jarsigner -verify -strict`로 서명과 무결성을 검증한다.
 - AAB는 기기에 직접 설치하는 파일이 아니며 Play/bundletool용이다.
 - runner의 debug key는 매 실행마다 달라질 수 있어 이전 APK 위에 업데이트 설치가
   안 되면 기존 개발 앱 제거가 필요할 수 있다.
@@ -262,11 +264,23 @@ keytool -genkeypair -v -keystore upload-keystore.jks -storetype JKS -keyalg RSA 
 | ANDROID_KEY_PASSWORD | 키 암호 |
 | ANDROID_STORE_PASSWORD | keystore 암호 |
 
+저장소 **Settings → Secrets and variables → Actions → New repository secret**에서
+위 네 항목을 등록한다. keystore 파일은 macOS/Linux에서 다음처럼 한 줄 base64로 변환한다.
+
+```sh
+base64 < upload-keystore.jks | tr -d '\n' | gh secret set ANDROID_KEYSTORE_BASE64
+```
+
+나머지 세 항목도 같은 화면에서 등록한다. 기존 배포 앱이 있으면 업데이트 호환성을 위해
+기존 keystore와 alias를 사용하고, 이후 릴리즈에도 같은 키를 유지한다.
+keystore 원본과 암호는 별도로 안전하게 백업한다.
+
 `android-signing.mjs`가 release 때만 임시 keystore를 만들고 생성 Gradle 파일에
 환경변수 기반 signingConfig를 연결한다. 암호를 YAML 명령문이나 Gradle 소스에 삽입하지 않는다.
 생성 프로젝트를 나중에 커밋해도 같은 스크립트를 사용하며, 기존 Gradle의 별도 서명 체계와
-중복되지 않도록 확인한다. Secret 일부만 등록하면 명확한 오류로 실패한다.
-keystore가 없으면 release는 unsigned, main/수동은 debug를 유지한다.
+중복되지 않도록 확인한다. Secret이 전부 없거나 일부만 등록되어도 명확한 오류로 실패한다.
+서명 검증 실패 시 artifact 업로드와 Release 공개가 중단된다.
+main/수동 빌드는 Secret 없이 debug 서명을 유지한다. 임시 keystore는 성공·실패에 관계없이 삭제한다.
 
 [공식 Android 서명 문서](https://v2.tauri.app/distribute/sign/android/)
 
@@ -323,7 +337,8 @@ Windows에서 CLI help를 확인하는 것만으로 macOS/Android 빌드 성공�
 | `Resource not accessible by integration` | publish의 contents: write 및 저장소 Actions 정책 확인 |
 | Release가 실행되지 않음 | `v*` tag를 remote로 push했는지 확인 |
 | Release publish skipped | 필요한 세 플랫폼 중 실패 job을 먼저 해결 |
-| 부분 signing secret | 해당 플랫폼의 필수 Secret을 모두 등록하거나 전부 제거 |
+| Android signing secret 누락 | 위 Android 필수 Secret 네 항목을 모두 등록. tag release는 서명 필수 |
+| 부분 Apple signing secret | Apple 필수 Secret을 모두 등록하거나 전부 제거 |
 | Windows 로컬 pnpm EPERM/모듈 접근 오류 | dependency 링크/권한/다른 install 프로세스 확인 후 단독 재실행 |
 
 

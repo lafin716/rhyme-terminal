@@ -5,10 +5,8 @@ const release = process.env.RELEASE_BUILD === "true";
 const key = release ? process.env.ANDROID_KEYSTORE_BASE64 : "";
 if (release) {
   const names = ["ANDROID_KEYSTORE_BASE64", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD", "ANDROID_STORE_PASSWORD"];
-  if (names.some(name => process.env[name])) {
-    for (const name of names) {
-      if (!process.env[name]) throw new Error(`Missing Android signing secret: ${name}`);
-    }
+  for (const name of names) {
+    if (!process.env[name]) throw new Error(`Missing Android signing secret: ${name}`);
   }
 }
 if (key) {
@@ -16,7 +14,7 @@ if (key) {
   writeFileSync(keyPath, Buffer.from(key, "base64"), { mode: 0o600 });
   appendFileSync(process.env.GITHUB_ENV, `ANDROID_SIGNING_STORE_FILE=${keyPath}\nANDROID_SIGNING_MODE=release\n`);
 } else {
-  appendFileSync(process.env.GITHUB_ENV, `ANDROID_SIGNING_MODE=${release ? "unsigned" : "debug"}\n`);
+  appendFileSync(process.env.GITHUB_ENV, "ANDROID_SIGNING_MODE=debug\n");
 }
 
 const gradle = "src-tauri/gen/android/app/build.gradle.kts";
