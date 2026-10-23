@@ -39,6 +39,7 @@ import { useResources } from "./composables/useResources";
 import { useQuickOpen } from "./composables/useQuickOpen";
 import { useShellPanels } from "./composables/useShellPanels";
 import { useLaunchRequests } from "./composables/useLaunchRequests";
+import { useFileDrop } from "./composables/useFileDrop";
 import { onSessionAgentChanged } from "./lib/tauri";
 import { ACTIONS, type ActionId } from "./lib/keybindings";
 import {
@@ -86,6 +87,8 @@ const { open: openQuickOpen } = useQuickOpen();
 const { panels, toggleLeft, toggleRight, resize, commit } = useShellPanels();
 // External launches (Explorer menus, CLI, rhyme://) open tabs like any other.
 const launchRequests = useLaunchRequests();
+// Files dragged in from the OS file manager open as tabs in the target pane.
+const { hover: fileDropHover } = useFileDrop();
 const { prefs } = usePrefs();
 const { profiles } = useAccountProfiles();
 const { flowOpen, flowProjectId, closeFlow } = useFlowPage();
@@ -540,6 +543,20 @@ onBeforeUnmount(() => {
     <ConfirmModal />
     <PalettePopover />
     <FireworksOverlay />
+    <div v-if="fileDropHover" class="file-drop-overlay">
+      <div
+        v-if="fileDropHover.rect"
+        class="file-drop-target"
+        :style="{
+          left: `${fileDropHover.rect.left}px`,
+          top: `${fileDropHover.rect.top}px`,
+          width: `${fileDropHover.rect.width}px`,
+          height: `${fileDropHover.rect.height}px`,
+        }"
+      >
+        <span>{{ t("Drop files to open") }}</span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -621,5 +638,27 @@ html, body, #app {
   min-height: 0;
   position: relative;
   background: #1e1e1e;
+}
+.file-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  pointer-events: none;
+}
+.file-drop-target {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 13px;
+}
+.file-drop-target span {
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: rgba(20, 20, 20, 0.85);
 }
 </style>

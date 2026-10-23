@@ -151,6 +151,13 @@ export const api = {
   readFilePreview(target: string, cwd?: string): Promise<FilePreview> {
     return invoke("read_file_preview", { target, cwd });
   },
+  /**
+   * Paths of the files an OS drag just dropped on the window (macOS only;
+   * empty elsewhere). May be stale — match the names against the drop.
+   */
+  droppedFilePaths(): Promise<string[]> {
+    return invoke("dropped_file_paths");
+  },
   writeFile(path: string, contents: string): Promise<void> {
     return invoke("write_file", { path, contents });
   },
@@ -235,6 +242,18 @@ export function base64ToBytes(b64: string): Uint8Array {
 
 export function stringToBase64(str: string): string {
   return bytesToBase64(new TextEncoder().encode(str));
+}
+
+export interface ExternalFileDropPayload {
+  id: string;
+  paths: string[];
+}
+
+/** Paths recovered by the Windows backend for a posted file drop. */
+export function onExternalFileDrop(
+  handler: (payload: ExternalFileDropPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ExternalFileDropPayload>("external-file-drop", (e) => handler(e.payload));
 }
 
 /** External launch requests that arrive while the window is already open. */

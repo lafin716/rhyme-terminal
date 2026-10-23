@@ -625,7 +625,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="pane" :class="{ focused: isFocused }" @mousedown="onPaneClick">
+  <div class="pane" :class="{ focused: isFocused }" :data-leaf-id="leaf.id" @mousedown="onPaneClick">
     <div ref="titlebarRow" class="tab-row" data-tauri-drag-region>
     <div class="tab-bar" :style="titlebarStyle" @dragover="onTabBarDragOver" @dragleave="onTabBarDragLeave" @drop="onTabDropAtIndex($event, tabInsertIndex ?? leaf.tabs.length)">
       <template v-for="(id, i) in leaf.tabs" :key="id">

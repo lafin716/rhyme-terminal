@@ -17,6 +17,7 @@ import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import MarkdownIt from "markdown-it";
+import ImageViewer from "./ImageViewer.vue";
 import { base64ToBytes, type FilePreview } from "../lib/tauri";
 import { canShowSource, effectiveViewerMode, resolveViewerMode } from "../lib/viewer-mode";
 import { useResources } from "../composables/useResources";
@@ -49,28 +50,26 @@ const mode = computed(() => resolveViewerMode(props.preview));
 const showSource = ref(false);
 const view = computed(() => effectiveViewerMode(mode.value, showSource.value));
 
-const imageSrc = computed(() =>
-  props.preview.data ? `data:${props.preview.mime};base64,${props.preview.data}` : "",
-);
-
 // Render the live draft, not the on-disk text, so edits made in the source view
 // are visible the moment the user switches back to the preview.
 const markdownHtml = computed(() =>
   view.value === "markdown" ? md.render(fileTab.value?.draftText ?? props.preview.text ?? "") : "",
 );
 
-// Feed the PDF to the webview's native viewer via a same-origin blob URL built
-// from the base64 bytes the backend shipped. The object URL is revoked when the
-// preview changes or the component unmounts (via watchEffect's cleanup).
-const pdfSrc = ref("");
+// Feed images and PDFs to the webview via a same-origin blob URL built from
+// the base64 bytes the backend shipped; the PDF goes to the native viewer.
+// The object URL is revoked when the preview changes or the component
+// unmounts (via watchEffect's cleanup).
+const blobSrc = ref("");
 watchEffect((onCleanup) => {
-  if (mode.value !== "pdf" || !props.preview.data) {
-    pdfSrc.value = "";
+  if ((mode.value !== "pdf" && mode.value !== "image") || !props.preview.data) {
+    blobSrc.value = "";
     return;
   }
-  const blob = new Blob([base64ToBytes(props.preview.data)], { type: "application/pdf" });
+  const type = mode.value === "pdf" ? "application/pdf" : props.preview.mime;
+  const blob = new Blob([base64ToBytes(props.preview.data)], { type });
   const url = URL.createObjectURL(blob);
-  pdfSrc.value = url;
+  blobSrc.value = url;
   onCleanup(() => URL.revokeObjectURL(url));
 });
 
@@ -202,15 +201,13 @@ onBeforeUnmount(disposeEditor);
       <span class="meta">{{ preview.language }} · {{ preview.size.toLocaleString() }} {{ t("bytes") }}</span>
     </div>
 
-    <div v-if="view === 'image'" class="image-wrap">
-      <img :src="imageSrc" :alt="preview.name" />
-    </div>
+    <ImageViewer v-if="view === 'image'" :src="blobSrc" :name="preview.name" />
     <!-- Rendered read-only Markdown; markdown-it emits safe HTML (html: false). -->
     <div v-else-if="view === 'markdown'" class="markdown-body" v-html="markdownHtml" />
     <iframe
       v-else-if="view === 'pdf'"
       class="pdf-frame"
-      :src="pdfSrc"
+      :src="blobSrc"
       :title="preview.name"
     />
     <div v-else-if="view === 'binary'" class="message">{{ t("Binary files cannot be previewed.") }}</div>
@@ -263,7 +260,7 @@ button {
   min-height: 0;
   overflow: auto;
 }
-.image-wrap, .message {
+.message {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -272,7 +269,6 @@ button {
   overflow: auto;
   color: #888;
 }
-img { max-width: 100%; max-height: 100%; object-fit: contain; }
 
 .pdf-frame {
   flex: 1;

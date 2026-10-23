@@ -279,6 +279,9 @@ pub async fn rename_session(client: ClientState<'_>, id: Uuid, name: String) -> 
 }
 
 const MAX_PREVIEW_BYTES: u64 = 5 * 1024 * 1024;
+/// Images and PDFs ship as base64 and are not loaded into an editor, so photos
+/// and scans get a far larger budget than text.
+const MAX_MEDIA_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -352,7 +355,13 @@ fn read_file_preview_sync(target: &str, cwd: Option<&str>) -> Result<FilePreview
         .to_string();
     let canonical_path = canonical.to_string_lossy().into_owned();
 
-    if size > MAX_PREVIEW_BYTES {
+    let is_media = mime.starts_with("image/") || mime == "application/pdf";
+    let limit = if is_media {
+        MAX_MEDIA_PREVIEW_BYTES
+    } else {
+        MAX_PREVIEW_BYTES
+    };
+    if size > limit {
         return Ok(FilePreview {
             canonical_path,
             name,
@@ -800,11 +809,13 @@ fn file_type(extension: &str) -> (&'static str, &'static str) {
         "c" | "h" => ("c", "text/plain"),
         "cpp" | "cc" | "cxx" | "hpp" => ("cpp", "text/plain"),
         "png" => ("image", "image/png"),
-        "jpg" | "jpeg" => ("image", "image/jpeg"),
+        "jpg" | "jpeg" | "jfif" => ("image", "image/jpeg"),
         "gif" => ("image", "image/gif"),
         "webp" => ("image", "image/webp"),
         "bmp" => ("image", "image/bmp"),
         "svg" => ("image", "image/svg+xml"),
+        "ico" => ("image", "image/x-icon"),
+        "avif" => ("image", "image/avif"),
         _ => ("plaintext", "text/plain"),
     }
 }
@@ -1254,6 +1265,21 @@ mod preview_tests {
         assert!(preview.data.is_some());
         assert!(preview.text.is_none());
         assert_eq!(preview.size, bytes.len() as u64);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn previews_images_past_the_text_size_limit() {
+        let dir = temp_dir("image");
+        let file = dir.join("photo.png");
+        let size = super::MAX_PREVIEW_BYTES + 1;
+        fs::write(&file, vec![0u8; size as usize]).unwrap();
+
+        let preview = super::read_file_preview_sync(file.to_str().unwrap(), None).unwrap();
+        assert_eq!(preview.kind, "image");
+        assert_eq!(preview.mime, "image/png");
+        assert!(preview.data.is_some());
 
         fs::remove_dir_all(&dir).ok();
     }

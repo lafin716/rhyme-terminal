@@ -3362,6 +3362,8 @@ dependencies = [
  "hyper-util",
  "if-addrs",
  "libc",
+ "objc2-app-kit",
+ "objc2-foundation",
  "parking_lot",
  "portable-pty",
  "qrcode",
@@ -3381,6 +3383,8 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "webview2-com",
+ "windows-core 0.61.2",
  "windows-registry",
 ]
 

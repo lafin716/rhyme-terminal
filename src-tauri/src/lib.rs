@@ -3,6 +3,8 @@ pub mod commands;
 #[cfg(desktop)]
 pub mod daemon;
 #[cfg(desktop)]
+pub mod file_drop;
+#[cfg(desktop)]
 pub mod flow;
 #[cfg(desktop)]
 pub mod ipc;
@@ -123,6 +125,8 @@ pub fn run() {
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_icon(icon)?;
+                #[cfg(windows)]
+                file_drop::install(&window)?;
             }
 
             tray::build_tray(app.handle())?;
@@ -217,6 +221,7 @@ pub fn run() {
             commands::get_account_token,
             usage::get_account_usage,
             commands::read_file_preview,
+            file_drop::dropped_file_paths,
             commands::resolve_resource_path,
             commands::write_file,
             commands::read_directory,

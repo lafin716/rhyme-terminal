@@ -21,6 +21,8 @@ export interface FileTab {
   dirty?: boolean;
   draftText?: string;
   untitled?: boolean;
+  /** File name Save As offers for an untitled tab. */
+  suggestedName?: string;
   projectPath?: string;
   saving?: boolean;
 }
@@ -153,6 +155,23 @@ export function useResources() {
     setFocusedLeaf(leafId);
   }
 
+  /**
+   * Opens a tab over content that has no file behind it (a dropped file whose
+   * path could not be recovered). It saves like an untitled page.
+   */
+  function openPreview(preview: FilePreview): void {
+    const ws = activeWorkspace.value;
+    const leafId = targetLeafId();
+    if (!ws || !leafId) return;
+    const id = nodeId("resource-file");
+    state.tabs[id] = {
+      kind: "file", id, untitled: true, suggestedName: preview.name,
+      projectPath: ws.settings.defaultCwd, preview,
+    };
+    addTabToLeaf(ws.layout, leafId, id);
+    setFocusedLeaf(leafId);
+  }
+
   function updateFileDraft(id: string, text: string): void {
     const tab = state.tabs[id];
     if (tab?.kind !== "file") return;
@@ -168,9 +187,10 @@ export function useResources() {
       let path = tab.preview.canonicalPath;
       if (tab.untitled) {
         const root = tab.projectPath?.replace(/[\\/]+$/, "");
+        const name = tab.suggestedName || "Untitled.txt";
         const chosen = await chooseSavePath({
           title: t("Save File"),
-          defaultPath: root ? `${root}\\Untitled.txt` : "Untitled.txt",
+          defaultPath: root ? `${root}\\${name}` : name,
         });
         if (!chosen) return false;
         path = chosen;
@@ -182,6 +202,7 @@ export function useResources() {
       tab.preview.text = text;
       tab.preview.size = new TextEncoder().encode(text).length;
       tab.untitled = false;
+      tab.suggestedName = undefined;
       tab.dirty = (tab.draftText ?? text) !== text;
       return true;
     } finally {
@@ -226,6 +247,7 @@ export function useResources() {
     getById,
     openFile,
     openNewPage,
+    openPreview,
     updateFileDraft,
     saveFile,
     openBrowser,

@@ -410,5 +410,13 @@ export const ko: Record<string, string> = {
   "Aqua Teal": "아쿠아 틸",
   "Amber": "앰버",
   "Ember": "엠버",
-  "Rose": "로즈"
+  "Rose": "로즈",
+  "Drop files to open": "파일을 놓아서 열기",
+  "This image could not be displayed.": "이미지를 표시할 수 없습니다.",
+  "Zoom in": "확대",
+  "Zoom out": "축소",
+  "Fit to window": "창에 맞추기",
+  "Fit": "맞춤",
+  "Actual size": "실제 크기",
+  "Rotate": "회전"
 };
