@@ -3,6 +3,10 @@
 
 fn main() {
     #[cfg(desktop)]
+    if winmux_lib::mobile_pairing::cli::dispatch() {
+        return;
+    }
+    #[cfg(desktop)]
     if winmux_lib::loop_routing::bridge::dispatch() {
         return;
     }
@@ -13,7 +17,7 @@ fn main() {
     #[cfg(desktop)]
     if std::env::args().nth(1).as_deref() == Some(winmux_lib::DAEMON_ARG) {
         if let Err(error) = winmux_lib::daemon::run() {
-            eprintln!("winmuxd failed: {error}");
+            eprintln!("Rhyme Terminal daemon failed: {error}");
             std::process::exit(1);
         }
         return;

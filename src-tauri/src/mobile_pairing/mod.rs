@@ -8,6 +8,7 @@ use std::{
 use tokio::sync::watch;
 use uuid::Uuid;
 
+pub mod cli;
 mod gateway;
 const INVITE_MS: u64 = 120_000;
 fn now_ms() -> u64 {
@@ -300,6 +301,28 @@ impl MobilePairing {
         drop(current);
         self.status().await
     }
+
+    async fn invite(&self) -> Result<PairingStatus, String> {
+        let running = self.running.lock().await;
+        if !running.as_ref().is_some_and(|r| !r.task.is_finished()) {
+            return Err("먼저 서버를 시작하세요.".into());
+        }
+        self.pairings.lock().invite(now_ms());
+        drop(running);
+        Ok(self.status().await)
+    }
+
+    async fn approve(&self, request_id: &str, approve: bool) -> Result<PairingStatus, String> {
+        self.pairings
+            .lock()
+            .approve(request_id, approve, now_ms())?;
+        Ok(self.status().await)
+    }
+
+    async fn revoke(&self, device_id: &str) -> Result<PairingStatus, String> {
+        self.pairings.lock().revoke(device_id)?;
+        Ok(self.status().await)
+    }
 }
 fn interfaces() -> Result<Vec<NetworkInterface>, String> {
     let mut result = if_addrs::get_if_addrs()
@@ -357,13 +380,7 @@ pub async fn mobile_pairing_stop(
 pub async fn mobile_pairing_invite(
     state: tauri::State<'_, MobilePairing>,
 ) -> Result<PairingStatus, String> {
-    let running = state.running.lock().await;
-    if !running.as_ref().is_some_and(|r| !r.task.is_finished()) {
-        return Err("먼저 서버를 시작하세요.".into());
-    }
-    state.pairings.lock().invite(now_ms());
-    drop(running);
-    Ok(state.status().await)
+    state.invite().await
 }
 #[tauri::command]
 pub async fn mobile_pairing_approve(
@@ -371,19 +388,14 @@ pub async fn mobile_pairing_approve(
     request_id: String,
     approve: bool,
 ) -> Result<PairingStatus, String> {
-    state
-        .pairings
-        .lock()
-        .approve(&request_id, approve, now_ms())?;
-    Ok(state.status().await)
+    state.approve(&request_id, approve).await
 }
 #[tauri::command]
 pub async fn mobile_pairing_revoke(
     state: tauri::State<'_, MobilePairing>,
     device_id: String,
 ) -> Result<PairingStatus, String> {
-    state.pairings.lock().revoke(&device_id)?;
-    Ok(state.status().await)
+    state.revoke(&device_id).await
 }
 
 #[cfg(test)]

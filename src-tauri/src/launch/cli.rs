@@ -44,7 +44,7 @@ struct Cli {
 /// Arguments this process must never read as a launch request: they select a
 /// different program entirely and are dispatched before the GUI starts.
 pub fn is_reserved(argument: &str) -> bool {
-    argument == crate::DAEMON_ARG || argument.starts_with("--winmux-")
+    argument == "--server" || argument == crate::DAEMON_ARG || argument.starts_with("--winmux-")
 }
 
 /// Parse a process's arguments (including argv[0]).
@@ -198,6 +198,7 @@ mod tests {
 
     #[test]
     fn daemon_and_internal_switches_are_reserved() {
+        assert!(is_reserved("--server"));
         assert!(is_reserved(crate::DAEMON_ARG));
         assert!(!is_reserved("--cwd"));
     }

@@ -10,7 +10,7 @@ pub fn run() -> Result<()> {
     #[cfg(windows)]
     enable_ctrl_c();
     init_logging();
-    tracing::info!("winmuxd starting");
+    tracing::info!("rhyme-terminal-daemon starting");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

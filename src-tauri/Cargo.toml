@@ -20,12 +20,12 @@ name = "rhyme-terminal"
 path = "src/main.rs"
 
 [[bin]]
-name = "winmuxd"
-path = "src/bin/winmuxd.rs"
+name = "rhyme-terminal-daemon"
+path = "src/bin/daemon.rs"
 
 [[bin]]
-name = "winmuxctl"
-path = "src/bin/winmuxctl.rs"
+name = "rhyme-terminal-cli"
+path = "src/bin/cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

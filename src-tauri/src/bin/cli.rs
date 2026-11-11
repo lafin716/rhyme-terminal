@@ -7,7 +7,11 @@ use winmux_lib::ipc::protocol::{AttachResult, Method};
 use winmux_lib::pty::SessionInfo;
 
 #[derive(Parser)]
-#[command(name = "winmuxctl", about = "Control the winmux daemon", version)]
+#[command(
+    name = "rhyme-terminal-cli",
+    about = "Control Rhyme Terminal sessions and serve mobile connections",
+    version
+)]
 struct Cli {
     /// Emit machine-readable JSON instead of the default human-readable output
     #[arg(long, global = true)]
@@ -18,6 +22,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Serve mobile terminal connections without opening the desktop app
+    Serve(winmux_lib::mobile_pairing::cli::ServerOptions),
     /// List sessions
     Ls,
     /// Create a new session
@@ -71,13 +77,27 @@ enum Cmd {
     Kill { target: String },
     /// Rename a session by id-prefix or name
     Rename { target: String, name: String },
-    /// Stop the winmux daemon
+    /// Stop the Rhyme Terminal PTY daemon
     KillServer,
     /// Ping the daemon
     Ping,
 }
 
 fn main() {
+    if winmux_lib::loop_routing::bridge::dispatch() {
+        return;
+    }
+    #[cfg(unix)]
+    if winmux_lib::unix_cli::dispatch() {
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some(winmux_lib::DAEMON_ARG) {
+        if let Err(error) = winmux_lib::daemon::run() {
+            eprintln!("Rhyme Terminal daemon failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let cli = Cli::parse();
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -94,8 +114,12 @@ fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
+    if let Cmd::Serve(options) = &cli.cmd {
+        return winmux_lib::mobile_pairing::cli::run(options.clone(), json).await;
+    }
     let client = DaemonClient::connect_or_spawn().await?;
     match cli.cmd {
+        Cmd::Serve(_) => unreachable!("serve is dispatched before daemon commands"),
         Cmd::Ls => {
             let sessions: Vec<SessionInfo> = client.request(Method::ListSessions).await?;
             if json {
@@ -463,21 +487,40 @@ mod tests {
 
     #[test]
     fn parses_ls_with_global_json() {
-        let cli = Cli::try_parse_from(["winmuxctl", "ls", "--json"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "ls", "--json"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.cmd, Cmd::Ls));
     }
 
     #[test]
+    fn parses_serve_with_bind_and_global_json() {
+        let cli = Cli::try_parse_from([
+            "rhyme-terminal-cli",
+            "serve",
+            "--bind",
+            "127.0.0.1",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        let Cmd::Serve(options) = cli.cmd else {
+            panic!("expected Serve");
+        };
+        assert_eq!(options.bind.unwrap().to_string(), "127.0.0.1");
+        assert_eq!(options.port, 43123);
+    }
+
+    #[test]
     fn parses_global_json_before_subcommand() {
-        let cli = Cli::try_parse_from(["winmuxctl", "--json", "ls"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "--json", "ls"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.cmd, Cmd::Ls));
     }
 
     #[test]
     fn parses_new_with_short_name_and_cols() {
-        let cli = Cli::try_parse_from(["winmuxctl", "new", "-s", "dev", "--cols", "100"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "new", "-s", "dev", "--cols", "100"])
+            .unwrap();
         assert!(!cli.json);
         match cli.cmd {
             Cmd::New {
@@ -503,7 +546,7 @@ mod tests {
 
     #[test]
     fn parses_kill_target() {
-        let cli = Cli::try_parse_from(["winmuxctl", "kill", "abc"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "kill", "abc"]).unwrap();
         match cli.cmd {
             Cmd::Kill { target } => assert_eq!(target, "abc"),
             _ => panic!("expected Kill"),
@@ -512,7 +555,7 @@ mod tests {
 
     #[test]
     fn parses_rename_target_and_name() {
-        let cli = Cli::try_parse_from(["winmuxctl", "rename", "abc", "newname"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "rename", "abc", "newname"]).unwrap();
         match cli.cmd {
             Cmd::Rename { target, name } => {
                 assert_eq!(target, "abc");
@@ -572,7 +615,8 @@ mod tests {
 
     #[test]
     fn parses_write_with_data_and_enter() {
-        let cli = Cli::try_parse_from(["winmuxctl", "write", "dev", "echo hi", "--enter"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "write", "dev", "echo hi", "--enter"])
+            .unwrap();
         match cli.cmd {
             Cmd::Write {
                 target,
@@ -589,7 +633,7 @@ mod tests {
 
     #[test]
     fn parses_write_stdin_marker() {
-        let cli = Cli::try_parse_from(["winmuxctl", "write", "dev", "-"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "write", "dev", "-"]).unwrap();
         match cli.cmd {
             Cmd::Write {
                 target,
@@ -607,7 +651,7 @@ mod tests {
     #[test]
     fn parses_resize_with_cols_and_rows() {
         let cli = Cli::try_parse_from([
-            "winmuxctl",
+            "rhyme-terminal-cli",
             "resize",
             "dev",
             "--cols",
@@ -628,7 +672,7 @@ mod tests {
 
     #[test]
     fn parses_dump_target() {
-        let cli = Cli::try_parse_from(["winmuxctl", "dump", "dev"]).unwrap();
+        let cli = Cli::try_parse_from(["rhyme-terminal-cli", "dump", "dev"]).unwrap();
         match cli.cmd {
             Cmd::Dump { target } => assert_eq!(target, "dev"),
             _ => panic!("expected Dump"),
@@ -637,7 +681,8 @@ mod tests {
 
     #[test]
     fn parses_new_with_workspace_and_name() {
-        let cli = Cli::try_parse_from(["winmuxctl", "new", "-w", "1", "-s", "dev"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["rhyme-terminal-cli", "new", "-w", "1", "-s", "dev"]).unwrap();
         match cli.cmd {
             Cmd::New {
                 name, workspace, ..

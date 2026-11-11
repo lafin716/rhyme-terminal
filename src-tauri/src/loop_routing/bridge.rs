@@ -242,7 +242,7 @@ mod tests {
         .into_owned()
     }
     #[test]
-    #[ignore = "Requires cargo build --bin winmuxd; exercises real ConPTY with GUI-subsystem helper"]
+    #[ignore = "Requires cargo build --bin rhyme-terminal-daemon; exercises real ConPTY with GUI-subsystem helper"]
     fn gui_helper_preserves_interactive_stdio_and_waits_for_child() {
         let root =
             std::env::temp_dir().join(format!("rhyme-conpty-bridge-{}", uuid::Uuid::new_v4()));
@@ -253,7 +253,7 @@ mod tests {
             .unwrap()
             .parent()
             .unwrap()
-            .join("winmuxd.exe");
+            .join("rhyme-terminal-daemon.exe");
         let mut bytes = fs::read(built).unwrap();
         let pe = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize;
         bytes[pe + 24 + 68..pe + 24 + 70].copy_from_slice(&2u16.to_le_bytes());

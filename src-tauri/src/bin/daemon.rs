@@ -9,7 +9,7 @@ fn main() {
         return;
     }
     if let Err(e) = winmux_lib::daemon::run() {
-        eprintln!("winmuxd failed: {e}");
+        eprintln!("Rhyme Terminal daemon failed: {e}");
         std::process::exit(1);
     }
 }

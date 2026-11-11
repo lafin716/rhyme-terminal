@@ -60,7 +60,7 @@ pub fn run() {
 
     let client = rt
         .block_on(DaemonClient::connect_or_spawn())
-        .expect("failed to connect/spawn winmuxd");
+        .expect("failed to connect/spawn the Rhyme Terminal daemon");
 
     // Hold the runtime alive for background tasks (event forwarder, IPC reader).
     let rt = Arc::new(rt);

@@ -30,7 +30,7 @@ Android 생성 프로젝트는 현재 없다. runner에서 없을 때만 공식 
 | Node | CI에서 22.x 사용, package.json에 최소 22.14.0 지정 |
 | Rust | edition 2021, stable + rustfmt + clippy |
 | Cargo | `src-tauri/Cargo.toml`, `Cargo.lock` 커밋됨 |
-| bin / lib | `rhyme-terminal`, `winmuxd`, `winmuxctl` / `winmux_lib` |
+| bin / lib | `rhyme-terminal`, `rhyme-terminal-daemon`, `rhyme-terminal-cli` / `winmux_lib` |
 | 기존 script | dev, build, build:mobile, build:portable, preview, tauri, test |
 | 추가 script | lint (ESLint), typecheck (vue-tsc), build:android |
 | 테스트 | Vitest와 Rust 단위/통합 테스트가 이미 있음 |
@@ -365,7 +365,7 @@ Actions → Build → all로 세 플랫폼의 artifact 생성을 확인한다.
 - `package.json`, `pnpm-lock.yaml`, `eslint.config.js`, `vitest.config.ts`:
   실제 lint/typecheck 명령과 개발 도구, Windows에서도 안정적인 테스트 실행 설정.
 - `.gitattributes`, `.gitignore`: shell script LF 유지와 signing/빌드 파일 제외.
-- `src-tauri/src/commands.rs`, `src-tauri/src/bin/winmuxctl.rs`: rustfmt 정리만 적용.
+- `src-tauri/src/commands.rs`, `src-tauri/src/bin/cli.rs`: rustfmt 정리만 적용.
 - `src/components/PalettePopover.vue`: 곧바로 덮어쓰는 불필요한 초기 대입만 제거.
 - `src-tauri/src/ipc/transport.rs`, `platform.rs`, `unix_cli.rs` 및 desktop 모듈: macOS IPC와 CLI 실행 환경.
 - `src-tauri/src/mobile.rs`, `tauri.android.conf.json`, `src/native-mobile/`, `native-mobile.html`, `vite.android.config.ts`: Android 진입점과 PC 연결 화면.

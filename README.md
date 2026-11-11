@@ -165,15 +165,21 @@ cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 <details>
 <summary><strong>CLI와 데이터 저장 위치</strong></summary>
 
-GUI와 별도로 `winmuxctl` CLI와 `winmuxd` 데몬을 빌드할 수 있습니다. 내부 실행 파일명과 저장 키는 기존 `winmux` 식별자를 유지합니다.
+GUI와 별도로 `rhyme-terminal-cli` CLI와 `rhyme-terminal-daemon` 데몬을 빌드할 수 있습니다. 기존 설정과 세션을 유지하기 위해 내부 저장 키와 IPC 식별자는 `winmux`를 유지합니다.
 
 ```powershell
-cargo build --manifest-path src-tauri/Cargo.toml --release --bin winmuxctl --bin winmuxd
-.\src-tauri\target\release\winmuxctl.exe ls
-.\src-tauri\target\release\winmuxctl.exe ping
+cargo build --manifest-path src-tauri/Cargo.toml --release --bin rhyme-terminal-cli --bin rhyme-terminal-daemon
+.\src-tauri\target\release\rhyme-terminal-cli.exe ls
+.\src-tauri\target\release\rhyme-terminal-cli.exe ping
+.\src-tauri\target\release\rhyme-terminal-cli.exe serve --bind 100.100.10.20
 ```
 
-데몬은 필요할 때 자동으로 시작합니다. GUI 실행 파일은 별도 `winmuxd.exe`가 없으면 자체 데몬 모드로 실행할 수 있습니다.
+데몬은 필요할 때 자동으로 시작합니다. GUI와 CLI 실행 파일은 별도 데몬 파일 없이 자체 데몬 모드로 실행할 수 있습니다.
+
+설치된 `rhyme-terminal.exe --server --bind <PC-IP>`로도 창 없이 모바일 연결 서버를 실행할 수 있습니다.
+PowerShell에서는 `& "실행파일 경로" --server --bind <PC-IP> | Out-Host`로 실행합니다.
+터미널에 출력된 초대 링크를 Android 앱에 붙여넣고 확인 코드를 비교한 뒤 `approve <request-id>`로 승인합니다.
+기본 세션 생성, 셸·폴더 지정, 기기 접근 해제는 [CLI 서버 사용법](docs/mobile-pairing.md#gui-없이-cli-서버만-실행)을 참고하세요.
 
 | 데이터 | 위치 |
 | --- | --- |

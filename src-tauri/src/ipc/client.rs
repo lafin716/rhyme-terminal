@@ -230,12 +230,13 @@ fn daemon_command() -> Result<(PathBuf, Option<&'static str>)> {
 }
 
 fn daemon_command_for(current: PathBuf) -> Result<(PathBuf, Option<&'static str>)> {
-    // Prefer the embedded daemon from the same GUI build over a stale sidecar.
+    // GUI and standalone CLI binaries both contain their matching daemon.
     let current_name = current
         .file_stem()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     if current_name.eq_ignore_ascii_case("rhyme-terminal")
+        || current_name.eq_ignore_ascii_case("rhyme-terminal-cli")
         || current_name.eq_ignore_ascii_case("winmux")
     {
         return Ok((current, Some(crate::DAEMON_ARG)));
@@ -243,20 +244,19 @@ fn daemon_command_for(current: PathBuf) -> Result<(PathBuf, Option<&'static str>
     let dir = current
         .parent()
         .ok_or_else(|| anyhow!("current exe has no parent dir"))?;
-    let name = if cfg!(windows) {
-        "winmuxd.exe"
-    } else {
-        "winmuxd"
-    };
-    let standalone_daemon = dir.join(name);
-
-    if standalone_daemon.exists() {
-        return Ok((standalone_daemon, None));
+    for name in ["rhyme-terminal-daemon", "winmuxd"] {
+        let path = dir.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        });
+        if path.exists() {
+            return Ok((path, None));
+        }
     }
-
     bail!(
-        "winmuxd executable not found at {}",
-        standalone_daemon.display()
+        "Rhyme Terminal daemon executable not found in {}",
+        dir.display()
     )
 }
 
@@ -270,7 +270,7 @@ mod mobile_lifetime_tests {
         std::fs::create_dir(&dir).unwrap();
         let standalone = dir.join("winmuxd.exe");
         std::fs::write(&standalone, b"old build").unwrap();
-        for name in ["rhyme-terminal.exe", "winmux.exe"] {
+        for name in ["rhyme-terminal.exe", "rhyme-terminal-cli.exe", "winmux.exe"] {
             let gui = dir.join(name);
             assert_eq!(
                 daemon_command_for(gui.clone()).unwrap(),
@@ -386,5 +386,48 @@ mod mobile_lifetime_tests {
                 .unwrap()
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod daemon_command_tests {
+    use super::*;
+
+    fn binary(name: &str) -> String {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_owned()
+        }
+    }
+
+    #[test]
+    fn renamed_cli_uses_its_embedded_daemon_without_a_sidecar() {
+        let current =
+            PathBuf::from("/rhyme-test-missing-directory").join(binary("rhyme-terminal-cli"));
+        assert_eq!(
+            daemon_command_for(current.clone()).unwrap(),
+            (current, Some(crate::DAEMON_ARG))
+        );
+    }
+
+    #[test]
+    fn legacy_cli_prefers_renamed_daemon_and_still_accepts_legacy_sidecars() {
+        let directory =
+            std::env::temp_dir().join(format!("rhyme-daemon-names-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let modern = directory.join(binary("rhyme-terminal-daemon"));
+        let legacy = directory.join(binary("winmuxd"));
+        let cli = directory.join(binary("winmuxctl"));
+        std::fs::write(&modern, b"modern fixture").unwrap();
+        std::fs::write(&legacy, b"legacy fixture").unwrap();
+        assert_eq!(
+            daemon_command_for(cli.clone()).unwrap(),
+            (modern.clone(), None)
+        );
+        std::fs::remove_file(modern).unwrap();
+        assert_eq!(daemon_command_for(cli).unwrap(), (legacy.clone(), None));
+        std::fs::remove_file(legacy).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 }

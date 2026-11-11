@@ -129,7 +129,7 @@ fn absolute(base: &Path, path: &str) -> Option<PathBuf> {
     joined.canonicalize().ok().map(strip_verbatim)
 }
 
-fn strip_verbatim(path: PathBuf) -> PathBuf {
+pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
         // A UNC path keeps a leading `\\`, so it cannot simply lose the prefix.
