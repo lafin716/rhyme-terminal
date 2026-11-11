@@ -35,5 +35,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFN0RCMDMzMTc0ODIwRDIKUldUU0lFZ1hNN0I5YnJlaWtKc2laZEgrT0l4Z2E5cjBxaFQrcWE0MmtTNkJpTklRL2JlN3lNR1EK",
+      "endpoints": [
+        "https://github.com/lafin716/rhyme-terminal/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

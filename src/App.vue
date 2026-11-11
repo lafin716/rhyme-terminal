@@ -18,7 +18,6 @@ import SettingsModal from "./components/SettingsModal.vue";
 import ConfirmModal from "./components/ConfirmModal.vue";
 import PalettePopover from "./components/PalettePopover.vue";
 import QuickOpen from "./components/QuickOpen.vue";
-import FireworksOverlay from "./components/FireworksOverlay.vue";
 import { useSessions, nextDaemonName, displayName } from "./composables/useSessions";
 import { useWorkspaces, loadFromStorage, workspaceDefaultCwd } from "./composables/useWorkspaces";
 import { useFocus } from "./composables/useFocus";
@@ -542,7 +541,6 @@ onBeforeUnmount(() => {
     <SettingsModal v-if="settingsOpen" />
     <ConfirmModal />
     <PalettePopover />
-    <FireworksOverlay />
     <div v-if="fileDropHover" class="file-drop-overlay">
       <div
         v-if="fileDropHover.rect"

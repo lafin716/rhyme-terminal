@@ -19,6 +19,8 @@ pub mod pty;
 #[cfg(desktop)]
 pub mod tray;
 #[cfg(desktop)]
+pub mod updater;
+#[cfg(desktop)]
 pub mod usage;
 #[cfg(desktop)]
 pub mod usage_bridge;
@@ -68,6 +70,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::PendingUpdate::default())
         .manage(mobile_pairing::MobilePairing::default())
         .manage(client.clone())
         .manage(rt.clone())
@@ -209,6 +213,8 @@ pub fn run() {
             mobile_pairing::mobile_pairing_invite,
             mobile_pairing::mobile_pairing_approve,
             mobile_pairing::mobile_pairing_revoke,
+            updater::update_check,
+            updater::update_install,
             commands::create_session,
             commands::list_sessions,
             commands::kill_session,

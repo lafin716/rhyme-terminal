@@ -418,5 +418,20 @@ export const ko: Record<string, string> = {
   "Fit to window": "창에 맞추기",
   "Fit": "맞춤",
   "Actual size": "실제 크기",
-  "Rotate": "회전"
+  "Rotate": "회전",
+  "Check for updates": "업데이트 확인",
+  "Update available: {version}": "업데이트 가능: {version}",
+  "Software update": "소프트웨어 업데이트",
+  "Current version {version}": "현재 버전 {version}",
+  "Checking for updates…": "업데이트 확인 중…",
+  "You are on the latest version": "최신 버전을 사용하고 있습니다",
+  "Could not check for updates": "업데이트를 확인하지 못했습니다",
+  "Version {version} is available": "새 버전 {version}을(를) 설치할 수 있습니다",
+  "Download progress": "다운로드 진행률",
+  "Installing — the app will restart…": "설치 중 — 앱이 다시 시작됩니다…",
+  "Downloading… {size}": "다운로드 중… {size}",
+  "Downloading… {percent}%": "다운로드 중… {percent}%",
+  "Installing restarts the app and ends running terminal sessions.": "설치하면 앱이 다시 시작되고 실행 중인 터미널 세션이 종료됩니다.",
+  "Check again": "다시 확인",
+  "Install and restart": "설치 후 다시 시작"
 };

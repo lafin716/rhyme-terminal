@@ -26,6 +26,9 @@ jobs:
   windows:
     needs: version
     uses: ./.github/workflows/build-windows.yml
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
   macos:
     needs: version
     uses: ./.github/workflows/build-macos.yml
@@ -36,6 +39,8 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
   android:
     needs: version
     uses: ./.github/workflows/build-android.yml
@@ -53,18 +58,28 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: '*'
           path: artifacts
           merge-multiple: true
+      - name: Write updater manifest
+        env:
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ARTIFACTS_DIR: artifacts
+        run: node scripts/ci/updater-manifest.mjs
       - name: Publish all platform packages
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          mapfile -d '' files < <(find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.apk' -o -name '*.aab' \) -print0)
+          mapfile -d '' files < <(find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.apk' -o -name '*.aab' -o -name '*.sig' -o -name '*.app.tar.gz' -o -name 'latest.json' \) -print0)
           for extension in exe msi dmg apk aab; do
             if ! find artifacts -type f -name "*.$extension" -print -quit | grep -q .; then
               echo "::error::Missing release package: $extension"

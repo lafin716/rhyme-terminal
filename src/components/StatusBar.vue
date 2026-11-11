@@ -12,6 +12,9 @@ import { formatUsagePercent, formatUsageReset } from "../lib/usage-status";
 import { activeUsageProfiles } from "../lib/usage-active";
 import type { CliAgentKind } from "../lib/persistence";
 import { version } from "../../package.json";
+import { useUpdater } from "../composables/useUpdater";
+import { formatBytes, isUpdateBusy, progressPercent } from "../lib/updater";
+import { isTauri } from "@tauri-apps/api/core";
 
 const { focusedSession, state: sessionState } = useSessions();
 const { activeWorkspace, state: workspaceState } = useWorkspaces();
@@ -26,6 +29,28 @@ let trigger: HTMLElement | null = null;
 let timer: number | undefined;
 let polling: number | undefined;
 let sessionPolling: number | undefined;
+const updater = useUpdater();
+const update = updater.state;
+const updateOpen = ref(false);
+const updateDialog = ref<HTMLElement>();
+const updatePercent = computed(() => progressPercent(update.progress));
+const updateBusy = computed(() => isUpdateBusy(update.status));
+let updateTrigger: HTMLElement | null = null;
+let stopAutoCheck: (() => void) | null = null;
+async function showUpdate(event: MouseEvent) {
+  updateTrigger = event.currentTarget as HTMLElement;
+  updateOpen.value = true;
+  if (update.status !== "available" && !updateBusy.value) void updater.check();
+  await nextTick();
+  updateDialog.value?.focus();
+}
+function closeUpdate() {
+  // Closing mid-download would hide the only feedback while sessions are
+  // about to be stopped, so the dialog stays until the installer takes over.
+  if (update.status === "downloading" || update.status === "installing") return;
+  updateOpen.value = false;
+  updateTrigger?.focus();
+}
 const count = (agent: CliAgentKind) => targets.value.filter(p => p.agent === agent).length;
 const snapshotProfile = (sessionId: string) => workspaceState.workspaces
   .find(ws => ws.terminalSnapshots[sessionId])?.terminalSnapshots[sessionId]?.accountProfile;
@@ -67,19 +92,27 @@ function close() {
   open.value = false;
   trigger?.focus();
 }
+function trapFocus(event: KeyboardEvent, container: HTMLElement | undefined) {
+  const buttons = container?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
+  if (!buttons?.length) { event.preventDefault(); return; }
+  const first = buttons[0], last = buttons[buttons.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === container)) {
+    event.preventDefault(); last.focus();
+  } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === container)) {
+    event.preventDefault(); first.focus();
+  }
+}
 function onKey(event: KeyboardEvent) {
+  if (updateOpen.value) {
+    if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); closeUpdate(); }
+    else if (event.key === "Tab") trapFocus(event, updateDialog.value);
+    return;
+  }
   if (!open.value) return;
   if (event.key === "Escape") {
     event.preventDefault(); event.stopImmediatePropagation(); close();
   } else if (event.key === "Tab") {
-    const buttons = dialog.value?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)");
-    if (!buttons?.length) return;
-    const first = buttons[0], last = buttons[buttons.length - 1];
-    if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.value)) {
-      event.preventDefault(); last.focus();
-    } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog.value)) {
-      event.preventDefault(); first.focus();
-    }
+    trapFocus(event, dialog.value);
   }
 }
 // A profile that just started running has no sample yet: fetch it immediately
@@ -91,10 +124,12 @@ onMounted(() => {
   polling = window.setInterval(() => { if (!document.hidden) refreshActive(); }, 300_000);
   sessionPolling = window.setInterval(() => { if (!document.hidden) refreshActive(true); }, 10_000);
   window.addEventListener("keydown", onKey, true);
+  if (isTauri()) stopAutoCheck = updater.startAutoCheck();
 });
 onUnmounted(() => {
   window.clearInterval(timer); window.clearInterval(polling); window.clearInterval(sessionPolling);
   window.removeEventListener("keydown", onKey, true);
+  stopAutoCheck?.();
 });
 </script>
 
@@ -120,7 +155,10 @@ onUnmounted(() => {
         <Icon class="chevron" icon="lucide:chevron-up" />
       </button>
     </div>
-    <div class="right"><span>{{ time }}</span><span class="app-version">{{ version }}</span></div>
+    <div class="right"><span>{{ time }}</span><button type="button" class="app-version" :class="{ 'has-update': update.status === 'available' }"
+      :title="update.status === 'available' ? t('Update available: {version}', { version: update.info?.version ?? '' }) : t('Check for updates')"
+      aria-haspopup="dialog" :aria-expanded="updateOpen" aria-controls="update-dialog" @click="showUpdate">
+      <span>{{ version }}</span><Icon v-if="update.status === 'available'" class="update-ico" icon="lucide:arrow-up-circle" /></button></div>
   </div>
   <Teleport to="body">
     <div v-if="open" class="usage-backdrop" @mousedown.self="close">
@@ -151,6 +189,34 @@ onUnmounted(() => {
       </section>
     </div>
   </Teleport>
+  <Teleport to="body">
+    <div v-if="updateOpen" class="usage-backdrop update-backdrop" @mousedown.self="closeUpdate">
+      <section id="update-dialog" ref="updateDialog" class="usage-dialog update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title" tabindex="-1">
+        <header class="dialog-header">
+          <div><h2 id="update-title">{{ t('Software update') }}</h2><p>{{ t('Current version {version}', { version }) }}</p></div>
+          <button class="icon-button" :aria-label="t('Close')" :disabled="update.status === 'downloading' || update.status === 'installing'" @click="closeUpdate"><Icon icon="lucide:x" /></button>
+        </header>
+        <div class="update-body" aria-live="polite">
+          <div v-if="update.status === 'checking' || update.status === 'idle'" class="update-state"><Icon class="spinning" icon="lucide:refresh-cw" /><span>{{ t('Checking for updates…') }}</span></div>
+          <div v-else-if="update.status === 'up-to-date'" class="update-state ok"><Icon icon="lucide:circle-check" /><span>{{ t('You are on the latest version') }}</span></div>
+          <div v-else-if="update.status === 'error'" class="update-state error"><Icon icon="lucide:circle-alert" /><span>{{ t('Could not check for updates') }}<small>{{ update.error }}</small></span></div>
+          <template v-else-if="update.info">
+            <div class="update-state new"><Icon icon="lucide:arrow-up-circle" /><span>{{ t('Version {version} is available', { version: update.info.version }) }}</span></div>
+            <pre v-if="update.info.notes" class="update-notes">{{ update.info.notes }}</pre>
+            <div v-if="update.status === 'downloading' || update.status === 'installing'" class="update-progress">
+              <div class="meter" role="progressbar" :aria-label="t('Download progress')" :aria-valuenow="updatePercent ?? undefined" :aria-valuemin="0" :aria-valuemax="100"><span :class="{ indeterminate: updatePercent === null }" :style="{ width: `${updatePercent ?? 100}%` }" /></div>
+              <div class="reset">{{ update.status === 'installing' ? t('Installing — the app will restart…') : updatePercent === null ? t('Downloading… {size}', { size: formatBytes(update.progress?.downloaded ?? 0) }) : t('Downloading… {percent}%', { percent: updatePercent }) }}</div>
+            </div>
+            <p v-else class="update-warning"><Icon icon="lucide:triangle-alert" />{{ t('Installing restarts the app and ends running terminal sessions.') }}</p>
+          </template>
+        </div>
+        <footer class="update-actions">
+          <button type="button" class="update-button" :disabled="updateBusy" @click="updater.check()"><Icon :class="{ spinning: update.status === 'checking' }" icon="lucide:refresh-cw" />{{ t('Check again') }}</button>
+          <button v-if="update.status === 'available'" type="button" class="update-button primary" @click="updater.install()"><Icon icon="lucide:download" />{{ t('Install and restart') }}</button>
+        </footer>
+      </section>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -164,7 +230,21 @@ onUnmounted(() => {
 .usage-ico { font-size:14px; } .chevron { font-size:11px; opacity:.65; }
 .profile-count { font-size:10px; padding:0 4px; border-radius:3px; background:#00000012; }
 .status-dot { font-weight:800; color:#743411; } .right { margin-left:auto; flex-shrink:0; display:flex; align-items:center; gap:10px; white-space:nowrap; }
-.app-version { border-left:1px solid currentColor; padding-left:10px; font-variant-numeric:tabular-nums; }
+.app-version { border:0; border-left:1px solid currentColor; background:transparent; color:inherit; font:inherit; display:inline-flex; align-items:center; gap:4px; padding:0 2px 0 10px; height:22px; cursor:pointer; font-variant-numeric:tabular-nums; }
+.app-version:hover { background:#00000016; } .app-version:focus-visible { outline:2px solid #17483f; outline-offset:-2px; }
+.app-version.has-update { font-weight:700; } .update-ico { font-size:13px; }
+.update-backdrop { justify-content:flex-end; } .update-dialog { width:420px; }
+.update-body { padding:18px 22px; display:flex; flex-direction:column; gap:14px; }
+.update-state { display:flex; align-items:flex-start; gap:10px; font-size:13px; } .update-state > svg { flex-shrink:0; font-size:18px; margin-top:-1px; }
+.update-state small { display:block; margin-top:4px; font-size:11px; color:#a0a2aa; word-break:break-word; }
+.update-state.ok > svg { color:#79cab4; } .update-state.error > svg { color:#ef827d; } .update-state.new > svg { color:#70cdb8; }
+.update-notes { margin:0; max-height:180px; overflow:auto; padding:10px 12px; border-radius:6px; background:#28292d; color:#c6c8cf; font:12px/1.6 Segoe UI,sans-serif; white-space:pre-wrap; }
+.update-warning { display:flex; gap:6px; align-items:flex-start; color:#d6b893; font-size:11px; line-height:1.6; } .update-warning > svg { flex-shrink:0; margin-top:3px; }
+.meter span.indeterminate { opacity:.5; }
+.update-actions { display:flex; justify-content:flex-end; gap:8px; }
+.update-button { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border:1px solid #ffffff24; border-radius:6px; background:transparent; color:#dcdde2; font:12px Segoe UI,sans-serif; cursor:pointer; }
+.update-button:hover:not(:disabled) { background:#ffffff0c; } .update-button:disabled { opacity:.45; cursor:default; } .update-button:focus-visible { outline:2px solid #70cdb8; outline-offset:2px; }
+.update-button.primary { background:#70cdb8; border-color:#70cdb8; color:#10201c; font-weight:600; } .update-button.primary:hover { background:#86d8c5; }
 .usage-backdrop { position:fixed; inset:0; background:#0005; z-index:1200; display:flex; align-items:flex-end; justify-content:center; padding:16px 16px 32px; }
 .usage-dialog { width:760px; max-width:100%; max-height:calc(100dvh - 64px); display:flex; flex-direction:column; border:1px solid #444; border-radius:12px; background:#202124; color:#e8e8eb; box-shadow:0 20px 70px #0009; font-family:Segoe UI,sans-serif; outline:none; overflow:hidden; }
 .dialog-header { display:flex; gap:8px; align-items:center; padding:20px 22px 18px; border-bottom:1px solid #ffffff0d; }

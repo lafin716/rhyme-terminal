@@ -125,3 +125,31 @@ test("Android signing rejects incomplete secrets and never writes passwords into
   assert.doesNotMatch(readFileSync(join(root, gradle), "utf8"), /fixture-/);
   assert.doesNotMatch(result.stdout + result.stderr, /fixture-/);
 }));
+
+test("updater manifest points each platform at its signed release asset", () => fixture(root => {
+  write(root, "artifacts/nsis/rhyme-terminal_1.2.3_x64-setup.exe", "exe");
+  write(root, "artifacts/nsis/rhyme-terminal_1.2.3_x64-setup.exe.sig", "win-sig\n");
+  write(root, "artifacts/msi/rhyme-terminal_1.2.3_x64_en-US.msi.sig", "msi-sig");
+  write(root, "artifacts/macos/rhyme-terminal.app.tar.gz", "tgz");
+  write(root, "artifacts/macos/rhyme-terminal.app.tar.gz.sig", "mac-sig");
+  const env = { ARTIFACTS_DIR: join(root, "artifacts"), RELEASE_TAG: "v1.2.3", GH_REPO: "o/r" };
+  const result = run(root, "updater-manifest.mjs", env);
+  assert.equal(result.status, 0, result.stderr);
+  const manifest = JSON.parse(readFileSync(join(root, "artifacts/latest.json"), "utf8"));
+  assert.equal(manifest.version, "1.2.3");
+  assert.deepEqual(manifest.platforms["windows-x86_64"], {
+    signature: "win-sig",
+    url: "https://github.com/o/r/releases/download/v1.2.3/rhyme-terminal_1.2.3_x64-setup.exe",
+  });
+  assert.equal(manifest.platforms["darwin-aarch64"].url, "https://github.com/o/r/releases/download/v1.2.3/rhyme-terminal.app.tar.gz");
+  assert.equal(manifest.platforms["darwin-aarch64"].signature, "mac-sig");
+}));
+
+test("updater manifest is skipped without signatures and rejects missing packages", () => fixture(root => {
+  write(root, "artifacts/rhyme-terminal_1.2.3_x64-setup.exe", "exe");
+  const env = { ARTIFACTS_DIR: join(root, "artifacts"), RELEASE_TAG: "v1.2.3", GH_REPO: "o/r" };
+  assert.equal(run(root, "updater-manifest.mjs", env).status, 0);
+  assert.equal(existsSync(join(root, "artifacts/latest.json")), false);
+  write(root, "artifacts/rhyme-terminal_1.2.3_x64-setup.exe.sig", "sig");
+  assert.notEqual(run(root, "updater-manifest.mjs", env).status, 0);
+}));
